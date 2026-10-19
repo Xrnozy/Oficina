@@ -16,6 +16,28 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $daemonDir = Join-Path $root 'daemon'
 $script:daemonProc = $null
 $script:openedBrowser = $false
+$script:lastSeq = $null   # last notification seq shown (null = not seeded yet)
+$script:notifyTick = 0
+
+# Balloon tips for the three things worth interrupting the owner for:
+# a Needs-you decision, a run finishing, a run stopping badly. Everything
+# else stays in the event log.
+function Update-Notifications {
+    try {
+        $url = 'http://127.0.0.1:4780/api/notifications'
+        if ($script:lastSeq -ne $null) { $url += "?after=$($script:lastSeq)" }
+        $items = Invoke-RestMethod -Uri $url -TimeoutSec 2 -ErrorAction Stop
+        if ($script:lastSeq -eq $null) {
+            # first successful poll after launch: don't replay history
+            if ($items.Count -gt 0) { $script:lastSeq = ($items | Measure-Object -Property seq -Maximum).Maximum }
+            return
+        }
+        foreach ($n in $items) {
+            $script:lastSeq = [Math]::Max($script:lastSeq, $n.seq)
+            $ni.ShowBalloonTip(6000, "officeChain — $($n.title)", $n.body, 'Info')
+        }
+    } catch { }
+}
 
 # Fast non-blocking health probe — a TCP connect to the daemon port. Runs on
 # the WinForms UI thread every second, so it must never block: a refused or
@@ -112,6 +134,8 @@ $timer.Add_Tick({
             $script:openedBrowser = $true
             Start-Process 'http://localhost:4780'
         }
+        $script:notifyTick++
+        if ($script:notifyTick % 5 -eq 0) { Update-Notifications }
     } elseif ($miStatus.Text -ne 'daemon: down') {
         $miStatus.Text = 'daemon: down'
         $ni.Text = 'officeChain (down)'

@@ -40,6 +40,12 @@ const COMMIT_HELP: Record<string, string> = {
   auto: 'Committed automatically when checks and review passed and the commit contains only the task\'s own files; anything else still asks you.',
   manual: 'The office never commits; changes stay in the working tree for you.',
 };
+const APPROVAL_MODES = ['always-ask', 'ask-when-risky', 'auto'] as const;
+const APPROVAL_HELP: Record<string, string> = {
+  'always-ask': 'Every gated action waits in Needs you.',
+  'ask-when-risky': 'Low-risk change gates approve themselves — out-of-scope files, config/CI/secrets/lockfiles, deletions, large diffs and unverified changes still ask.',
+  'auto': 'Every change gate self-approves and logs why. Questions, escalations and plan/DoD decisions still need you.',
+};
 const TIERS = ['fast', 'standard', 'strong'] as const;
 const TIER_TONE: Record<string, Tone> = { fast: 'ok', standard: 'info', strong: 'warn' };
 const EFFORTS = ['default', 'auto', 'off', 'low', 'medium', 'high'] as const;
@@ -149,6 +155,7 @@ export default function Routing() {
   const prompts: (typeof PROMPTS)[number] = s.promptReview === 'off' ? 'off' : s.promptReview === 'all' ? 'all' : s.promptReview === 'handoffs' || s.promptReview === 'implement' ? 'handoffs' : 'pipeline';
   const workMode: (typeof WORK_MODES)[number] = s.workMode === 'isolated' ? 'isolated' : 'direct';
   const commitMode: (typeof COMMIT_MODES)[number] = s.commitMode === 'auto' ? 'auto' : s.commitMode === 'manual' ? 'manual' : 'approve';
+  const approvalMode: (typeof APPROVAL_MODES)[number] = s.approvalMode === 'ask-when-risky' ? 'ask-when-risky' : s.approvalMode === 'auto' ? 'auto' : 'always-ask';
   const setting = (patch: Record<string, unknown>, msg: string) => ws && act(put(`/workspaces/${ws.id}/settings`, patch), msg).then(reloadWs);
   const holders = (role: string) => (agents ?? []).filter((a) => (a.memberships ?? []).some((m: any) => m.role === role && m.active && m.workspace_id === ws?.id));
   const roles = ['pm', 'prompt-creator', 'developer', 'qa', ...EXTRA_ROLES.filter((r) => r !== 'prompt-creator' && holders(r).length)];
@@ -206,6 +213,9 @@ export default function Routing() {
             <div className="field-label">Commits</div>
             <Segmented value={commitMode} options={COMMIT_MODES} onChange={(v) => setting({ commitMode: v }, `Commits: ${v}`)} />
             <p className="text-xs text-fg-3 mt-1.5 mb-4">{COMMIT_HELP[commitMode]}</p>
+            <div className="field-label">Approvals</div>
+            <Segmented value={approvalMode} options={APPROVAL_MODES} onChange={(v) => setting({ approvalMode: v }, `Approvals: ${v}`)} />
+            <p className="text-xs text-fg-3 mt-1.5 mb-4">{APPROVAL_HELP[approvalMode]}</p>
             <div className="field-label">Prompt preparation</div>
             <Segmented value={prompts} options={PROMPTS} onChange={(v) => setting({ promptReview: v }, `PM prompts: ${v}`)} />
             <p className="text-xs text-fg-3 mt-1.5">{PROMPT_HELP[prompts]}</p>

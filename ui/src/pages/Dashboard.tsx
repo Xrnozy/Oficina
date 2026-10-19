@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { post, useQuery } from '../api';
 import {
@@ -33,6 +33,8 @@ export default function Dashboard() {
       {(!run || composing) && <NewRun onCancel={run ? () => setComposing(false) : undefined} />}
 
       {run && <RunCard run={run} detail={detail} live={!!live} />}
+
+      <DigestPanel />
 
       {run && (
         <div className="grid grid-cols-1 xl:grid-cols-[1.35fr_1fr] gap-5 [&>*]:min-w-0">
@@ -115,6 +117,47 @@ export default function Dashboard() {
 
       {run && <TokenReportPanel report={tokenReport} />}
     </div>
+  );
+}
+
+// "Since your last visit" (spec 5.4): what finished, what's stuck and why,
+// what it cost, and what still needs a decision. The visit timestamp lives
+// in localStorage and is stamped when the dashboard renders.
+function DigestPanel() {
+  const [since] = useState(() => localStorage.getItem('oc:lastVisit') ?? new Date(Date.now() - 24 * 3600e3).toISOString());
+  useEffect(() => { localStorage.setItem('oc:lastVisit', new Date().toISOString()); }, []);
+  const { data: d } = useQuery<any>(`/digest?since=${encodeURIComponent(since)}`);
+  if (!d) return null;
+  const quiet = !d.tasksDone.length && !d.tasksBlocked.length && !d.needsYou.length && !d.tokens?.calls;
+  return (
+    <Panel title="Since your last visit" action={<span className="text-2xs text-fg-4">{fmtAgo(since)}</span>}>
+      {quiet && <Muted>Nothing happened while you were away.</Muted>}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Stat label="Tasks done" value={d.tasksDone.length} />
+        <Stat label="Blocked / failed" value={d.tasksBlocked.length} hint={d.tasksBlocked.length ? 'see below' : undefined} />
+        <Stat label="Provider calls" value={fmtNum(d.tokens?.calls)} hint={d.tokens?.promptChars ? `${fmtNum(d.tokens.promptChars)} prompt chars · ${fmtUsd(d.tokens.costUsd)}` : undefined} />
+        <Stat label="Needs you" value={d.needsYou.length} hint={d.needsYou.length ? 'pending decisions' : 'inbox zero'} />
+      </div>
+      {(d.tasksDone.length > 0 || d.tasksBlocked.length > 0 || d.needsYou.length > 0) && (
+        <div className="mt-4 space-y-1.5">
+          {d.tasksDone.slice(0, 4).map((t: any) => (
+            <div key={t.id} className="flex items-center gap-2 text-sm"><CheckCircle2 size={13} className="text-ok shrink-0" /><span className="text-fg-2 truncate">{t.title}</span></div>
+          ))}
+          {d.tasksBlocked.map((t: any) => (
+            <div key={t.id} className="flex items-center gap-2 text-sm" title={t.reason ?? ''}>
+              <XCircle size={13} className="text-bad shrink-0" />
+              <span className="text-fg-2 truncate">{t.title}</span>
+              <span className="text-xs text-fg-3 truncate">{t.status}{t.reason ? ` — ${t.reason}` : ''}</span>
+            </div>
+          ))}
+          {d.needsYou.map((a: any) => (
+            <Link key={a.id} to="/approvals" className="flex items-center gap-2 text-sm hover:bg-raised rounded -mx-1 px-1 py-0.5">
+              <Tag tone="warn" mono>{a.action}</Tag><span className="text-fg-2 truncate">{a.summary}</span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 

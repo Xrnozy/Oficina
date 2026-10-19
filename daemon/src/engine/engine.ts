@@ -24,7 +24,7 @@ import { envelopeText, handoffEnvelope, STRICT_REPLY_KINDS, validateReply } from
 import { backoffDelayMs, classifyFailure, fixHintFor, notifyOnce } from '../services/failure.ts';
 import { getAdapter } from '../adapters/index.ts';
 import { killCliChildrenForRun } from '../adapters/cli.ts';
-import { requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
+import { classifyChangeRisk, requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
 import { AdapterError } from '../adapters/types.ts';
 import { beginCheckpoint, endCheckpoint, getCheckpoint, recoverInterruptedCheckpoints, setCheckpointCommit, type Checkpoint } from '../services/checkpoints.ts';
 import { changedFilesBetween, displayDiff, liveChanges, snapshotTree } from '../services/snapshot.ts';
@@ -1218,13 +1218,15 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
   if (scan.protectedHits.length) {
     requestApproval({
       action: 'file.write.protected', taskId: task.id, workItemId: wi.id, runId: r.id, requestedBy: wi.agentId ?? 'agent',
-      payload: { summary: `Delivery touches protected paths: ${scan.protectedHits.join(', ')}`, files: scan.protectedHits },
+      payload: { summary: `Delivery touches protected paths: ${scan.protectedHits.join(', ')}`, files: scan.protectedHits,
+        risk: { risky: true, reasons: [`protected paths: ${scan.protectedHits.slice(0, 6).join(', ')}`] } },
     });
   }
   if (scan.depChanges.length) {
     requestApproval({
       action: 'deps.add', taskId: task.id, workItemId: wi.id, runId: r.id, requestedBy: wi.agentId ?? 'agent',
-      payload: { summary: `Dependency manifest changed: ${scan.depChanges.join(', ')}`, files: scan.depChanges },
+      payload: { summary: `Dependency manifest changed: ${scan.depChanges.join(', ')}`, files: scan.depChanges,
+        risk: { risky: true, reasons: [`dependency/lockfile changes: ${scan.depChanges.slice(0, 6).join(', ')}`] } },
     });
   }
 
@@ -1752,11 +1754,15 @@ function proposeTaskCommit(task: Task): void {
   setTaskMeta(task.id, 'commitProposal', { title: msg.title, body: msg.body, message: msg.message, paths: plan.paths });
   const verified = evidence.checks.every((c) => c.status === 'pass') && evidence.qa !== 'fail';
   if (mode === 'auto' && plan.ok && verified) { commitTask(task.id, msg.message, false); return; }
+  const risk = classifyChangeRisk({
+    files: plan.files, declaredPaths: task.affectedPaths ?? [],
+    checksRan: evidence.checks.length > 0, userFiles: plan.mixed, postTaskEdits: plan.changedSince,
+  });
   requestApproval({
     action: 'commit.task', taskId: task.id, runId: r.id, requestedBy: 'engine',
     payload: {
       summary: `Commit "${msg.title}" (${plan.paths.length} file${plan.paths.length === 1 ? '' : 's'})`,
-      message: msg.message, files: plan.files, mixed: plan.mixed, changedSince: plan.changedSince,
+      message: msg.message, files: plan.files, mixed: plan.mixed, changedSince: plan.changedSince, risk,
       why: plan.reason ?? (!verified ? 'checks or review did not pass — it would be committed unverified' : 'approval before commit is on (Routing → Workflow)'),
     },
   });

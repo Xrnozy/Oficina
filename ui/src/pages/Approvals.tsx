@@ -5,7 +5,9 @@ import { Check, Inbox, ShieldQuestion, X } from 'lucide-react';
 
 // Approval inbox (spec §9, 6.5): batch approve/reject, decisions recorded
 // with a reason (required to reject, fed back to the agent); every request
-// carries its blast radius in the payload.
+// carries its blast radius in the payload. Pending items group by run, with
+// a one-line what/why/risk summary and a low-risk approve-all per group.
+const BATCH_ACTIONS = new Set(['commit.task', 'file.write.protected', 'deps.add']);
 
 export default function Approvals() {
   const { data: approvals, reload, loading } = useQuery<any[]>('/approvals');
@@ -23,6 +25,15 @@ export default function Approvals() {
   const runOf = (id: string) => runs?.find((r) => r.id === id);
   const agentOf = (id: string) => agents?.find((a) => a.id === id);
 
+  // grouped by run (spec 5.2): one block per run, approve-all for low-risk
+  const groups: { runId: string | null; items: any[] }[] = [];
+  for (const a of pending) {
+    const g = groups.find((g) => g.runId === (a.run_id ?? null));
+    if (g) g.items.push(a); else groups.push({ runId: a.run_id ?? null, items: [a] });
+  }
+  // mirrors the daemon's approve-all rule: a risk-gated action not flagged risky
+  const lowRisk = (a: any) => BATCH_ACTIONS.has(a.action) && a.payload?.risk?.risky !== true;
+
   const close = () => { setDetail(null); setReason(''); setAlways(false); setReasonErr(false); setBatchReject(false); };
 
   const decide = async (ids: string[], approve: boolean, alwaysFor?: string) => {
@@ -34,6 +45,12 @@ export default function Approvals() {
     }
     if (ok) toast(`${approve ? 'Approved' : 'Rejected'} ${ok} request${ok > 1 ? 's' : ''}`);
     setSel(new Set()); close(); reload();
+  };
+
+  const approveAllLow = async (runId: string | null) => {
+    const r = await act(post('/approvals/approve-all', { runId }));
+    if (r) toast(`Approved ${r.approved} low-risk item${r.approved === 1 ? '' : 's'}${r.skipped ? ` · ${r.skipped} still need you` : ''}`);
+    reload();
   };
 
   const toggle = (id: string) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -53,30 +70,55 @@ export default function Approvals() {
       {!loading && !pending.length && <Empty icon={Inbox} title="Inbox zero" text="Nothing needs your decision right now. You'll see DoD sign-offs, protected-file changes and policy-gated actions here." />}
 
       {pending.length > 0 && (
-        <div className="panel overflow-hidden">
-          <div className="flex items-center gap-3 px-4 h-10 border-b border-line bg-cream text-xs text-fg-2">
-            <input type="checkbox" aria-label="Select all" checked={allSel} onChange={() => setSel(allSel ? new Set() : new Set(pending.map((a) => a.id)))} />
-            <span className="num">{pending.length} pending</span>
+        <div className="space-y-5">
+          <div className="flex items-center gap-3 text-xs text-fg-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" aria-label="Select all" checked={allSel} onChange={() => setSel(allSel ? new Set() : new Set(pending.map((a) => a.id)))} />
+              <span className="num">{pending.length} pending</span>
+            </label>
+            <button className="btn btn-sm ml-auto" onClick={() => approveAllLow(null)}><Check size={13} /> Approve all low-risk</button>
           </div>
-          <div className="divide-line">
-            {pending.map((a) => {
-              const ag = agentOf(a.requested_by);
-              return (
-                <div key={a.id} className={`flex items-center gap-3 px-4 py-3 transition-colors ${sel.has(a.id) ? 'bg-accent/[0.04]' : 'hover:bg-raised/60'}`}>
-                  <input type="checkbox" aria-label={`Select ${a.action}`} checked={sel.has(a.id)} onChange={() => toggle(a.id)} />
-                  <button className="flex items-center gap-3 flex-1 min-w-0 text-left" onClick={() => setDetail(a)}>
-                    <Avatar agent={ag ?? { name: a.requested_by }} size="sm" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-fg truncate">{a.payload?.summary ?? a.action}</div>
-                      <div className="text-xs text-fg-3 truncate">{ag?.name ?? a.requested_by} · {fmtAgo(a.created_at)}{runOf(a.run_id) ? ` · ${runOf(a.run_id).goal}` : ''}</div>
-                    </div>
-                    <Tag tone="warn" mono>{a.action}</Tag>
-                    <BlastRadius p={a.payload} />
-                  </button>
+          {groups.map((g) => {
+            const r = g.runId ? runOf(g.runId) : null;
+            const low = g.items.filter(lowRisk).length;
+            return (
+              <div key={g.runId ?? 'none'} className="panel overflow-hidden">
+                <div className="flex items-center gap-3 px-4 h-10 border-b border-line bg-cream text-xs text-fg-2">
+                  <span className="font-medium text-fg truncate">{r ? r.goal : 'No run'}</span>
+                  <span className="num text-fg-3 shrink-0">{g.items.length} item{g.items.length > 1 ? 's' : ''}</span>
+                  {low > 0 && <button className="btn btn-sm ml-auto shrink-0" onClick={() => approveAllLow(g.runId)}><Check size={12} /> Approve {low} low-risk</button>}
                 </div>
-              );
-            })}
-          </div>
+                <div className="divide-line">
+                  {g.items.map((a) => {
+                    const ag = agentOf(a.requested_by);
+                    const risk = a.payload?.risk;
+                    return (
+                      <div key={a.id} className={`flex items-center gap-3 px-4 py-3 transition-colors ${sel.has(a.id) ? 'bg-accent/[0.04]' : 'hover:bg-raised/60'}`}>
+                        <input type="checkbox" aria-label={`Select ${a.action}`} checked={sel.has(a.id)} onChange={() => toggle(a.id)} />
+                        <button className="flex items-center gap-3 flex-1 min-w-0 text-left" onClick={() => setDetail(a)}>
+                          <Avatar agent={ag ?? { name: a.requested_by }} size="sm" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-fg truncate">{a.payload?.summary ?? a.action}</div>
+                            <div className="text-xs text-fg-3 truncate">
+                              {ag?.name ?? a.requested_by} · {fmtAgo(a.created_at)}
+                              {a.payload?.why ? ` · ${a.payload.why}` : ''}
+                            </div>
+                          </div>
+                          {risk && (
+                            <Tag tone={risk.risky ? 'bad' : 'idle'} title={risk.risky ? `Risky: ${(risk.reasons ?? []).join('; ')}` : 'Low risk'}>
+                              {risk.risky ? 'risky' : 'low risk'}
+                            </Tag>
+                          )}
+                          <Tag tone="warn" mono>{a.action}</Tag>
+                          <BlastRadius p={a.payload} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 

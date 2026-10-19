@@ -13,6 +13,84 @@ const PROTECTED_GLOBS = [
 ];
 const DEPENDENCY_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'requirements.txt', 'Cargo.toml', 'go.mod'];
 
+// ---------------------------------------------------------------------------
+// Change-risk classifier (spec stage 5.1): decides whether an approval request
+// is "risky" — files outside the task's declared paths, config/CI/secret or
+// lockfile changes, deletions, a large diff, or checks that never ran.
+// ---------------------------------------------------------------------------
+
+const CI_GLOBS = ['.github/**', '.gitlab-ci.yml', 'azure-pipelines.yml', 'Jenkinsfile', '.circleci/**', '.buildkite/**', 'Dockerfile', 'docker-compose*.yml', 'docker-compose*.yaml'];
+const CONFIG_GLOBS = ['*.config.js', '*.config.ts', '*.config.cjs', '*.config.mjs', '*.config.json', 'tsconfig*.json', '.npmrc', '.nvmrc', '.eslintrc*', '.prettierrc*'];
+const SECRET_GLOBS = ['.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', '*credential*', '*secret*', 'id_rsa*', '*.keystore'];
+const LOCKFILES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'Cargo.lock', 'go.sum', 'poetry.lock', 'composer.lock', 'Gemfile.lock', 'bun.lockb'];
+const RISKY_GLOBS = [...CI_GLOBS, ...CONFIG_GLOBS, ...SECRET_GLOBS, ...LOCKFILES];
+const LARGE_DIFF_CHARS = 60_000; // ~1.5k diff lines
+
+export interface ChangeRisk { risky: boolean; reasons: string[] }
+
+export function classifyChangeRisk(o: {
+  files: (string | { path: string; status?: string; from?: string })[];
+  declaredPaths?: string[];
+  diffChars?: number;
+  checksRan?: boolean;
+  userFiles?: string[];       // paths the owner had already modified
+  postTaskEdits?: string[];   // paths edited after the task finished
+}): ChangeRisk {
+  const reasons: string[] = [];
+  const norm = o.files.map((f) => (typeof f === 'string' ? { path: f, status: undefined as string | undefined } : { path: f.path, status: f.status }));
+  const declared = (o.declaredPaths ?? []).filter(Boolean);
+  if (declared.length) {
+    const outside = norm.map((f) => f.path).filter((p) => !anyGlobMatch(p, declared));
+    if (outside.length) reasons.push(`files outside the task's declared paths: ${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ` +${outside.length - 6} more` : ''}`);
+  }
+  const riskyFiles = norm.map((f) => f.path).filter((p) => anyGlobMatch(p, RISKY_GLOBS));
+  if (riskyFiles.length) reasons.push(`config/CI/secret or lockfile changes: ${riskyFiles.slice(0, 6).join(', ')}${riskyFiles.length > 6 ? ` +${riskyFiles.length - 6} more` : ''}`);
+  const deleted = norm.filter((f) => f.status === 'D').map((f) => f.path);
+  if (deleted.length) reasons.push(`deletes ${deleted.length} file${deleted.length > 1 ? 's' : ''}: ${deleted.slice(0, 4).join(', ')}${deleted.length > 4 ? '…' : ''}`);
+  if ((o.diffChars ?? 0) > LARGE_DIFF_CHARS) reasons.push(`large diff (~${Math.round((o.diffChars ?? 0) / 1000)}k chars)`);
+  if (o.checksRan === false) reasons.push('no checks ran for this change');
+  if (o.userFiles?.length) reasons.push(`includes files you had already modified: ${o.userFiles.slice(0, 4).join(', ')}${o.userFiles.length > 4 ? '…' : ''}`);
+  if (o.postTaskEdits?.length) reasons.push(`edited after the task finished: ${o.postTaskEdits.slice(0, 4).join(', ')}${o.postTaskEdits.length > 4 ? '…' : ''}`);
+  return { risky: reasons.length > 0, reasons };
+}
+
+// ---------------------------------------------------------------------------
+// Approval policy modes (spec stage 5.1): workspace setting `approvalMode`.
+//   always-ask      (default) every request waits in the inbox — as before
+//   ask-when-risky  auto-approves low-risk change gates; risky + real
+//                   decisions still ask
+//   auto            auto-approves every risk-gate; genuine decisions
+//                   (questions, escalations, plan/DoD content) still ask —
+//                   a machine cannot answer them
+// Auto-approved items are logged via `approval.auto` with the reasons.
+// ---------------------------------------------------------------------------
+
+export type ApprovalMode = 'always-ask' | 'ask-when-risky' | 'auto';
+
+// Only risk-gated change approvals may self-resolve. Everything else is a
+// question or a judgment call that needs a human, whatever the mode.
+const AUTO_APPROVABLE = new Set(['commit.task', 'file.write.protected', 'deps.add']);
+
+export function approvalModeForRun(runId: string | null): ApprovalMode {
+  if (!runId) return 'always-ask';
+  const ws = q1(`SELECT w.settings s FROM runs r JOIN workspaces w ON w.id = r.workspace_id WHERE r.id = ?`, runId)?.s;
+  const m = parseJson<Record<string, unknown>>(ws as string, {}).approvalMode;
+  return m === 'ask-when-risky' || m === 'auto' ? m : 'always-ask';
+}
+
+function maybeAutoApprove(a: ApprovalRequest): void {
+  const mode = approvalModeForRun(a.runId);
+  if (mode === 'always-ask' || !AUTO_APPROVABLE.has(a.action)) return;
+  const risk = (a.payload as { risk?: ChangeRisk }).risk;
+  const risky = !!risk?.risky;
+  if (mode === 'ask-when-risky' && risky) return;
+  const reason = mode === 'auto'
+    ? `auto-approved (policy: auto)${risky ? ` despite risk: ${risk!.reasons.join('; ')}` : ''}`
+    : 'auto-approved (policy: ask-when-risky): no risky changes';
+  emit('approval.auto', 'engine', { approvalId: a.id, action: a.action, mode, risky, reasons: risk?.reasons ?? [] }, a.runId, a.id);
+  decideApproval(a.id, true, reason);
+}
+
 export function rowToPolicy(r: Record<string, unknown>): Policy {
   return { id: r.id as string, scope: parseJson(r.scope as string, {}), rules: parseJson(r.rules as string, []) };
 }
@@ -59,7 +137,9 @@ export function requestApproval(opts: {
   // requested_by keeps the agent id (always-allow policies key on it); the event names the agent
   const actor = (q1('SELECT name FROM agents WHERE id = ?', opts.requestedBy)?.name as string) ?? opts.requestedBy;
   emit('approval.requested', actor, { approvalId: id, action: a.action, summary: payloadSummary(a) }, a.runId, id);
-  return a;
+  maybeAutoApprove(a);
+  const after = q1('SELECT status, reason FROM approvals WHERE id = ?', id);
+  return { ...a, status: (after?.status as ApprovalRequest['status']) ?? a.status, reason: (after?.reason as string | null) ?? null };
 }
 
 function payloadSummary(a: ApprovalRequest): string {

@@ -222,6 +222,70 @@ export function createServer(port: number, uiDir: string): http.Server {
     ok(res, a);
   });
 
+  // Batch approve every pending low-risk item (optionally within one run).
+  // Only risk-gated change actions qualify — questions and escalations are
+  // never batch-approved.
+  const BATCH_APPROVABLE = new Set(['commit.task', 'file.write.protected', 'deps.add']);
+  app.post('/api/approvals/approve-all', (req, res) => {
+    const runId = req.body?.runId ?? null;
+    const pending = q(`SELECT * FROM approvals WHERE status = 'pending' AND (? IS NULL OR run_id = ?) ORDER BY created_at`, runId, runId);
+    let n = 0;
+    const skipped: string[] = [];
+    for (const a of pending) {
+      const p = parseJson<Record<string, any>>(a.payload as string, {});
+      const risky = p.risk?.risky === true || !BATCH_APPROVABLE.has(a.action as string);
+      if (risky) { skipped.push(a.id as string); continue; }
+      decideApproval(a.id as string, true, 'batch-approved: low risk');
+      n++;
+    }
+    ok(res, { approved: n, skipped: skipped.length });
+  });
+
+  // Tray/UI notifications (spec 5.3): only needs-you, run done and run failed
+  // surface — everything else stays in the event log. An approval that was
+  // auto-approved before the poll lands does not notify.
+  app.get('/api/notifications', (req, res) => {
+    const after = Number(req.query.after) || 0;
+    const evs = listEvents({ sinceSeq: after, types: ['approval.requested', 'run.done', 'run.stopped'], limit: 100 });
+    const out: { seq: number; kind: string; title: string; body: string; runId: string | null; at: string }[] = [];
+    for (const e of evs) {
+      if (e.type === 'approval.requested') {
+        const a = q1('SELECT status FROM approvals WHERE id = ?', e.payload.approvalId as string);
+        if (!a || a.status !== 'pending') continue; // already decided (e.g. auto-approved)
+        out.push({ seq: e.seq, kind: 'needs-you', title: 'Needs you', body: String(e.payload.summary ?? e.payload.action ?? 'a decision is waiting'), runId: e.runId, at: e.ts });
+      } else if (e.type === 'run.done') {
+        const goal = q1('SELECT goal FROM runs WHERE id = ?', e.runId)?.goal ?? '';
+        out.push({ seq: e.seq, kind: 'run-done', title: 'Run finished', body: String(goal).slice(0, 160), runId: e.runId, at: e.ts });
+      } else if (e.type === 'run.stopped') {
+        out.push({ seq: e.seq, kind: 'run-failed', title: 'Run stopped', body: String(e.payload.reason ?? 'stopped').slice(0, 160), runId: e.runId, at: e.ts });
+      }
+    }
+    ok(res, out);
+  });
+
+  // Dashboard digest (spec 5.4): what happened since the owner's last visit —
+  // tasks finished or blocked, tokens used, and what still needs a decision.
+  app.get('/api/digest', (req, res) => {
+    const since = typeof req.query.since === 'string' ? req.query.since : '1970-01-01T00:00:00Z';
+    // last status change per task since `since`
+    const taskEvents = q(`SELECT entity_id, payload, ts FROM events WHERE type = 'task.status' AND ts > ? ORDER BY seq`, since);
+    const latest = new Map<string, { status: string; title: string; reason?: string }>();
+    for (const e of taskEvents) {
+      const p = parseJson<Record<string, any>>(e.payload as string, {});
+      if (e.entity_id) latest.set(e.entity_id as string, { status: p.status, title: p.title ?? '', reason: p.reason });
+    }
+    const done = [...latest.entries()].filter(([, t]) => t.status === 'done').map(([id, t]) => ({ id, title: t.title }));
+    const blocked = [...latest.entries()].filter(([, t]) => ['blocked', 'failed', 'waiting-input'].includes(t.status))
+      .map(([id, t]) => ({ id, title: t.title, status: t.status, reason: t.reason ?? null }));
+    const usage = q1(`SELECT COUNT(*) calls, COALESCE(SUM(input_tokens),0) inputTokens, COALESCE(SUM(output_tokens),0) outputTokens,
+                      COALESCE(SUM(cost_usd),0) costUsd FROM usage_records WHERE ts > ?`, since) ?? {};
+    const promptChars = q1(`SELECT COALESCE(SUM(LENGTH(pv.rendered_text)),0) c FROM prompt_versions pv
+                            JOIN work_items w ON w.id = pv.work_item_id WHERE w.finished_at > ?`, since)?.c ?? 0;
+    const needsYou = q(`SELECT id, action, payload, created_at FROM approvals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 8`)
+      .map((a) => ({ id: a.id, action: a.action, summary: parseJson<Record<string, any>>(a.payload as string, {}).summary ?? a.action, since: a.created_at }));
+    ok(res, { since, tasksDone: done, tasksBlocked: blocked, tokens: { ...(usage as object), promptChars }, needsYou });
+  });
+
   app.get('/api/providers', (_req, res) => {
     const providers = q('SELECT * FROM providers').map((p) => ({ ...p, capabilities: parseJson(p.capabilities as string, {}), config: parseJson(p.config as string, {}), settingsSupport: settingsSupport(p.adapter_id as string) }));
     const rawAccounts = q('SELECT * FROM accounts');
@@ -315,6 +379,8 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (workMode != null && !['direct', 'isolated'].includes(workMode)) return err(res, 400, 'workMode must be direct | isolated');
     const commitMode = req.body?.commitMode;
     if (commitMode != null && !['auto', 'approve', 'manual'].includes(commitMode)) return err(res, 400, 'commitMode must be auto | approve | manual');
+    const approvalMode = req.body?.approvalMode;
+    if (approvalMode != null && !['always-ask', 'ask-when-risky', 'auto'].includes(approvalMode)) return err(res, 400, 'approvalMode must be always-ask | ask-when-risky | auto');
     const settings = {
       ...parseJson<Record<string, unknown>>(ws.settings as string, {}),
       ...(mode != null ? { promptReview: mode } : {}),
@@ -323,6 +389,7 @@ export function createServer(port: number, uiDir: string): http.Server {
       ...(routing != null ? { routing } : {}),
       ...(workMode != null ? { workMode } : {}),
       ...(commitMode != null ? { commitMode } : {}),
+      ...(approvalMode != null ? { approvalMode } : {}),
     };
     run('UPDATE workspaces SET settings = ? WHERE id = ?', JSON.stringify(settings), req.params.id);
     emit('workspace.settings', 'owner', { workspaceId: req.params.id, promptReview: settings.promptReview, selfReview: !!settings.selfReview, confirmPlan: !!settings.confirmPlan, routing: settings.routing ?? 'smart' });
