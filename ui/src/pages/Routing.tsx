@@ -405,13 +405,14 @@ export default function Routing() {
             <div className="field-label">Prompt preparation</div>
             <Segmented value={prompts} options={PROMPTS} onChange={(v) => setting({ promptReview: v }, `PM prompts: ${v}`)} />
             <p className="text-xs text-fg-3 mt-1.5">{PROMPT_HELP[prompts]}</p>
+            {rv?.custom && <p className="text-2xs text-info mt-1.5">A custom workflow is active — its own prompt/review nodes control this flow; the setting still applies to the default pipeline.</p>}
             <label className="flex items-start gap-2 text-sm cursor-pointer mt-4">
               <input type="checkbox" className="mt-1" checked={!!s.confirmPlan} onChange={(e) => setting({ confirmPlan: e.target.checked }, e.target.checked ? 'Plans wait for your approval' : 'Runs start automatically')} />
               <span>Confirm the PM's plan before work starts<span className="block text-xs text-fg-3 mt-0.5">Off: the run starts as soon as the PM has planned it. You can still edit the plan or pause.</span></span>
             </label>
             <label className="flex items-start gap-2 text-sm cursor-pointer mt-3">
               <input type="checkbox" className="mt-1" checked={!!s.selfReview} onChange={(e) => setting({ selfReview: e.target.checked }, e.target.checked ? 'Author may review own work' : 'Independent review required')} />
-              <span>Without a tester, let the developer do the review pass<span className="block text-xs text-fg-3 mt-0.5">Only used when no agent holds the tester role.</span></span>
+              <span>Without a tester, let the developer do the review pass<span className="block text-xs text-fg-3 mt-0.5">Only used when no agent holds the tester role.{rv?.custom ? ' Inert while a custom workflow is active — the graph decides who reviews.' : ''}</span></span>
             </label>
           </Panel>
 
