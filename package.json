@@ -1,0 +1,20 @@
+{
+  "name": "officechain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Agent Office - local-first orchestrator where a deterministic workflow engine owns the build loop",
+  "workspaces": [
+    "daemon",
+    "ui"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w daemon",
+    "dev:ui": "npm run dev -w ui",
+    "build": "npm run build -w ui && npm run build -w daemon",
+    "start": "npm run start -w daemon",
+    "seed": "npm run seed -w daemon"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

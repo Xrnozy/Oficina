@@ -1,0 +1,17 @@
+port: 4780
+uiDir: ../ui/dist
+providers:
+  - id: local-office
+    name: Scripted Demo Agent
+    kind: agent
+    adapter: scripted
+    tier: 1
+  - id: ollama
+    name: Local Ollama (OpenAI-compatible)
+    kind: model
+    adapter: openai-compatible
+    tier: 1
+    baseUrl: http://localhost:11434/v1
+    models:
+      - name: qwen2.5-coder:7b
+        strengthTier: standard

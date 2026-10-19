@@ -1,0 +1,297 @@
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { post, useQuery } from '../api';
+import {
+  Avatar, Meter, Muted, ObsBadge, PageHeader, Panel, ProgressBar, RunControls, Segmented, SevChip, Skeleton, Stat, StatusChip,
+  Tag, act, fmtAgo, fmtIn, fmtNum, fmtUsd, pct, useCurrentRun,
+} from '../components';
+import { ArrowRight, CheckCircle2, Circle, Plus, Sparkles, XCircle, Zap } from 'lucide-react';
+
+export default function Dashboard() {
+  const { run, loading } = useCurrentRun();
+  const { data: detail } = useQuery<any>(run ? `/runs/${run.id}` : null, [run?.id]);
+  const { data: agents } = useQuery<any[]>('/agents');
+  const { data: errors } = useQuery<any[]>(run ? `/errors?runId=${run.id}` : null, [run?.id]);
+  const { data: approvals } = useQuery<any[]>('/approvals');
+  const { data: providers } = useQuery<any>('/providers');
+  const { data: usage } = useQuery<any>('/usage');
+  const [composing, setComposing] = useState(false);
+
+  const openErrors = errors?.filter((e) => !['resolved', 'wontfix'].includes(e.status)) ?? [];
+  const pendingApprovals = approvals?.filter((a) => a.status === 'pending') ?? [];
+  const live = run && !['done', 'stopped'].includes(run.status);
+
+  if (loading) return <Skeleton rows={5} />;
+
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Dashboard" sub="Is the run healthy — and does it need you?">
+        {run && !composing && <button className="btn" onClick={() => setComposing(true)}><Plus size={14} /> New run</button>}
+      </PageHeader>
+
+      {(!run || composing) && <NewRun onCancel={run ? () => setComposing(false) : undefined} />}
+
+      {run && <RunCard run={run} detail={detail} live={!!live} />}
+
+      {run && (
+        <div className="grid grid-cols-1 xl:grid-cols-[1.35fr_1fr] gap-5 [&>*]:min-w-0">
+          <Panel title="Agents" action={<Link to="/activity" className="text-xs text-fg-3 hover:text-fg">Live activity →</Link>} bodyClass="pb-2">
+            <div className="divide-line">
+              {(agents ?? []).map((a) => {
+                const task = (detail?.tasks ?? []).find((t: any) => t.ownerAgentId === a.id && !['done', 'cancelled', 'failed'].includes(t.status));
+                return (
+                  <div key={a.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <Avatar agent={a} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-fg truncate">{a.name}</div>
+                      <div className="text-xs text-fg-3 truncate">
+                        {task ? <Link to={`/tasks/${task.id}`} className="hover:text-fg">on: {task.title}</Link> : (a.memberships?.filter((m: any) => m.active).map((m: any) => m.role).join(', ') || 'unassigned')}
+                      </div>
+                    </div>
+                    <span className="hidden sm:contents"><ObsBadge level={a.observability} /></span>
+                    <StatusChip value={a.status} />
+                  </div>
+                );
+              })}
+            </div>
+          </Panel>
+
+          <div className="space-y-5">
+            <Panel title="Needs you" action={<Link to="/approvals" className="text-xs text-fg-3 hover:text-fg">Inbox →</Link>} bodyClass="px-2 pb-2">
+              {pendingApprovals.length === 0 && <div className="px-2 pb-2"><Muted>Nothing waiting on a decision.</Muted></div>}
+              {pendingApprovals.slice(0, 4).map((a) => (
+                <Link key={a.id} to="/approvals" className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-raised transition-colors">
+                  <Tag tone="warn" mono>{a.action}</Tag>
+                  <span className="text-sm text-fg-2 truncate flex-1">{a.payload?.summary}</span>
+                  <ArrowRight size={13} className="text-fg-4" />
+                </Link>
+              ))}
+            </Panel>
+
+            <Panel title="Open error reports" action={<Link to="/errors" className="text-xs text-fg-3 hover:text-fg">All →</Link>} bodyClass="px-2 pb-2">
+              <div className="flex gap-2 px-2 pb-2">
+                {['critical', 'high', 'medium', 'low'].map((s) => {
+                  const n = openErrors.filter((e) => e.severity === s).length;
+                  return <div key={s} className={`flex-1 rounded-lg border border-line px-2.5 py-2 ${n ? '' : 'opacity-50'}`}><div className="text-lg font-semibold text-fg num leading-none">{n}</div><div className="text-2xs text-fg-3 mt-1">{s}</div></div>;
+                })}
+              </div>
+              {openErrors.slice(0, 4).map((e) => (
+                <Link key={e.id} to={`/errors/${e.id}`} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-raised transition-colors">
+                  <SevChip sev={e.severity} />
+                  <span className="text-sm text-fg-2 truncate flex-1">{e.title}</span>
+                  <StatusChip value={e.status} />
+                </Link>
+              ))}
+            </Panel>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <LimitsPanel providers={providers} />
+        <Panel title="Cost" action={<Link to="/providers" className="text-xs text-fg-3 hover:text-fg">Providers →</Link>}>
+          <div className="flex items-end gap-6 mb-4">
+            <Stat label="Total spend" value={fmtUsd(usage?.totals?.costUsd)} />
+            <div className="text-xs text-fg-3 num pb-0.5 space-y-0.5">
+              <div><span className="text-fg-2">{fmtNum(usage?.totals?.requests)}</span> provider calls</div>
+              <div><span className="text-fg-2">{fmtNum(usage?.totals?.inputTokens)}</span> in · <span className="text-fg-2">{fmtNum(usage?.totals?.outputTokens)}</span> out tokens</div>
+            </div>
+          </div>
+          <div className="eyebrow mb-1">By agent</div>
+          {(usage?.byAgent ?? []).length === 0 && <Muted>No usage recorded yet.</Muted>}
+          {(usage?.byAgent ?? []).map((r: any) => {
+            const max = Math.max(...(usage?.byAgent ?? []).map((x: any) => x.calls || 0), 1);
+            return (
+              <div key={r.id} className="grid grid-cols-[1fr_auto] gap-x-3 items-center py-1.5">
+                <span className="text-sm text-fg-2 truncate">{r.name}</span>
+                <span className="mono text-fg-3">{fmtUsd(r.cost)} · {r.calls} calls</span>
+                <div className="col-span-2 h-[3px] mt-1 rounded-full bg-line overflow-hidden"><div className="h-full bg-fg-4" style={{ width: `${(r.calls / max) * 100}%` }} /></div>
+              </div>
+            );
+          })}
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function NewRun({ onCancel }: { onCancel?: () => void }) {
+  const { data: workspaces } = useQuery<any[]>('/workspaces');
+  const { data: repos } = useQuery<any[]>('/repos');
+  const [goal, setGoal] = useState('');
+  const [budget, setBudget] = useState('50');
+  const [mode, setMode] = useState<'guided' | 'one-shot'>('guided');
+  const [repoChoice, setRepoChoice] = useState('');
+  const [repoPath, setRepoPath] = useState('');
+  const [busy, setBusy] = useState(false);
+  const nav = useNavigate();
+  const budgetNum = Number(budget);
+  const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === workspaces?.[0]?.id);
+  const custom = repoChoice === '__custom__' || (!repoChoice && wsRepos.length === 0);
+  const invalid = !goal.trim() || !(budgetNum > 0) || !workspaces?.[0]
+    || (custom ? !repoPath.trim() : !(repoChoice || wsRepos[0]?.id));
+  const oneShot = mode === 'one-shot';
+  const confirmPlan = !!workspaces?.[0]?.settings?.confirmPlan;
+  return (
+    <form className="pblock block-lilac animate-rise" onSubmit={async (e) => {
+      e.preventDefault();
+      if (invalid) return;
+      setBusy(true);
+      let repoId = repoChoice || wsRepos[0]?.id;
+      if (custom) {
+        const repo = await act(post('/repos', { workspaceId: workspaces![0].id, path: repoPath.trim() }), 'Repo registered');
+        repoId = repo?.id;
+        if (!repoId) { setBusy(false); return; }
+      }
+      const r = await act(post('/runs', { workspaceId: workspaces![0].id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId }),
+        oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
+      setBusy(false);
+      if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
+    }}>
+      <div className="flex items-center gap-3 mb-1 flex-wrap">
+        <Sparkles size={15} className="text-fg" />
+        <h2 className="text-[15px] font-semibold">{oneShot ? 'Run it once' : 'New request'}</h2>
+        <div className="ml-auto"><Segmented value={mode} options={['guided', 'one-shot'] as const} onChange={setMode} /></div>
+      </div>
+      <p className="text-sm text-fg-2 mb-5 max-w-[64ch]">
+        {oneShot
+          ? 'Say what you want in plain words — the PM interprets it, plans the work, and the Office executes a single pass. No approval gate, no fix loop; you get the result and a report.'
+          : `Send a feature request to the PM. It writes the requirements and the developer's prompt; the developer implements and documents the change; the tester reviews and validates it; the PM accepts it or sends it back — every hand-off automatic${confirmPlan ? ', after you confirm the plan' : ''}. See Routing for which models each step uses.`}
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_auto] gap-x-3 gap-y-4 items-end">
+        <label className="block">
+          <span className="field-label">What do you want?</span>
+          <input className="input w-full" autoFocus placeholder="e.g. Add a --toc flag to the markdown converter, with tests and docs" value={goal} onChange={(e) => setGoal(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="field-label whitespace-nowrap">Budget (USD)</span>
+          <input className="input w-full num" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} aria-invalid={!(budgetNum > 0)} />
+        </label>
+        <div className="flex gap-2">
+          {onCancel && <button type="button" className="btn btn-ghost" onClick={onCancel}>Cancel</button>}
+          <button className="btn btn-primary" disabled={invalid || busy}>{busy ? 'Starting…' : oneShot ? <><Zap size={13} /> Run once</> : <>{confirmPlan ? 'Draft plan' : 'Send to PM'} <ArrowRight size={14} /></>}</button>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-4 items-start mt-4">
+        <label className="block">
+          <span className="field-label">Repository</span>
+          <select className="input w-full font-mono" value={repoChoice || wsRepos[0]?.id || '__custom__'} onChange={(e) => setRepoChoice(e.target.value)}>
+            {wsRepos.map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
+            <option value="__custom__">A different folder on this machine…</option>
+          </select>
+        </label>
+        {custom && (
+          <label className="block">
+            <span className="field-label">Folder path</span>
+            <input className="input w-full font-mono" placeholder="C:\path\to\repo" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} />
+          </label>
+        )}
+      </div>
+      {custom && <p className="text-xs text-fg-4 mt-2">Git-init'd if it isn't a repo yet. Task branches, worktrees, and the integration branch all live inside it.</p>}
+      {!(budgetNum > 0) && <div className="text-xs text-bad mt-2">Budget must be a positive number.</div>}
+      {workspaces && !workspaces.length && <div className="text-xs text-bad mt-2">No workspace exists yet — run <span className="mono">npm run seed</span> first.</div>}
+    </form>
+  );
+}
+
+// figma rhythm: the run's status owns a pastel block — the rest of the page stays monochrome.
+const RUN_BLOCK: Record<string, string> = {
+  running: 'block-lime', 'dod-review': 'block-lilac', verifying: 'block-mint', paused: 'block-cream', pausing: 'block-cream',
+  done: 'block-mint', blocked: 'block-pink', failed: 'block-pink', stopped: 'block-coral', escalated: 'block-pink',
+};
+
+function RunCard({ run, detail, live }: { run: any; detail: any; live: boolean }) {
+  const items = detail?.dod?.items ?? [];
+  const required = items.filter((i: any) => !i.optional);
+  const passed = required.filter((i: any) => i.status === 'pass').length;
+  const spendFrac = run.budget?.runUsd ? run.spentUsd / run.budget.runUsd : 0;
+  const cycles = detail?.cycles ?? [];
+  return (
+    <section className="panel overflow-hidden animate-rise">
+      <div className={`${RUN_BLOCK[run.status] ?? 'block-cream'} px-5 pt-5 pb-4 lg:px-8 flex items-start gap-4 flex-wrap`}>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <StatusChip value={run.status} />
+            {run.limits?.oneShot && <Tag tone="info"><Zap size={10} /> one-shot</Tag>}
+            {run.stopReason && run.status !== 'done' && <Tag tone="bad" mono>{run.stopReason}</Tag>}
+            <span className="text-xs text-fg-4 mono">run {run.id.slice(-8)} · started {fmtAgo(run.startedAt)}</span>
+          </div>
+          <h2 className="text-lg font-semibold tracking-[-0.01em] leading-snug">{run.goal}</h2>
+        </div>
+        {run.status === 'dod-review'
+          ? <Link to={`/dod/${run.id}`} className="btn btn-accent">Review DoD to start <ArrowRight size={14} /></Link>
+          : live && <RunControls run={run} size="" />}
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-line border-t border-line [&>*]:min-w-0">
+        <div className="bg-surface p-5">
+          <Stat label="Definition of Done" value={<>{passed}<span className="text-fg-4 text-lg">/{required.length || '—'}</span></>} hint={`${pct(run.progressScore)} of required items`}>
+            <ProgressBar value={run.progressScore} tone="accent" />
+          </Stat>
+        </div>
+        <div className="bg-surface p-5">
+          <Stat label="Cycle" value={<>{run.currentCycle}<span className="text-fg-4 text-lg">/{run.limits?.maxCycles ?? '∞'}</span></>} hint={cycles.length ? 'DoD progress per cycle' : 'no completed cycles yet'}>
+            <div className="flex items-end gap-[3px] h-6">
+              {cycles.slice(-24).map((c: any) => (
+                <div key={c.id} title={`cycle ${c.n}: ${pct(c.progressScore)}`} className="flex-1 max-w-3 rounded-sm bg-accent/50 hover:bg-accent transition-colors" style={{ height: `${12 + c.progressScore * 88}%` }} />
+              ))}
+              {!cycles.length && <div className="h-px flex-1 bg-line self-center" />}
+            </div>
+          </Stat>
+        </div>
+        <div className="bg-surface p-5">
+          <Stat label="Spend" value={fmtUsd(run.spentUsd)} hint={`of ${fmtUsd(run.budget?.runUsd)} · warns at ${run.budget?.warnPct ?? 80}%`}>
+            <Meter value={spendFrac} warnAt={(run.budget?.warnPct ?? 80) / 100} />
+          </Stat>
+        </div>
+        <div className="bg-surface p-5">
+          <div className="eyebrow mb-2">Checklist</div>
+          <ul className="space-y-1.5">
+            {items.slice(0, 5).map((i: any) => (
+              <li key={i.id} className="flex items-center gap-2 text-xs text-fg-2">
+                {i.status === 'pass' ? <CheckCircle2 size={13} className="text-ok shrink-0" /> : i.status === 'fail' ? <XCircle size={13} className="text-bad shrink-0" /> : <Circle size={13} className="text-fg-4 shrink-0" />}
+                <span className="truncate">{i.text}</span>
+              </li>
+            ))}
+            {!items.length && <Muted>Waiting for the PM's draft.</Muted>}
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function LimitsPanel({ providers }: { providers: any }) {
+  // Tightest window per account (spec §9: remaining %, reset countdown + local time, source label).
+  const byAcct = new Map<string, any>();
+  for (const w of (providers?.windows ?? []).filter((w: any) => w.lim)) {
+    const f = (w.used ?? 0) / w.lim;
+    const cur = byAcct.get(w.account_id);
+    if (!cur || f > (cur.used ?? 0) / cur.lim) byAcct.set(w.account_id, w);
+  }
+  const rows = [...byAcct.values()].sort((a, b) => (b.used ?? 0) / b.lim - (a.used ?? 0) / a.lim);
+  return (
+    <Panel title="Limits" action={<span className="text-2xs text-fg-4">tightest window per account</span>}>
+      {!rows.length && <Muted>No quota windows observed yet. They appear once providers report headers or you set a monthly budget.</Muted>}
+      <div className="space-y-3.5">
+        {rows.map((w) => {
+          const f = (w.used ?? 0) / w.lim;
+          return (
+            <div key={w.id}>
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="text-sm text-fg truncate">{w.account_id}</span>
+                <span className="text-xs text-fg-4">{w.metric} / {w.period}</span>
+                <span className="ml-auto text-xs num text-fg-2">{Math.max(0, Math.round((1 - f) * 100))}% left</span>
+              </div>
+              <Meter value={f} />
+              <div className="flex gap-2 mt-1.5 text-2xs text-fg-4">
+                <Tag tone={w.source === 'estimate' ? 'idle' : 'info'}>{w.source}{w.confidence ? ` · ${w.confidence}` : ''}</Tag>
+                {w.resets_at && <span className="self-center">resets {fmtIn(w.resets_at)} · {new Date(w.resets_at).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}

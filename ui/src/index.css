@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* DESIGN-figma.md — monochrome editorial frame (white canvas, black ink,
+   hairline borders, pill CTAs) interrupted by pastel color blocks. */
+:root {
+  color-scheme: light;
+  --canvas: 255 255 255;
+  --surface: 255 255 255;
+  --raised: 247 247 245;
+  --sunken: 241 241 241;
+  --line: 230 230 230;
+  --line-strong: 210 210 210;
+  --fg: 0 0 0;
+  --fg-2: 45 45 45;
+  --fg-3: 96 96 96;
+  --fg-4: 150 150 150;
+  --accent: 0 0 0;
+  --accent-ink: 255 255 255;
+  --ok: 30 166 74;
+  --info: 37 99 235;
+  --warn: 180 105 4;
+  --bad: 220 38 38;
+  --magenta: 255 61 139;
+  /* pastel color-block palette */
+  --lime: 220 238 177;
+  --lilac: 197 176 244;
+  --cream: 244 236 214;
+  --pink: 239 212 212;
+  --mint: 200 230 205;
+  --coral: 243 201 182;
+  --navy: 31 29 61;
+}
+
+/* Dark mode — same vocabulary (monochrome chrome + pastel blocks), flipped.
+   Chrome goes near-black, ink goes paper-white, and the pastel blocks drop to
+   muted jewel tones so `text-fg` inside them still reads. */
+.dark {
+  color-scheme: dark;
+  --canvas: 12 13 15;
+  --surface: 18 20 24;
+  --raised: 27 30 36;
+  --sunken: 9 10 12;
+  --line: 38 42 49;
+  --line-strong: 58 63 72;
+  --fg: 238 239 242;
+  --fg-2: 197 200 208;
+  --fg-3: 137 142 152;
+  --fg-4: 93 97 106;
+  --accent: 238 239 242;
+  --accent-ink: 12 13 15;
+  --ok: 106 207 142;
+  --info: 125 165 248;
+  --warn: 232 178 84;
+  --bad: 240 110 110;
+  --lime: 76 92 46;
+  --lilac: 94 78 148;
+  --cream: 96 84 58;
+  --pink: 118 72 72;
+  --mint: 66 98 74;
+  --coral: 114 76 56;
+  --navy: 31 29 61;
+}
+
+@layer base {
+  body {
+    @apply bg-canvas text-fg-2 antialiased text-sm;
+    font-feature-settings: 'kern';
+  }
+  h1, h2, h3 { @apply text-fg tracking-[-0.01em]; text-wrap: balance; }
+  p { text-wrap: pretty; }
+  ::selection { @apply bg-lime text-fg; }
+  .dark ::selection { @apply bg-lilac text-fg; }
+  :focus-visible { @apply outline-none ring-2 ring-fg/40 ring-offset-2 ring-offset-canvas; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { @apply bg-line-strong rounded-full; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  input[type='checkbox'] { @apply accent-[rgb(var(--fg))] w-3.5 h-3.5; }
+  input[type='range'] { @apply accent-[rgb(var(--fg))]; }
+}
+
+@layer components {
+  .panel { @apply bg-surface border border-line rounded-2xl min-w-0; }
+  .panel-head { @apply flex items-center gap-2 px-4 pt-3.5 pb-2.5; }
+  /* figmaMono-style eyebrow: mono, uppercase, positive tracking */
+  .eyebrow { @apply font-mono text-2xs text-fg-3 uppercase tracking-[0.05em]; }
+  .num { font-variant-numeric: tabular-nums; }
+  .mono { @apply font-mono text-xs num; }
+
+  .chip { @apply inline-flex items-center gap-1.5 h-5 px-1.5 rounded-md text-2xs font-medium whitespace-nowrap border border-line bg-raised text-fg-3; }
+
+  /* pill is the only button shape */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 h-8 px-4 rounded-full text-sm font-medium whitespace-nowrap
+      bg-canvas text-fg border border-line-strong
+      hover:bg-raised active:translate-y-px transition-[background-color,color,transform,border-color] duration-150
+      disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .btn-sm { @apply h-7 px-3 text-xs; }
+  .btn-xs { @apply h-6 px-2.5 text-2xs; }
+  .btn-primary { @apply bg-fg text-canvas border-fg hover:bg-fg-2 hover:text-canvas; }
+  .btn-accent { @apply bg-lime text-fg border-transparent hover:brightness-95 hover:text-fg; }
+  .btn-promo { @apply bg-magenta text-white border-transparent hover:brightness-95 hover:text-white; }
+  .btn-danger { @apply bg-bad/[0.08] text-bad border-bad/25 hover:bg-bad/[0.14] hover:text-bad; }
+  .btn-ghost { @apply bg-transparent border-transparent text-fg-3 hover:bg-raised hover:text-fg; }
+  .btn-icon { @apply w-8 px-0; }
+
+  .input {
+    @apply h-8 bg-canvas border border-line rounded-lg px-3 text-sm text-fg placeholder:text-fg-4
+      hover:border-line-strong focus:outline-none focus:border-fg/60 focus:ring-2 focus:ring-fg/10 transition-colors;
+  }
+  textarea.input { @apply h-auto py-2 leading-relaxed; }
+  select.input { @apply pr-7 appearance-none bg-no-repeat; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath stroke='%23606060' stroke-width='1.4' d='m1 1 4 4 4-4'/%3E%3C/svg%3E"); background-position: right 9px center; }
+  .input-sm { @apply h-7 text-xs rounded-md; }
+
+  .field-label { @apply font-mono text-2xs uppercase tracking-[0.05em] text-fg-3 mb-1.5; display: block; }
+  .row { @apply flex items-center gap-3 px-4 py-2.5 hover:bg-raised transition-colors; }
+  .kbd { @apply inline-flex items-center h-[18px] px-1 rounded border border-line bg-raised font-mono text-[10px] text-fg-3; }
+  .divide-line > * + * { @apply border-t border-line; }
+  .skeleton { @apply bg-sunken rounded-md animate-pulse; }
+
+  /* pastel color blocks (rounded.lg 24px, section padding 48px) */
+  /* named pblock (not .block) — `.block` collides with Tailwind's `display:
+     block` utility and used to inject padding into every className="block" */
+  .pblock { @apply rounded-3xl p-6 lg:p-12 text-fg; }
+  .block-lime { @apply bg-lime; }
+  .block-lilac { @apply bg-lilac; }
+  .block-cream { @apply bg-cream; }
+  .block-pink { @apply bg-pink; }
+  .block-mint { @apply bg-mint; }
+  .block-coral { @apply bg-coral; }
+  .block-navy { @apply bg-navy text-canvas; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

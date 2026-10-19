@@ -1,0 +1,7 @@
+node_modules
+ui/dist
+daemon/data/
+daemon/daemon.log
+.office/
+nul
+*.log
