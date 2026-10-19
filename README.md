@@ -42,12 +42,12 @@ Because the engine is deterministic and event-sourced, every agent — including
 ## Screenshots
 
 ### Workflow editor
-Build or clone a pipeline as a graph. When a run is selected, node rings and taken edges show what actually executed.
+Build or clone a pipeline as a graph; the palette on the left is colored by role, matching the nodes it creates. When a run is selected, node rings and taken edges show what actually executed.
 
 <img src="docs/screenshots/workflow.png" alt="Workflow editor showing a custom graph with a condition branch, loops and a message edge, with node states from a finished run" width="900">
 
 ### Routing
-The flow is derived from the saved active workflow and reads top to bottom: numbered steps, branch lanes with their conditions, and loop, send-back and message links on each step. Per-node model tier and budget overrides sit below it.
+The flow is derived from the saved active workflow and reads top to bottom: numbered steps colored by role, branch lanes with their conditions, and loop, send-back and message links on each step. Per-node model tier and budget overrides sit below it.
 
 <img src="docs/screenshots/routing.png" alt="Routing page showing the active workflow as a numbered vertical flow with a two-lane branch, followed by per-agent model options" width="900">
 

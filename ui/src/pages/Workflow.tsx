@@ -66,6 +66,13 @@ const ROLE_TINT: Record<string, string> = {
   reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream',
 };
 
+// Palette entries: a soft wash of the same colours, so the list matches the nodes it creates.
+const ROLE_SOFT: Record<string, string> = {
+  pm: 'bg-lilac/30', 'prompt-creator': 'bg-cream/60', developer: 'bg-lime/30', qa: 'bg-mint/30',
+  reviewer: 'bg-pink/40', analyst: 'bg-coral/30', docs: 'bg-cream/60',
+};
+const STEP_SOFT: Record<string, string> = { condition: 'bg-cream/60', merge: 'bg-lilac/30', human: 'bg-pink/40', end: 'bg-navy/10' };
+
 const TYPE_ICON: Record<WfNodeType, React.ReactNode> = {
   start: <CirclePlay size={14} />, end: <Check size={14} />, agent: <User size={14} />,
   condition: <GitBranch size={14} />, merge: <GitMerge size={14} />, human: <Bell size={14} />,
@@ -268,13 +275,13 @@ function Palette({ agents, roles, wsId, skills }: { agents: AgentRow[]; roles: R
       </div>
       {byRole.map(([role, list]) => (
         <div key={role}>
-          <div className="px-1 text-2xs font-mono text-fg-4 mb-1">{roleLabel(role)}</div>
+          <div className="px-1 text-2xs font-mono text-fg-4 mb-1 flex items-center gap-1.5"><span className={`h-2 w-2 rounded-sm ${ROLE_TINT[role] ?? 'bg-raised'}`} />{roleLabel(role)}</div>
           <div className="space-y-1">
             {list.map((a) => (
               <div
                 key={a.id} draggable
                 onDragStart={drag({ type: 'agent', agentId: a.id, role, label: `${a.name}` })}
-                className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-line bg-raised cursor-grab active:cursor-grabbing hover:border-line-strong transition-colors"
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border border-line ${ROLE_SOFT[role] ?? 'bg-raised'} cursor-grab active:cursor-grabbing hover:border-line-strong transition-colors`}
                 title="Drag onto the canvas — drop on an edge to insert"
               >
                 <Dot tone={a.status === 'working' ? 'ok' : 'idle'} live={a.status === 'working'} />
@@ -295,7 +302,7 @@ function Palette({ agents, roles, wsId, skills }: { agents: AgentRow[]; roles: R
             <div
               key={g.type} draggable
               onDragStart={drag({ type: g.type, label: g.label })}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-dashed border-line bg-raised/50 cursor-grab active:cursor-grabbing hover:border-line-strong transition-colors"
+              className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border border-dashed border-line ${STEP_SOFT[g.type] ?? 'bg-raised/50'} cursor-grab active:cursor-grabbing hover:border-line-strong transition-colors`}
               title={g.hint}
             >
               <span className="text-fg-3">{g.icon}</span>

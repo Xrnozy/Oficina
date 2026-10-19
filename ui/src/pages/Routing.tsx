@@ -189,31 +189,23 @@ function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: Routing
   );
 }
 
-// Same palette as the Workflow canvas: a step is tinted by its role, falling back to its purpose.
-type Tint = { bg: string; bar: string; soft: string };
-const T = {
-  lilac: { bg: 'bg-lilac', bar: 'border-l-lilac', soft: 'bg-lilac/25' }, cream: { bg: 'bg-cream', bar: 'border-l-cream', soft: 'bg-cream/25' },
-  lime: { bg: 'bg-lime', bar: 'border-l-lime', soft: 'bg-lime/25' }, mint: { bg: 'bg-mint', bar: 'border-l-mint', soft: 'bg-mint/25' },
-  pink: { bg: 'bg-pink', bar: 'border-l-pink', soft: 'bg-pink/25' }, coral: { bg: 'bg-coral', bar: 'border-l-coral', soft: 'bg-coral/25' },
-  navy: { bg: 'bg-navy', bar: 'border-l-navy', soft: 'bg-navy/10' }, none: { bg: 'bg-raised', bar: 'border-l-line-strong', soft: 'bg-surface' },
-} satisfies Record<string, Tint>;
-const ROLE_TINT: Record<string, Tint> = { pm: T.lilac, 'prompt-creator': T.cream, developer: T.lime, qa: T.mint, reviewer: T.pink, analyst: T.coral, docs: T.cream };
-const PURPOSE_TINT: Record<string, Tint> = {
-  plan: T.lilac, accept: T.lilac, prompt: T.cream, 'prompt-review': T.lilac, doc: T.cream, implement: T.lime, fix: T.lime,
-  qa: T.mint, test: T.mint, review: T.pink, analyse: T.coral, diagnose: T.coral,
+// Same role colours as the Workflow canvas; a step falls back to its purpose when it has no role.
+const ROLE_TINT: Record<string, string> = { pm: 'bg-lilac', 'prompt-creator': 'bg-cream', developer: 'bg-lime', qa: 'bg-mint', reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream' };
+const PURPOSE_TINT: Record<string, string> = {
+  plan: 'bg-lilac', accept: 'bg-lilac', 'prompt-review': 'bg-lilac', prompt: 'bg-cream', doc: 'bg-cream', implement: 'bg-lime', fix: 'bg-lime',
+  qa: 'bg-mint', test: 'bg-mint', review: 'bg-pink', analyse: 'bg-coral', diagnose: 'bg-coral',
 };
-function stepTint(s: RoutingStep): Tint {
-  if (s.type === 'start') return T.mint;
-  if (s.type === 'end') return T.navy;
-  if (s.type === 'condition') return T.cream;
-  if (s.type === 'merge') return T.lilac;
-  if (s.type === 'human') return T.pink;
-  return ROLE_TINT[s.role ?? ''] ?? PURPOSE_TINT[s.purpose ?? ''] ?? T.none;
+function stepTint(s: RoutingStep): string {
+  if (s.type === 'start') return 'bg-mint';
+  if (s.type === 'end') return 'bg-navy';
+  if (s.type === 'condition') return 'bg-cream';
+  if (s.type === 'merge') return 'bg-lilac';
+  if (s.type === 'human') return 'bg-pink';
+  return ROLE_TINT[s.role ?? ''] ?? PURPOSE_TINT[s.purpose ?? ''] ?? 'bg-raised';
 }
 
-// One step on the flow rail — a workflow node. Click opens it in the editor.
+// One step on the flow — a workflow node. Click opens it in the editor.
 function StepCard({ s }: { s: RoutingStep }) {
-  const tint = stepTint(s);
   const what =
     s.type === 'start' ? 'the request enters here'
     : s.type === 'end' ? 'task completes here'
@@ -221,86 +213,75 @@ function StepCard({ s }: { s: RoutingStep }) {
     : s.type === 'merge' ? 'waits for its branches'
     : s.type === 'human' ? 'pauses for you'
     : (PURPOSE_LABEL[s.purpose ?? ''] ?? s.purpose ?? 'step');
-  const chip = 'inline-flex items-center gap-1 rounded-md bg-sunken px-1.5 py-0.5 text-2xs text-fg-3';
+  const names = s.agents.map((a) => a.name).join(', ');
+  const problem = s.type !== 'agent' ? null
+    : s.agentId ? (s.agents.length ? null : 'agent deleted')
+    : s.role ? (s.agents.length ? null : `any ${s.role} — none assigned`)
+    : 'no agent or role';
+  const note = 'flex items-center gap-1.5';
   return (
     <Link
       to={`/workflow?node=${s.nodeId}`}
-      className={`block rounded-xl border border-l-4 ${tint.soft} px-3.5 py-2 text-xs hover:brightness-95 transition ${tint.bar} ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
+      className={`block rounded-lg border bg-surface px-3 py-2 hover:border-line-strong ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
       title={`${s.label}${s.warnings.length ? ` — ${s.warnings.join('; ')}` : ''}`}
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <div className="min-w-[11rem] flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="font-medium text-fg text-sm">{s.label}</span>
-          {s.disabled && <Tag tone="idle">bypassed</Tag>}
-          {s.type === 'merge' && <Tag tone="idle">merge</Tag>}
-          {s.type === 'human' && <Tag tone="warn">approval</Tag>}
-          <span className="text-fg-3">{what}{s.scope === 'run' && ' · once per run'}</span>
+      <div className="flex items-baseline gap-3">
+        <div className="min-w-0 flex-1 text-sm">
+          <span className="font-medium text-fg">{s.label}</span>
+          <span className="ml-2 text-xs text-fg-3">{what}{s.scope === 'run' && ' · once per run'}{s.disabled && ' · bypassed'}{s.type === 'merge' && ' · merge'}{s.type === 'human' && ' · approval'}</span>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-1">
-          {s.type === 'agent' && (
-            s.agentId
-              ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="bad">agent deleted</Tag>)
-              : s.role
-                ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="warn">any {s.role} — none assigned</Tag>)
-                : <Tag tone="warn">no agent or role</Tag>
-          )}
-          {s.modelTier && <Tag tone={TIER_TONE[s.modelTier]}>{s.modelTier}</Tag>}
-          {s.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>!</Tag>)}
+        <div className="shrink-0 text-xs text-fg-2">
+          {names}
+          {problem && <span className="text-warn">{problem}</span>}
+          {s.modelTier && <span className="ml-2 font-mono text-2xs text-fg-4">{s.modelTier}</span>}
+          {s.warnings.length > 0 && <span className="ml-2 text-warn" title={s.warnings.join('; ')}>!</span>}
         </div>
       </div>
       {(s.loops.length > 0 || s.exits.length > 0 || s.messages.length > 0) && (
-        <div className="mt-2 flex flex-wrap gap-1.5 border-t border-line/60 pt-2">
+        <ul className="mt-1 space-y-0.5 text-xs text-fg-3">
           {s.loops.map((e) => (
-            <span key={e.edgeId} className={chip}>
-              <CornerUpLeft size={10} className="shrink-0" /> {e.label ?? 'back'} → {e.toLabel}{e.maxLoops ? ` ×${e.maxLoops}` : ''}
-            </span>
+            <li key={e.edgeId} className={note}><CornerUpLeft size={11} className="shrink-0" /> {e.label ?? 'back'} → {e.toLabel}{e.maxLoops ? ` ×${e.maxLoops}` : ''}</li>
           ))}
           {s.exits.map((e) => (
-            <span key={e.edgeId} className={chip}>
-              <ArrowRight size={10} className="shrink-0" /> {e.label ?? e.kind} → {e.toLabel}
-            </span>
+            <li key={e.edgeId} className={note}><ArrowRight size={11} className="shrink-0" /> {e.label ?? e.kind} → {e.toLabel}</li>
           ))}
           {s.messages.map((e) => (
-            <span key={e.edgeId} className={`${chip} !text-info`}>
-              <Mail size={10} className="shrink-0" /> {e.label ?? 'message'} → {e.toLabel}
-            </span>
+            <li key={e.edgeId} className={`${note} text-info`}><Mail size={11} className="shrink-0" /> {e.label ?? 'message'} → {e.toLabel}</li>
           ))}
-        </div>
+        </ul>
       )}
     </Link>
   );
 }
 
-// The flow reads top to bottom along a rail: numbered steps on the main path, small dots inside a
-// branch lane. A fan-out splits into side-by-side lanes, each headed by its condition.
+// The flow reads top to bottom along a rail. Every marker's centre sits 18px below the top of its
+// row, and each row's line runs from its own marker centre to the next row's — so they always meet.
+// A fan-out splits into side-by-side lanes, each headed by its condition.
 function FlowRows({ rows, nested = false }: { rows: RoutingRow[]; nested?: boolean }) {
   let n = 0;
   return (
     <ol>
       {rows.map((r, i) => {
         const last = i === rows.length - 1;
-        const tint = r.kind === 'step' ? stepTint(r.step) : null;
-        const marker = r.kind === 'step' ? (nested ? null : ++n) : r.kind === 'back' ? 'back' : 'branch';
+        const tint = r.kind === 'step' ? stepTint(r.step) : 'bg-line-strong';
+        const num = r.kind === 'step' && !nested ? ++n : null;
         return (
-          <li key={i} className={`relative ${nested ? 'pl-6' : 'pl-10'} ${last ? '' : 'pb-3'}`}>
-            {!last && <span aria-hidden className={`absolute w-px bg-line ${nested ? 'left-[3.5px] top-5 bottom-0' : 'left-[13.5px] top-8 bottom-0'}`} />}
-            {marker === null && <span aria-hidden className={`absolute left-0 top-[16px] h-2 w-2 rounded-full border border-line-strong ${tint?.bg ?? 'bg-surface'}`} />}
-            {marker !== null && (
-              <span aria-hidden className={`absolute left-0 grid h-7 w-7 place-items-center rounded-full border border-line-strong ${tint?.bg ?? 'bg-surface'} text-2xs font-mono ${tint && tint.bg === 'bg-navy' ? 'text-white' : 'text-fg'} ${nested ? 'top-0.5' : 'top-1'}`}>
-                {marker === 'back' ? <CornerUpLeft size={12} /> : marker === 'branch' ? <GitBranch size={12} /> : marker}
-              </span>
-            )}
+          <li key={i} className={`relative ${nested ? 'pl-5' : 'pl-9'} ${last ? '' : 'pb-2.5'}`}>
+            {!last && <span aria-hidden className={`absolute w-px -bottom-[18px] top-[18px] bg-line-strong ${nested ? 'left-[3.5px]' : 'left-[11.5px]'}`} />}
+            {nested
+              ? <span aria-hidden className={`absolute left-0 top-[14px] h-2 w-2 rounded-full ${tint}`} />
+              : (
+                <span aria-hidden className={`absolute left-0 top-1.5 grid h-6 w-6 place-items-center rounded-full text-2xs font-mono ${r.kind === 'step' ? `${tint} ${tint === 'bg-navy' ? 'text-white' : 'text-fg'}` : 'border border-line-strong bg-surface text-fg-3'}`}>
+                  {r.kind === 'back' ? <CornerUpLeft size={11} /> : r.kind === 'branches' ? <GitBranch size={11} /> : num}
+                </span>
+              )}
             {r.kind === 'step' && <StepCard s={r.step} />}
-            {r.kind === 'back' && (
-              <div className="inline-flex items-center gap-1 rounded-lg border border-dashed border-line-strong px-2.5 py-1.5 text-xs text-fg-3">
-                back to <b className="font-medium text-fg-2">{r.toLabel}</b>
-              </div>
-            )}
+            {r.kind === 'back' && <div className="py-1.5 text-xs text-fg-3">back to <span className="font-medium text-fg-2">{r.toLabel}</span></div>}
             {r.kind === 'branches' && (
               <div className={`grid gap-3 ${r.lanes.length > 1 && !nested ? 'lg:grid-cols-2' : ''}`}>
                 {r.lanes.map((l) => (
-                  <div key={l.edgeId} className="min-w-0 rounded-xl border border-dashed border-line-strong bg-sunken/40 p-3">
-                    <div className="mb-3"><Tag tone={l.isElse ? 'idle' : 'info'}>{l.label}</Tag></div>
+                  <div key={l.edgeId} className="min-w-0 rounded-lg border border-line p-3">
+                    <div className="mb-2.5 text-2xs font-mono uppercase tracking-wide text-fg-3">{l.label}</div>
                     <FlowRows rows={l.rows} nested />
                   </div>
                 ))}
