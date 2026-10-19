@@ -1,9 +1,10 @@
 import { Select } from '../Select';
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { del, get, post, put, useQuery } from '../api';
 import { Avatar, Dot, Empty, Modal, PageHeader, Segmented, Skeleton, Tag, act, roleLabel, toast, toneOf } from '../components';
 import { agentInOffice, downloadJson, fileSlug, readJsonFile, useOffice } from '../office';
-import { ArrowRight, Building2, Copy, Download, GripVertical, Pencil, Plus, ShieldAlert, Trash2, Upload, X } from 'lucide-react';
+import { ArrowRight, Building2, CheckCircle2, Circle, Copy, Download, GripVertical, Pencil, Plus, ShieldAlert, Trash2, Upload, X } from 'lucide-react';
 
 // Offices: each office is a workspace with its own agents, desks (roles) and workflows. The page
 // manages them — create, clone, rename, delete, export/import — and shows the chosen office's desks.
@@ -24,6 +25,8 @@ export default function Office() {
   const [choice, setChoice] = useState<'finish' | 'handoff' | 'abort'>('finish');
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const { data: officeFlows } = useQuery<any[]>(office ? `/workflows?workspaceId=${office.id}` : null, [office?.id]);
+  const { data: allRuns } = useQuery<any[]>('/runs');
 
   const refresh = () => { reloadOffices(); reloadAgents(); };
 
@@ -115,6 +118,8 @@ export default function Office() {
         ))}
       </div>
 
+      <SetupGuide office={office} mine={mine} flows={officeFlows ?? []} runs={(allRuns ?? []).filter((r) => r.workspaceId === office.id)} />
+
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-5 items-start">
         <section className="panel">
           <div className="flex items-center gap-2.5 px-5 pt-4 pb-1 flex-wrap">
@@ -151,7 +156,7 @@ export default function Office() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {here.map((a) => <AgentCard key={a.id} a={a} conflict={sodConflict(a)} onRemove={() => void removeFromOffice(a)} />)}
-                    {!here.length && <span className={`text-xs ${over ? 'text-accent' : 'text-fg-4'}`}>{over ? 'Release to preview the move' : 'Empty desk'}</span>}
+                    {!here.length && <span className={`text-xs ${over ? 'text-accent' : 'text-fg-4'}`}>{over ? 'Release to preview the move' : 'Empty desk — drop an agent here'}</span>}
                   </div>
                 </div>
               );
@@ -176,7 +181,7 @@ export default function Office() {
       </div>
 
       {dialog?.kind === 'new' && <NewOfficeDialog offices={offices} defaultFrom={office.id} onClose={() => setDialog(null)}
-        onCreated={(id) => { setDialog(null); setOfficeId(id); refresh(); }} />}
+        onCreated={(id, name, copied) => { setDialog(null); setOfficeId(id); refresh(); toast(copied ? `${name} created — a copy of its source. Review its agents and flow.` : `${name} created — follow the setup steps on this page.`); }} />}
       {dialog?.kind === 'rename' && <RenameDialog office={office} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} />}
       {dialog?.kind === 'delete' && (
         <Modal title={`Delete ${office.name}?`} onClose={() => setDialog(null)} footer={<>
@@ -229,48 +234,125 @@ export default function Office() {
   );
 }
 
-function NewOfficeDialog({ offices, defaultFrom, onClose, onCreated }: { offices: { id: string; name: string }[]; defaultFrom: string; onClose: () => void; onCreated: (id: string) => void }) {
+function NewOfficeDialog({ offices, defaultFrom, onClose, onCreated }: { offices: { id: string; name: string }[]; defaultFrom: string; onClose: () => void; onCreated: (id: string, name: string, copied: boolean) => void }) {
   const [name, setName] = useState('');
   const [purpose, setPurpose] = useState('');
   const [from, setFrom] = useState<string>('');   // '' = blank
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const source = offices.find((o) => o.id === from);
+  const trimmed = name.trim();
+  const taken = !!trimmed && offices.some((o) => o.name.toLowerCase() === trimmed.toLowerCase());
+  const create = async () => {
+    if (!trimmed || taken || busy) return;
+    setBusy(true); setError('');
+    try {
+      const r = await post<{ id: string; warnings: string[] }>('/workspaces', { name: trimmed, purpose: purpose.trim(), cloneFrom: from || undefined });
+      if (r.warnings.length) toast(r.warnings[0], 'warn');
+      onCreated(r.id, trimmed, !!from);
+    } catch (e) { setError(String((e as Error).message ?? e)); }
+    setBusy(false);
+  };
+  const choice = (on: boolean) => `text-left rounded-xl border px-3.5 py-3 transition-colors ${on ? 'border-fg bg-raised' : 'border-line hover:border-line-strong'}`;
   return (
-    <Modal title="New office" onClose={onClose} footer={<>
+    <Modal title="New office" width="max-w-xl" onClose={onClose} footer={<>
       <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-      <button className="btn btn-primary" disabled={!name.trim() || busy} onClick={async () => {
-        setBusy(true);
-        const r = await act(post<{ id: string; warnings: string[] }>('/workspaces', { name: name.trim(), purpose: purpose.trim(), cloneFrom: from || undefined }), `${name.trim()} created`);
-        setBusy(false);
-        if (r) { if (r.warnings.length) toast(r.warnings[0], 'warn'); onCreated(r.id); }
-      }}>{busy ? 'Creating…' : 'Create office'}</button>
+      <button className="btn btn-primary" disabled={!trimmed || taken || busy} onClick={() => void create()}>{busy ? 'Creating…' : 'Create office'}</button>
     </>}>
-      <div className="space-y-4">
-        <label className="block">
-          <span className="field-label">Name</span>
-          <input className="input w-full" autoFocus placeholder="e.g. Docs team" value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="block">
-          <span className="field-label">What is it for? <span className="text-fg-4 font-normal">(optional)</span></span>
-          <input className="input w-full" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
-        </label>
+      <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); void create(); }}>
+        <p className="text-sm text-fg-2">An office is a separate team: <b className="font-medium text-fg">its own agents, its own workflow and its own runs</b>. You switch between offices from the sidebar, and every page shows only the office you picked.</p>
+
         <div>
-          <span className="field-label">Start from</span>
-          <Segmented value={from ? 'copy' : 'blank'} options={['blank', 'copy'] as const} onChange={(v) => setFrom(v === 'copy' ? defaultFrom : '')} />
+          <label className="block">
+            <span className="field-label">1 · Name it</span>
+            <input className="input w-full" autoFocus placeholder="e.g. Docs team, Backend, Client work" value={name} onChange={(e) => { setName(e.target.value); setError(''); }} aria-invalid={taken} />
+          </label>
+          {taken
+            ? <p className="text-xs text-bad mt-1.5">You already have an office called “{offices.find((o) => o.name.toLowerCase() === trimmed.toLowerCase())?.name}” — pick a different name.</p>
+            : <p className="text-xs text-fg-4 mt-1.5">Shown in the sidebar switcher. You can rename it later.</p>}
+        </div>
+
+        <label className="block">
+          <span className="field-label">2 · What is it for? <span className="text-fg-4 font-normal normal-case tracking-normal">(optional)</span></span>
+          <input className="input w-full" placeholder="One line, for your own reference" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
+        </label>
+
+        <div>
+          <span className="field-label">3 · Where does it start?</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2" role="radiogroup" aria-label="Where the office starts">
+            <button type="button" role="radio" aria-checked={!from} className={choice(!from)} onClick={() => setFrom('')}>
+              <span className="flex items-center gap-2 text-sm font-medium text-fg"><Building2 size={14} /> Blank</span>
+              <span className="block text-xs text-fg-3 mt-1">An empty office. You choose its agents and flow. Best for a genuinely different team.</span>
+            </button>
+            <button type="button" role="radio" aria-checked={!!from} className={choice(!!from)} onClick={() => setFrom(from || defaultFrom)}>
+              <span className="flex items-center gap-2 text-sm font-medium text-fg"><Copy size={14} /> Copy of an office</span>
+              <span className="block text-xs text-fg-3 mt-1">Starts with a copy of another office's agents, desks and workflows. Best for a variation of what you have.</span>
+            </button>
+          </div>
           {from && (
             <Select className="input w-full mt-2" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Office to copy">
-              {offices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              {offices.map((o) => <option key={o.id} value={o.id}>Copy of {o.name}</option>)}
             </Select>
           )}
-          <p className="text-xs text-fg-4 mt-2 flex items-start gap-1.5">
-            {from ? <Copy size={12} className="mt-0.5 shrink-0" /> : <Building2 size={12} className="mt-0.5 shrink-0" />}
-            {from
-              ? `Copies ${source?.name}'s agents, desks and workflows. The agents are new ones — changing them here never touches ${source?.name}.`
-              : 'No agents and only the built-in pipeline. Hire agents or add existing ones, then build a workflow.'}
-          </p>
         </div>
-      </div>
+
+        <div className="rounded-xl border border-line bg-sunken/50 px-4 py-3.5">
+          <div className="eyebrow mb-2">What happens next</div>
+          {from ? (
+            <ol className="space-y-1.5 text-xs text-fg-2 list-decimal pl-4 marker:text-fg-4">
+              <li>{source?.name}'s agents are <b className="font-medium">copied as new agents</b> with the same roles and settings, so editing them here never changes {source?.name}.</li>
+              <li>Its workflows are copied too, pointing at the new agents, and the active one stays active.</li>
+              <li>Then change what makes this office different: rename or swap agents, edit the flow.</li>
+            </ol>
+          ) : (
+            <ol className="space-y-1.5 text-xs text-fg-2 list-decimal pl-4 marker:text-fg-4">
+              <li>The office is created <b className="font-medium">empty</b>. Nothing can run until it has agents.</li>
+              <li><b className="font-medium">Add agents:</b> hire new ones on the Agents page, or drag existing ones from “Available agents” onto a desk here.</li>
+              <li><b className="font-medium">Give each a role</b> by dropping it on a desk: a PM, a developer, and a reviewer or QA are the core of the standard pipeline.</li>
+              <li>Optionally <b className="font-medium">build or import a workflow</b>. Until you do, the standard pipeline is used.</li>
+              <li>Send your first request from the Dashboard — you'll point it at a repository folder.</li>
+            </ol>
+          )}
+          {!from && <p className="text-2xs text-fg-4 mt-2.5">This page will show you a setup checklist for the new office.</p>}
+        </div>
+
+        {error && <div role="alert" className="rounded-xl border border-bad/30 bg-bad/[0.06] px-3.5 py-2.5 text-xs text-bad">{error}</div>}
+        <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
+      </form>
     </Modal>
+  );
+}
+
+// A checklist for an office that can't run yet. It ticks itself off from what the office actually has,
+// and goes away once the office has its core agents.
+function SetupGuide({ office, mine, flows, runs }: { office: { id: string; name: string }; mine: any[]; flows: any[]; runs: any[] }) {
+  const roles = new Set(mine.flatMap((a) => (a.memberships ?? []).filter((m: any) => m.active && m.workspace_id === office.id).map((m: any) => m.role as string)));
+  const missing = [!roles.has('pm') && 'a PM', !roles.has('developer') && 'a developer', !(roles.has('reviewer') || roles.has('qa')) && 'a reviewer or QA'].filter(Boolean) as string[];
+  const customFlow = flows.some((f) => f.active && !f.builtin);
+  const steps = [
+    { done: mine.length > 0, title: 'Add agents', hint: 'Hire a new agent, or drag one from “Available agents” (right) onto a desk below.', action: <Link to="/agents" className="btn btn-xs">Hire an agent</Link> },
+    { done: missing.length === 0, title: 'Fill the core desks', hint: missing.length ? `Still needed: ${missing.join(', ')}. Drop an agent on each desk below to give it that role.` : 'A PM, a developer and a reviewer or QA are in place.' },
+    { done: customFlow, optional: true, title: 'Choose how work flows', hint: customFlow ? 'This office has its own active workflow.' : 'Optional. Until you build or import a workflow, the standard pipeline is used.', action: <Link to="/workflow" className="btn btn-xs">Open Workflow</Link> },
+    { done: runs.length > 0, title: 'Send the first request', hint: 'On the Dashboard, describe what you want built and choose a repository folder.', action: <Link to="/" className="btn btn-xs">Go to Dashboard</Link> },
+  ];
+  if (steps[0].done && steps[1].done) return null;
+  return (
+    <section className="panel mb-5 p-5" aria-label={`Set up ${office.name}`}>
+      <h2 className="text-[15px] font-semibold">Set up {office.name}</h2>
+      <p className="text-xs text-fg-3 mt-0.5 mb-4">This office can't run work yet. Four steps, in order:</p>
+      <ol className="space-y-3">
+        {steps.map((st, i) => (
+          <li key={st.title} className="flex items-start gap-3">
+            {st.done ? <CheckCircle2 size={18} className="text-ok shrink-0 mt-px" /> : <Circle size={18} className="text-fg-4 shrink-0 mt-px" />}
+            <div className="min-w-0 flex-1">
+              <div className={`text-sm ${st.done ? 'text-fg-3' : 'font-medium text-fg'}`}>{i + 1}. {st.title}{st.optional && <span className="ml-2 text-2xs font-normal text-fg-4">optional</span>}</div>
+              <div className="text-xs text-fg-3 mt-0.5">{st.hint}</div>
+            </div>
+            {!st.done && st.action}
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 
