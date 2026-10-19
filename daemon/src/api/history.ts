@@ -10,6 +10,8 @@ import {
 } from '../services/checkpoints.ts';
 import { commitDiff, commitInfo, currentBranch, dirtyPaths, gitLog, revertCommit } from '../services/commits.ts';
 import { isGitRepo } from '../services/snapshot.ts';
+import { checkRepo, listActivity } from '../services/repo-watch.ts';
+import { gitOk } from '../services/git.ts';
 import { commitTask, getTask } from '../engine/engine.ts';
 import { getAgent } from '../services/router.ts';
 
@@ -70,7 +72,8 @@ export function registerHistoryRoutes(app: Express): void {
     const busy = q1(`SELECT id, label FROM repo_checkpoints WHERE repo_id = ? AND status = 'open'`, cp.repoId);
     if (busy) return err(res, 409, `"${busy.label}" is working in this repository right now — pause the run first`);
     try {
-      const r = perform(req.params.id, op);
+      // partial: change the files that can be changed safely and leave the ones that overlap later edits
+      const r = perform(req.params.id, op, 'owner', { partial: req.body?.partial === true });
       res.status(r.ok ? 200 : 409).json(r);
     } catch (e) { err(res, 500, String((e as Error).message ?? e)); }
   });
@@ -96,52 +99,92 @@ export function registerHistoryRoutes(app: Express): void {
       working: q1(`SELECT id, label, task_id FROM repo_checkpoints WHERE repo_id = ? AND status = 'open' AND kind = 'general'`, repo.id) ?? null });
   });
 
-  // ---------------- timeline: commits + checkpoints + operations + task events, newest first
-  app.get('/api/repos/:id/timeline', (req, res) => {
+  // ---------------- timeline: commits (from any tool) + checkpoints + operations + task events + repository activity, newest first
+  app.get('/api/repos/:id/timeline', async (req, res) => {
     const repo = repoOf(req.params.id);
     if (!repo) return err(res, 404, 'repo not found');
     const limit = Math.min(Number(req.query.limit) || 40, 200);
+    const lim = limit + 1;   // one more than a page, so we know whether another page exists
     const before = req.query.before ? String(req.query.before) : '9999';
+    const text = req.query.q ? String(req.query.q).trim() : '';
+    const author = req.query.author ? String(req.query.author) : '';
+    const want = new Set((req.query.kinds ? String(req.query.kinds) : 'commit,checkpoint,event,activity').split(',').map((s) => s.trim()));
+    // a commit made a moment ago in VS Code or a terminal must not wait for the next poll
+    try { await checkRepo(repo.id); } catch { /* the page still works from what is stored */ }
+    const git = isGitRepo(repo.path);
     const entries: Record<string, unknown>[] = [];
     // AI commits are known from their checkpoint/commit record
     const aiCommits = new Map<string, { taskId: string | null; checkpointId: string }>();
     for (const c of q(`SELECT id, task_id, commit_sha FROM repo_checkpoints WHERE repo_id = ? AND commit_sha IS NOT NULL`, repo.id)) aiCommits.set(c.commit_sha as string, { taskId: c.task_id as string | null, checkpointId: c.id as string });
-    if (isGitRepo(repo.path)) {
-      for (const c of gitLog(repo.path, { limit, before: before !== '9999' ? before : undefined }).filter((c) => new Date(c.date).toISOString() < before)) {
+    const matches = (s: string) => !text || s.toLowerCase().includes(text.toLowerCase());
+    if (git && want.has('commit')) {
+      for (const c of gitLog(repo.path, { all: true, limit: lim, before: before !== '9999' ? before : undefined, grep: text || undefined, author: author || undefined, stat: true })
+        .filter((c) => new Date(c.committed).toISOString() < before)) {
         const ai = aiCommits.get(c.sha);
-        entries.push({ id: `commit:${c.sha}`, type: 'commit', ts: new Date(c.date).toISOString(), title: c.subject, actor: ai ? 'AI' : c.author,
-          origin: ai ? 'ai' : 'user', sha: c.sha, refs: c.refs, taskId: ai?.taskId ?? null, checkpointId: ai?.checkpointId ?? null });
+        const decorations = c.refs ? c.refs.split(', ').map((r) => r.trim()).filter(Boolean) : [];
+        entries.push({
+          id: `commit:${c.sha}`, type: 'commit', ts: new Date(c.committed).toISOString(), authoredAt: new Date(c.date).toISOString(), title: c.subject, actor: ai ? 'AI' : c.author,
+          author: c.author, email: c.email, origin: ai ? 'ai' : 'user', sha: c.sha, parents: c.parents, merge: c.parents.length > 1,
+          head: decorations.some((d) => d.startsWith('HEAD')), branches: decorations.filter((d) => !d.startsWith('tag:')).map((d) => d.replace(/^HEAD -> /, '')).filter((d) => d !== 'HEAD'),
+          tags: decorations.filter((d) => d.startsWith('tag:')).map((d) => d.slice(4).trim()),
+          taskId: ai?.taskId ?? null, checkpointId: ai?.checkpointId ?? null, stat: c.files != null ? { files: c.files, added: c.added ?? 0, removed: c.removed ?? 0 } : null,
+        });
       }
     }
-    for (const cp of listCheckpoints({ repoId: repo.id, before, limit })) {
-      entries.push({ id: `cp:${cp.id}`, type: cp.kind === 'agent' ? 'agent-checkpoint' : cp.kind === 'manual' ? 'manual-checkpoint' : 'general-checkpoint',
-        ts: cp.createdAt, completedAt: cp.completedAt, title: cp.label, actor: getAgent(cp.agentId)?.name ?? (cp.kind === 'manual' ? 'you' : 'engine'),
-        status: cp.status, files: cp.files, checkpointId: cp.id, parentId: cp.parentId, taskId: cp.taskId, sha: cp.commitSha });
+    if (want.has('checkpoint')) {
+      for (const cp of listCheckpoints({ repoId: repo.id, before, limit: lim }).filter((cp) => matches(`${cp.label} ${cp.taskId ?? ''}`))) {
+        entries.push({ id: `cp:${cp.id}`, type: cp.kind === 'agent' ? 'agent-checkpoint' : cp.kind === 'manual' ? 'manual-checkpoint' : 'general-checkpoint',
+          ts: cp.createdAt, completedAt: cp.completedAt, title: cp.label, actor: getAgent(cp.agentId)?.name ?? (cp.kind === 'manual' ? 'you' : 'engine'),
+          status: cp.status, files: cp.files, checkpointId: cp.id, parentId: cp.parentId, taskId: cp.taskId, sha: cp.commitSha, branch: cp.branch, headSha: cp.headSha, fileCount: cp.fileCount, skipped: cp.skipped });
+      }
+      for (const o of q(`SELECT o.*, c.label, c.kind, c.task_id FROM checkpoint_ops o JOIN repo_checkpoints c ON c.id = o.checkpoint_id WHERE c.repo_id = ? AND o.at < ? ORDER BY o.at DESC LIMIT ?`, repo.id, before, lim)) {
+        const title = `${String(o.op).charAt(0).toUpperCase()}${String(o.op).slice(1)} ${o.kind} checkpoint "${o.label}"`;
+        if (!matches(String(title))) continue;
+        entries.push({ id: `op:${o.id}`, type: o.op, ts: o.at, title, actor: o.actor, ok: !!o.ok, detail: o.detail, files: parseJson(o.files as string, []), checkpointId: o.checkpoint_id, taskId: o.task_id });
+      }
     }
-    for (const o of q(`SELECT o.*, c.label, c.kind, c.task_id FROM checkpoint_ops o JOIN repo_checkpoints c ON c.id = o.checkpoint_id WHERE c.repo_id = ? AND o.at < ? ORDER BY o.at DESC LIMIT ?`, repo.id, before, limit)) {
-      entries.push({ id: `op:${o.id}`, type: o.op, ts: o.at, title: `${String(o.op).charAt(0).toUpperCase()}${String(o.op).slice(1)} ${o.kind} checkpoint "${o.label}"`,
-        actor: o.actor, ok: !!o.ok, detail: o.detail, files: parseJson(o.files as string, []), checkpointId: o.checkpoint_id, taskId: o.task_id });
+    if (want.has('activity')) {
+      for (const a of listActivity(repo.id, before, lim)) {
+        if (!matches(String(a.subject))) continue;
+        entries.push({ id: `act:${a.id}`, type: 'activity', activity: a.kind, ts: a.at, title: a.subject, actor: 'git', sha: a.sha ?? null, prevSha: a.prev_sha ?? null, branch: a.branch ?? null, detail: a.detail });
+      }
     }
-    const runIds = q('SELECT id FROM runs WHERE repo_id = ?', repo.id).map((r) => r.id as string);
+    const runIds = want.has('event') ? q('SELECT id FROM runs WHERE repo_id = ?', repo.id).map((r) => r.id as string) : [];
     if (runIds.length) {
       const evs = q(`SELECT * FROM events WHERE run_id IN (${runIds.map(() => '?').join(',')}) AND ts < ?
-                     AND (type IN ('commit.created','commit.failed','readonly.violation','repo.dirty','checkpoint.recovered','qa.decided','review.decided','accept.decided','run.created')
+                     AND (type IN ('commit.created','commit.failed','readonly.violation','repo.dirty','checkpoint.recovered','qa.decided','review.decided','accept.decided','run.created','human.decided')
                           OR (type = 'task.status' AND json_extract(payload, '$.status') IN ('in-progress','done','failed','cancelled','blocked')))
-                     ORDER BY seq DESC LIMIT ?`, ...runIds, before, limit);
+                     ORDER BY seq DESC LIMIT ?`, ...runIds, before, lim);
       for (const e of evs) {
         const p = parseJson<Record<string, unknown>>(e.payload as string, {});
         const title = e.type === 'task.status' ? `Task ${p.status === 'in-progress' ? 'started' : p.status}: ${p.title ?? ''}`
           : e.type === 'commit.created' ? `Committed: ${p.title}` : e.type === 'run.created' ? `Request: ${p.goal}`
             : e.type === 'qa.decided' || e.type === 'review.decided' ? `Review ${p.decision}` : e.type === 'accept.decided' ? `PM ${p.decision === 'accept' ? 'accepted' : 'sent back'}${p.notes ? ` — ${p.notes}` : ''}`
-              : e.type === 'readonly.violation' ? `${p.agent} changed files during read-only ${p.kind}` : e.type === 'repo.dirty' ? `Uncommitted changes found before a task (${p.count} file(s)) — preserved`
-                : e.type === 'checkpoint.recovered' ? 'Interrupted work recovered after restart' : e.type === 'commit.failed' ? `Commit failed: ${p.error}` : e.type;
+              : e.type === 'human.decided' ? `You ${p.decision} "${p.nodeLabel}"${p.feedback ? ` — ${p.feedback}` : ''}`
+                : e.type === 'readonly.violation' ? `${p.agent} changed files during read-only ${p.kind}` : e.type === 'repo.dirty' ? `Uncommitted changes found before a task (${p.count} file(s)) — preserved`
+                  : e.type === 'checkpoint.recovered' ? 'Interrupted work recovered after restart' : e.type === 'commit.failed' ? `Commit failed: ${p.error}` : e.type;
+        if (!matches(String(title))) continue;
         entries.push({ id: `ev:${e.seq}`, type: e.type === 'task.status' ? 'task' : e.type === 'run.created' ? 'request' : 'event', event: e.type, ts: e.ts, title, actor: e.actor,
           taskId: (p.taskId as string) ?? (e.type === 'task.status' ? e.entity_id : null), sha: p.sha ?? null, files: p.files ?? null, runId: e.run_id });
       }
     }
     entries.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
     const page = entries.slice(0, limit);
-    ok(res, { entries: page, next: entries.length > limit ? String(page[page.length - 1].ts) : null });
+    // the live picture, with the first page only: where HEAD is, what is uncommitted, how far ahead of the remote
+    let working: Record<string, unknown> | null = null;
+    if (git && before === '9999') {
+      const head = gitOk(repo.path, ['log', '-1', '--format=%H%x1f%s%x1f%an%x1f%cI']);
+      const [hSha, hSubject, hAuthor, hAt] = head.ok ? head.out.split('\x1f') : [];
+      const dirty = dirtyPaths(repo.path);
+      const lr = gitOk(repo.path, ['rev-list', '--left-right', '--count', '@{u}...HEAD']);
+      const [behind, ahead] = lr.ok ? lr.out.split(/\s+/).map(Number) : [null, null];
+      working = {
+        branch: currentBranch(repo.path), head: hSha ? { sha: hSha, subject: hSubject, author: hAuthor, at: hAt } : null,
+        dirty: { count: dirty.length, files: dirty.slice(0, 8) }, ahead, behind, upstream: lr.ok,
+        task: q1(`SELECT id, label, task_id FROM repo_checkpoints WHERE repo_id = ? AND status = 'open' AND kind = 'general'`, repo.id) ?? null,
+      };
+    }
+    ok(res, { entries: page, next: entries.length > limit ? String(page[page.length - 1].ts) : null, working });
   });
 
   // ---------------- commits

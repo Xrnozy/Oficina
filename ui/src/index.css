@@ -81,6 +81,11 @@
 }
 
 @layer components {
+  /* Every modal, drawer and palette shares these: one dimmed backdrop (no blur — it haloed the rounded corners), the dialog
+     centred in the visible viewport at every width, clipped to its radius so nothing pokes out of a corner. */
+  .overlay { @apply fixed inset-0 z-[80] grid place-items-center overflow-y-auto bg-black/45 p-4; }
+  .overlay-top { @apply place-items-start justify-items-center pt-[12vh]; }
+  .dialog { @apply relative flex w-full flex-col overflow-hidden rounded-2xl border border-line-strong bg-surface shadow-dialog outline-none; max-height: calc(100dvh - 2rem); }
   .panel { @apply bg-surface border border-line rounded-2xl min-w-0; }
   .card { @apply bg-surface border border-line rounded-xl min-w-0; }
   .panel-head { @apply flex items-center gap-2 px-4 pt-3.5 pb-2.5; }

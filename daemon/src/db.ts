@@ -195,6 +195,13 @@ CREATE TABLE IF NOT EXISTS request_queue (
   status TEXT DEFAULT 'queued', run_id TEXT, created_at TEXT, started_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_queue_ws ON request_queue(workspace_id, status);
+-- What the repository watcher saw last, and the things it saw happen outside the app (switches, rewrites, branch changes).
+CREATE TABLE IF NOT EXISTS repo_watch (repo_id TEXT PRIMARY KEY, head TEXT, branch TEXT, refs TEXT DEFAULT '{}', seen_at TEXT);
+CREATE TABLE IF NOT EXISTS repo_activity (
+  id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, kind TEXT NOT NULL, sha TEXT, prev_sha TEXT, branch TEXT,
+  subject TEXT DEFAULT '', author TEXT DEFAULT '', detail TEXT DEFAULT '{}', at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_repo_activity ON repo_activity(repo_id, at);
 -- CLI sessions an agent can keep using across work items instead of starting a new one each time.
 -- external_id is the CLI's own id for the session (what --resume takes); started = the CLI has actually created it.
 CREATE TABLE IF NOT EXISTS cli_sessions (
@@ -233,7 +240,11 @@ addColumn('work_items', 'workflow_edge_id', `TEXT`);               // …and the
 addColumn('attachments', 'role', `TEXT`);                          // audience: every agent acting in this role (scope 'role')
 addColumn('attachments', 'item_ref', `TEXT`);                      // the task work item a file was attached to
 addColumn('attachments', 'path', `TEXT`);                          // where the bytes are (documents/<audience>/ in the repository)
-addColumn('attachments', 'repo_id', `TEXT`);                       // the repository that holds it, if any
+addColumn('attachments', 'repo_id', `TEXT`);
+addColumn('repo_checkpoints', 'head_sha', `TEXT`);                 // the commit HEAD pointed at when the snapshot was taken
+addColumn('repo_checkpoints', 'branch', `TEXT`);                   // …and the branch (null = detached)
+addColumn('repo_checkpoints', 'file_count', `INTEGER`);            // files in the snapshot
+addColumn('repo_checkpoints', 'skipped', `TEXT DEFAULT '[]'`);     // files git could not or would not store (too large, unindexable)                       // the repository that holds it, if any
 
 // Stage 7 indexes: the hot predicates that had only run_id indexes before
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_task ON work_items(task_id, status)`);

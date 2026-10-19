@@ -153,11 +153,25 @@ By default (**Routing → Where agents work → direct**) agents work inside the
 - **Agent Checkpoint** — one agent's work item inside a task, recorded before and after it ran.
 - **Manual Checkpoint** — a save point you create (Checkpoints → Save).
 
-Undo / Redo / Restore apply the recorded change to the current working tree as a patch, after a dry run that shows the exact files and lines and any conflicts. Nothing is re-run and no model is called. Your other edits and other agents' work are kept; when they overlap the change, the operation is refused and nothing changes. Later work touching the same files is listed as a dependency. Undoing a task takes its agents' checkpoints with it; undoing one agent leaves the rest. Restore first saves the current state, so it is reversible too. Snapshots are git tree objects (tracked, untracked and deleted files; not ignored ones) built in a private index and pinned under `refs/officechain/`, so `git gc` keeps them; your index, branch and stash are never touched. Checkpoints left open by a crash are closed as `interrupted` on restart and stay undoable. Retention: the newest 500 per repository (`pruneCheckpoints`).
+Undo / Redo / Restore move the working tree between two recorded states, **file by file**, after a dry run that shows each file's fate. Nothing is re-run and no model is called. For every file the preview says one of:
+
+- **replace** — the file is exactly how the other side left it, so it is replaced or deleted;
+- **merge** — you edited the file since, but not where this change was: the two sets of edits are merged and both kept;
+- **blocked** — you edited the same lines, deleted the file, changed a binary, or a file or folder is in the way: the file is left exactly as it is and the reason is shown;
+- **done** — the file is already how it should end up.
+
+If anything is blocked the whole operation is refused and **nothing changes**; you can also choose *Undo the N safe files only*, which changes those and leaves the blocked ones untouched (the checkpoint stays "applied" until the rest is resolved, and running it again recognises what is already done). Folders an undo needs are created again, and folders it empties are removed — never a folder that still holds anything. Every write keeps a backup and is read back afterwards: if any step fails or any result differs from what was planned, every file is put back as it was. Later work touching the same files is listed as a dependency. Undoing a task takes its agents' checkpoints with it; undoing one agent leaves the rest. Restore first saves the current state, so it is reversible too.
+
+**What a snapshot is.** A git tree object (tracked, untracked and deleted files; not ignored ones) built in a private index and pinned under `refs/officechain/`, so `git gc` keeps it; your index, branch and stash are never touched. When a checkpoint is created the snapshot is *proven* before anything relies on it: the tree must read back from git and the pinned ref must resolve to it (one retry from a fresh index, otherwise the checkpoint is refused rather than trusted). It records the branch and commit HEAD was on, how many files it holds, and the files it could not store (too large, or unindexable by git) — shown on the checkpoint, and never touched by undo or restore. Checkpoints left open by a crash are closed as `interrupted` on restart and stay undoable. Retention: the newest 500 per repository (`pruneCheckpoints`).
 
 ### Repository timeline
 
-**Repo timeline** lists, newest first and page by page: your commits and the AI's (linked to their task and agents), General and Agent Checkpoints, undo/redo/restore operations, task starts and results, reviews and acceptance decisions, and recovery events. Click an entry to see the actual diff. Commits can be reverted or reapplied (as new commits) after a dry run; two commits or two checkpoints can be compared.
+**Repo timeline** is a live picture of the repository, newest first and grouped by day: commits from **every local branch and tag, whoever made them** (an agent, VS Code, a terminal), General and Agent Checkpoints, undo/redo/restore, branch switches, amends and resets, new and deleted branches and tags, task results and reviews, and your Human-approval decisions.
+
+- **Commits from outside the app.** The daemon watches each registered repository every few seconds (and again when you open the page). A commit made in VS Code appears as soon as it is seen, the page refreshes itself and says how many came from outside; commits made while the daemon was off are found on the next start. Commits the office made itself keep their *AI* label and link to their task and agents; everything else is yours (with its git author).
+- **Context at the top:** the current branch, HEAD, how far ahead of or behind the remote you are, and a live count of uncommitted files (also as the first row of the timeline).
+- **Filters:** search (commit messages, checkpoint and task names), an author menu, and Everything / Commits / AI / You / Checkpoints / Branches & history / Tasks & reviews. A side panel shows commits per day (AI vs yours) and the branches seen.
+- Each commit shows its branches, tags, merge/HEAD badges and lines added/removed; click an entry for the actual diff. Commits can be reverted or reapplied (as new commits) after a dry run; two commits or two checkpoints can be compared. History rewrites are shown for what they are: the earlier commits are still in git's reflog.
 
 ### Commits
 

@@ -167,17 +167,39 @@ export function revertCommit(repo: string, sha: string, reapply = false, dryRun 
 
 // ------------------------------------------------------------ history
 
-export interface LogEntry { sha: string; parents: string[]; subject: string; author: string; email: string; date: string; refs: string; files?: number }
+export interface LogEntry {
+  sha: string; parents: string[]; subject: string; author: string; email: string;
+  date: string;                 // authored (what git shows as the commit's date)
+  committed: string;            // committed — what --before filters on, so the timeline pages on this one
+  refs: string; files?: number; added?: number; removed?: number;
+}
 
-/** One page of history for a ref (default: HEAD), newest first. */
-export function gitLog(repo: string, opts: { ref?: string; skip?: number; limit?: number; path?: string; before?: string } = {}): LogEntry[] {
-  const r = tryGit(repo, ['log', opts.ref ?? 'HEAD', `--skip=${opts.skip ?? 0}`, `-n`, String(Math.min(opts.limit ?? 50, 200)), ...(opts.before ? [`--before=${opts.before}`] : []),
-    '--format=%H%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%aI%x1f%D%x1e', ...(opts.path ? ['--', opts.path] : [])]);
+/** One page of history for a ref (default: HEAD), newest first. `all` adds every local branch and tag. */
+export function gitLog(repo: string, opts: { ref?: string; skip?: number; limit?: number; path?: string; before?: string; all?: boolean; grep?: string; author?: string; stat?: boolean } = {}): LogEntry[] {
+  const r = tryGit(repo, ['log', opts.ref ?? 'HEAD', ...(opts.all ? ['--branches', '--tags'] : []), `--skip=${opts.skip ?? 0}`, `-n`, String(Math.min(opts.limit ?? 50, 200)),
+    ...(opts.before ? [`--before=${opts.before}`] : []), ...(opts.grep ? ['-i', '--grep', opts.grep, '--fixed-strings'] : []), ...(opts.author ? ['-i', '--author', opts.author] : []),
+    ...(opts.stat ? ['--shortstat'] : []),
+    '--format=%x1e%H%x1f%P%x1f%s%x1f%an%x1f%ae%x1f%aI%x1f%D%x1f%cI', ...(opts.path ? ['--', opts.path] : [])]);
   if (!r.ok) return [];
-  return r.out.split('\x1e').map((s) => s.trim()).filter(Boolean).map((s) => {
-    const [sha, parents, subject, author, email, date, refs] = s.split('\x1f');
-    return { sha, parents: parents ? parents.split(' ') : [], subject, author, email, date, refs };
+  return r.out.split('\x1e').map((s) => s.trim()).filter(Boolean).map((chunk) => {
+    const [head, ...rest] = chunk.split('\n');
+    const [sha, parents, subject, author, email, date, refs, committed] = head.split('\x1f');
+    const stat = rest.join(' ').match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/);
+    return {
+      sha, parents: parents ? parents.split(' ') : [], subject, author, email, date, refs, committed: committed || date,
+      ...(stat ? { files: +stat[1], added: +(stat[2] ?? 0), removed: +(stat[3] ?? 0) } : {}),
+    };
   });
+}
+
+/** Commits between two points (exclusive of `from`), oldest first; used to describe what happened outside the app. */
+export function commitsBetween(repo: string, from: string, to: string, limit = 50): LogEntry[] {
+  return gitLog(repo, { ref: `${from}..${to}`, limit }).reverse();
+}
+
+/** Is `ancestor` part of `ref`'s history? (false when either is unknown) */
+export function isAncestor(repo: string, ancestor: string, ref: string): boolean {
+  return tryGit(repo, ['merge-base', '--is-ancestor', ancestor, ref]).ok;
 }
 
 export function commitDiff(repo: string, sha: string, against?: string): { files: FileChange[]; diff: string } {

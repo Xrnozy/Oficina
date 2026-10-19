@@ -254,6 +254,13 @@ export function KV({ k, children }: { k: string; children: React.ReactNode }) {
 
 // ---------------- overlays -------------------------------------------------
 
+// A dialog takes focus when it opens (so Esc and Tab work inside it) unless a field in it already has it (autoFocus).
+function useDialogFocus<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  useEffect(() => { const el = ref.current; if (el && !el.contains(document.activeElement)) el.focus({ preventScroll: true }); }, []);
+  return ref;
+}
+
 function useEscape(onClose: () => void) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -264,17 +271,18 @@ function useEscape(onClose: () => void) {
 
 export function Modal({ title, onClose, children, footer, width = 'max-w-lg' }: { title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; width?: string }) {
   useEscape(onClose);
+  const dialogRef = useDialogFocus<HTMLDivElement>();
   // rendered into <body>: a modal opened from inside a page must sit above every part of it (a page section with its own
   // stacking context, such as the Live activity chat, otherwise paints over it)
   return createPortal(
-    <div className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-[2px] flex items-start sm:items-center justify-center p-4 pt-[8vh] sm:pt-4" onClick={onClose}>
-      <div role="dialog" aria-modal aria-label={title} className={`animate-rise w-full ${width} max-h-[85vh] flex flex-col bg-surface border border-line-strong rounded-2xl shadow-pop`} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 pt-4 pb-3">
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal aria-label={title} tabIndex={-1} ref={dialogRef} className={`dialog animate-rise ${width}`}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0">
           <h2 className="text-[15px] font-semibold">{title}</h2>
           <button onClick={onClose} className="btn btn-ghost btn-icon btn-sm" aria-label="Close"><X size={15} /></button>
         </div>
-        <div className="px-5 pb-5 overflow-auto">{children}</div>
-        {footer && <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-line bg-raised/40 rounded-b-2xl">{footer}</div>}
+        <div className="px-5 pb-5 overflow-auto min-h-0 flex-1">{children}</div>
+        {footer && <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-line bg-raised/40 shrink-0">{footer}</div>}
       </div>
     </div>,
     document.body,
@@ -283,9 +291,10 @@ export function Modal({ title, onClose, children, footer, width = 'max-w-lg' }: 
 
 export function Drawer({ title, onClose, children, footer }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode }) {
   useEscape(onClose);
+  const dialogRef = useDialogFocus<HTMLElement>();
   return createPortal(
-    <div className="fixed inset-0 z-[80] bg-black/40" onClick={onClose}>
-      <aside role="dialog" aria-modal className="animate-slide absolute right-0 top-0 h-full w-full max-w-[520px] flex flex-col bg-surface border-l border-line-strong shadow-pop" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[80] bg-black/45" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <aside role="dialog" aria-modal tabIndex={-1} ref={dialogRef} className="animate-slide absolute right-0 top-0 h-full w-full max-w-[520px] flex flex-col bg-surface border-l border-line-strong shadow-drawer outline-none">
         <div className="flex items-center gap-3 px-5 h-14 border-b border-line shrink-0">
           <div className="flex-1 min-w-0 flex items-center gap-2.5">{title}</div>
           <button onClick={onClose} className="btn btn-ghost btn-icon btn-sm" aria-label="Close"><X size={15} /></button>
@@ -350,7 +359,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   };
   return (
     <>
-      {open && <div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={onClose} />}
+      {open && <div className="fixed inset-0 z-30 bg-black/45 lg:hidden" onClick={onClose} />}
       <nav aria-label="Main" className={`fixed lg:static z-40 inset-y-0 left-0 w-60 lg:w-56 shrink-0 bg-canvas lg:bg-transparent border-r border-line flex flex-col transition-transform duration-200 ${open ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}>
         <div className="h-14 flex items-center gap-2.5 px-4 shrink-0">
           <Logo />
@@ -500,8 +509,8 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: 
   const run_ = (i: number) => { const c = filtered[i]; if (c) { setOpen(false); c.act(); } };
   let lastGroup = '';
   return (
-    <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-[2px] flex items-start justify-center p-4 pt-[14vh]" onClick={() => setOpen(false)}>
-      <div className="animate-rise w-full max-w-[560px] bg-surface border border-line-strong rounded-2xl shadow-pop overflow-hidden" onClick={(e) => e.stopPropagation()}>
+    <div className="overlay overlay-top" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false); }}>
+      <div className="dialog animate-rise max-w-[560px]">
         <div className="flex items-center gap-2.5 px-4 border-b border-line">
           <Command size={15} className="text-fg-4" />
           <input autoFocus className="flex-1 h-12 bg-transparent text-[15px] text-fg placeholder:text-fg-4 outline-none" placeholder="Type a command, page, task or agent…"

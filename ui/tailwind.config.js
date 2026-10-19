@@ -43,7 +43,10 @@ export default {
         sm: ['13px', '19px'],
       },
       boxShadow: {
-        pop: '0 1px 0 0 rgb(0 0 0 / 0.03) inset, 0 4px 16px 0 rgb(0 0 0 / 0.06), 0 12px 32px -8px rgb(0 0 0 / 0.12)',
+        // one family of shadows, all pure black at low alpha with a negative spread: soft, never a coloured or inset glow
+        pop: '0 8px 24px -8px rgb(0 0 0 / 0.22), 0 2px 6px -2px rgb(0 0 0 / 0.1)',
+        dialog: '0 28px 70px -18px rgb(0 0 0 / 0.38), 0 10px 28px -10px rgb(0 0 0 / 0.22)',
+        drawer: '-18px 0 44px -14px rgb(0 0 0 / 0.32)',
       },
       keyframes: {
         rise: { from: { opacity: '0', transform: 'translateY(4px)' }, to: { opacity: '1', transform: 'none' } },

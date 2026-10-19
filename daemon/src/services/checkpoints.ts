@@ -6,9 +6,10 @@ import { q, q1, run } from '../db.ts';
 import { emit } from '../bus.ts';
 import { now, parseJson, ulid } from '../util.ts';
 import {
-  RAW, applyPatch, changedFilesBetween, unaddablePaths, checkPatch, displayDiff, patchBetween, pinTree, snapshotTree,
+  RAW, changedFilesBetween, unaddablePaths, displayDiff, largeUntracked, patchBetween, pinTree, snapshotTree,
   type ApplyCheck, type FileChange,
 } from './snapshot.ts';
+import { applyPlan, planTransition, treeDelta, type FilePlan, type TransitionPlan } from './apply-tree.ts';
 
 // Checkpoints (two levels, deliberately separate):
 //   general — the whole result of a task (or a manual save point): before and
@@ -30,6 +31,7 @@ export interface Checkpoint {
   label: string; prompt: string; beforeTree: string; afterTree: string | null;
   files: FileChange[]; status: 'open' | 'applied' | 'undone' | 'interrupted';
   commitSha: string | null; createdAt: string; completedAt: string | null; changedAt: string | null;
+  headSha: string | null; branch: string | null; fileCount: number | null; skipped: string[];   // what the snapshot was taken against, and what it could not hold
 }
 
 function rowTo(r: Record<string, unknown>): Checkpoint {
@@ -41,6 +43,7 @@ function rowTo(r: Record<string, unknown>): Checkpoint {
     files: parseJson(r.files as string, []), status: r.status as Checkpoint['status'],
     commitSha: (r.commit_sha as string) ?? null, createdAt: r.created_at as string,
     completedAt: (r.completed_at as string) ?? null, changedAt: (r.changed_at as string) ?? null,
+    headSha: (r.head_sha as string) ?? null, branch: (r.branch as string) ?? null, fileCount: (r.file_count as number) ?? null, skipped: parseJson(r.skipped as string, []),
   };
 }
 
@@ -63,18 +66,45 @@ function logOp(cp: Checkpoint, op: string, ok: boolean, detail: string, files: u
 
 // ---------------------------------------------------------------- recording
 
+const gitOut = (repo: string, args: string[]): string | null => {
+  try { return execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return null; }
+};
+
+/**
+ * Take a snapshot of the working tree and prove it is usable before anything relies on it: the tree object must be readable,
+ * it must be pinned under a ref git will never collect, and that ref must resolve to the same tree. A failed first attempt (a
+ * stale index, a transient lock) is retried once from a fresh index. Also records what the snapshot was taken against: the
+ * commit and branch HEAD was on, how many files it holds, and which files could not be stored.
+ */
+function reliableSnapshot(repo: string, id: string, side: 'before' | 'after', label: string): { tree: string; head: string | null; branch: string | null; count: number; skipped: string[] } {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const tree = snapshotTree(repo);
+      pinTree(repo, tree, `cp/${id}/${side}`, `checkpoint ${id} ${side}: ${label}`.slice(0, 200));
+      const pinned = gitOut(repo, ['rev-parse', '--verify', `refs/officechain/cp/${id}/${side}^{tree}`]);
+      if (gitOut(repo, ['cat-file', '-t', tree]) !== 'tree' || pinned !== tree) throw new Error('the snapshot could not be read back from git');
+      const count = (gitOut(repo, ['ls-tree', '-r', '--name-only', tree]) ?? '').split('\n').filter(Boolean).length;
+      return {
+        tree, count, head: gitOut(repo, ['rev-parse', '--verify', 'HEAD']), branch: gitOut(repo, ['symbolic-ref', '--short', '-q', 'HEAD']) || null,
+        skipped: [...new Set([...largeUntracked(repo), ...unaddablePaths(repo)])],
+      };
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`could not record a reliable snapshot of the repository: ${String((lastErr as Error)?.message ?? lastErr).slice(0, 300)}`);
+}
+
 export function beginCheckpoint(opts: {
   repoId: string; kind: CheckpointKind; label: string; prompt?: string; parentId?: string | null;
   runId?: string | null; taskId?: string | null; workItemId?: string | null; agentId?: string | null;
 }): Checkpoint {
   const repo = repoPath(opts.repoId);
   const id = ulid();
-  const tree = snapshotTree(repo);
-  pinTree(repo, tree, `cp/${id}/before`, `checkpoint ${id} before: ${opts.label}`.slice(0, 200));
-  run(`INSERT INTO repo_checkpoints (id, repo_id, kind, parent_id, run_id, task_id, work_item_id, agent_id, label, prompt, before_tree, status, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  const { tree, head, branch, count, skipped } = reliableSnapshot(repo, id, 'before', opts.label);
+  run(`INSERT INTO repo_checkpoints (id, repo_id, kind, parent_id, run_id, task_id, work_item_id, agent_id, label, prompt, before_tree, status, created_at, head_sha, branch, file_count, skipped)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     id, opts.repoId, opts.kind, opts.parentId ?? null, opts.runId ?? null, opts.taskId ?? null, opts.workItemId ?? null,
-    opts.agentId ?? null, opts.label, (opts.prompt ?? '').slice(0, 20000), tree, 'open', now());
+    opts.agentId ?? null, opts.label, (opts.prompt ?? '').slice(0, 20000), tree, 'open', now(), head, branch, count, JSON.stringify(skipped.slice(0, 200)));
   const cp = getCheckpoint(id)!;
   emit('checkpoint.created', 'engine', { checkpointId: id, kind: cp.kind, label: cp.label, taskId: cp.taskId, agentId: cp.agentId }, cp.runId, id);
   return cp;
@@ -88,8 +118,7 @@ export function endCheckpoint(id: string, status: 'applied' | 'interrupted' = 'a
   const repo = repoPath(cp.repoId);
   let tree: string;
   try {
-    tree = snapshotTree(repo);
-    pinTree(repo, tree, `cp/${id}/after`, `checkpoint ${id} after: ${cp.label}`.slice(0, 200));
+    tree = reliableSnapshot(repo, id, 'after', cp.label).tree;
   } catch (e) {
     // never leave it open: an open checkpoint holds the repository for its task
     const error = String((e as Error)?.message ?? e).slice(0, 500);
@@ -181,47 +210,56 @@ export function dependents(cp: Checkpoint): { id: string; kind: string; label: s
     .filter((o) => o.files.length > 0);
 }
 
+export interface PlannedFile { path: string; state: 'already' | 'clean' | 'merge' | 'conflict' | 'overwrite'; reason?: string }
 export interface Preview {
   op: 'undo' | 'redo' | 'restore'; checkpoint: Checkpoint; allowed: boolean; reason?: string;
   check: ApplyCheck; files: FileChange[]; diff: string; dependents: ReturnType<typeof dependents>;
+  plan: PlannedFile[];            // what will happen to each file: replaced, merged with your edits, left alone (conflict), already done
+  partialAllowed: boolean;        // some files conflict but others can still be changed on their own
 }
 
-// What an operation would change: the exact files and lines (as a diff of
-// the current state → the resulting state), whether it applies, and what
-// later work depends on it.
-function plan(cp: Checkpoint, op: 'undo' | 'redo' | 'restore'): { preview: Preview; patch: string; reverse: boolean } {
+const entryStatus = (f: FilePlan): FileChange['status'] => (!f.from ? 'A' : !f.to ? 'D' : 'M');
+
+// What an operation would change: the exact files and lines, which of them can be changed safely, and what later work
+// depends on it. Nothing is written here.
+function plan(cp: Checkpoint, op: 'undo' | 'redo' | 'restore'): { preview: Preview; tp: TransitionPlan | null } {
   const repo = repoPath(cp.repoId);
-  const base = { checkpoint: cp, op, dependents: [] as ReturnType<typeof dependents> };
-  const deny = (reason: string) => ({ preview: { ...base, allowed: false, reason, check: { ok: false, conflicts: [], message: reason }, files: [], diff: '' }, patch: '', reverse: false });
+  const base = { checkpoint: cp, op, dependents: [] as ReturnType<typeof dependents>, plan: [] as PlannedFile[], partialAllowed: false };
+  const deny = (reason: string) => ({ preview: { ...base, allowed: false, reason, check: { ok: false, conflicts: [], message: reason }, files: [], diff: '' } as Preview, tp: null });
   if (cp.status === 'open') return deny('work is still running in this checkpoint');
   if (!cp.afterTree && cp.kind !== 'manual') return deny('the state after this work could not be recorded (see the checkpoint error) — use Restore on an earlier checkpoint instead');
+  let from: string, to: string;
   if (op === 'restore') {
     // make the working tree equal to this checkpoint's (after) state
-    const target = cp.afterTree ?? cp.beforeTree;
-    const current = snapshotTree(repo);
-    const patch = patchBetween(repo, current, target);
-    const check = checkPatch(repo, patch, false);
-    return { preview: { ...base, allowed: check.ok, reason: check.ok ? undefined : 'the working tree changed while previewing', check, files: changedFilesBetween(repo, current, target), diff: displayDiff(repo, current, target) }, patch, reverse: false };
+    from = snapshotTree(repo); to = cp.afterTree ?? cp.beforeTree;
+  } else {
+    if (cp.kind === 'manual') return deny('a manual checkpoint is a save point — use Restore');
+    if (cp.kind === 'agent' && cp.parentId) {
+      const parent = getCheckpoint(cp.parentId);
+      if (parent?.status === 'undone') return deny('the whole task is undone — redo the task first');
+    }
+    if (op === 'undo' && cp.status === 'undone') return deny('already undone');
+    if (op === 'redo' && cp.status !== 'undone') return deny('only an undone checkpoint can be redone');
+    const after = op === 'redo' ? cp.afterTree! : effectiveAfter(repo, cp);
+    if (!treeDelta(repo, cp.beforeTree, after).length) return deny('this checkpoint changed no files');
+    [from, to] = op === 'undo' ? [after, cp.beforeTree] : [cp.beforeTree, after];
   }
-  if (cp.kind === 'manual') return deny('a manual checkpoint is a save point — use Restore');
-  if (cp.kind === 'agent' && cp.parentId) {
-    const parent = getCheckpoint(cp.parentId);
-    if (parent?.status === 'undone') return deny('the whole task is undone — redo the task first');
-  }
-  if (op === 'undo' && cp.status === 'undone') return deny('already undone');
-  if (op === 'redo' && cp.status !== 'undone') return deny('only an undone checkpoint can be redone');
-  const after = op === 'redo' ? cp.afterTree! : effectiveAfter(repo, cp);
-  const patch = patchBetween(repo, cp.beforeTree, after);
-  if (!patch.trim()) return deny('this checkpoint changed no files');
-  const reverse = op === 'undo';
-  const check = checkPatch(repo, patch, reverse);
-  const [from, to] = reverse ? [after, cp.beforeTree] : [cp.beforeTree, after];
+  const tp = planTransition(repo, from, to, { force: op === 'restore' });
+  const touched = tp.files.filter((f) => f.state !== 'already');
+  const files: FileChange[] = tp.changing.map((f) => ({ status: entryStatus(f), path: f.path }));
+  const diffPaths = touched.map((f) => f.path);
+  const reason = tp.ok ? undefined : tp.conflicts.length === tp.files.length
+    ? 'files changed since this checkpoint overlap its changes' : `${tp.conflicts.length} of ${tp.files.length} files changed since this checkpoint overlap its changes`;
   return {
     preview: {
-      ...base, allowed: check.ok, reason: check.ok ? undefined : 'files changed since this checkpoint overlap its changes',
-      check, files: changedFilesBetween(repo, from, to), diff: displayDiff(repo, from, to), dependents: dependents(cp),
+      ...base, allowed: tp.ok, reason,
+      check: { ok: tp.ok, conflicts: tp.conflicts, message: tp.ok ? 'applies cleanly' : (reason ?? '') },
+      files, diff: diffPaths.length ? displayDiff(repo, from, to, diffPaths) : '',
+      dependents: op === 'restore' ? [] : dependents(cp),
+      plan: tp.files.map((f) => ({ path: f.path, state: f.state, reason: f.reason })),
+      partialAllowed: !tp.ok && tp.changing.length > 0,
     },
-    patch, reverse,
+    tp,
   };
 }
 
@@ -231,14 +269,17 @@ export function preview(id: string, op: 'undo' | 'redo' | 'restore'): Preview {
   return plan(cp, op).preview;
 }
 
-export interface OpResult { ok: boolean; message: string; preview: Preview }
+export interface OpResult { ok: boolean; message: string; preview: Preview; partial?: boolean; skipped?: { path: string; reason: string }[] }
 
-/** Undo, redo or restore. Refuses (changing nothing) when the dry run fails. */
-export function perform(id: string, op: 'undo' | 'redo' | 'restore', actor = 'owner'): OpResult {
+/**
+ * Undo, redo or restore. Refuses (changing nothing) when a file cannot be changed safely, unless `partial` asks for the safe
+ * files only. A failed write puts every file back; the result is verified file by file.
+ */
+export function perform(id: string, op: 'undo' | 'redo' | 'restore', actor = 'owner', opts: { partial?: boolean } = {}): OpResult {
   const cp = getCheckpoint(id);
   if (!cp) throw new Error('checkpoint not found');
-  const { preview: pv, patch, reverse } = plan(cp, op);
-  if (!pv.allowed) {
+  const { preview: pv, tp } = plan(cp, op);
+  if (!tp || (!pv.allowed && !(opts.partial && pv.partialAllowed))) {
     logOp(cp, op, false, pv.reason ?? pv.check.message, pv.check.conflicts, actor);
     return { ok: false, message: pv.reason ?? pv.check.message, preview: pv };
   }
@@ -246,19 +287,24 @@ export function perform(id: string, op: 'undo' | 'redo' | 'restore', actor = 'ow
   // restore is reversible too: record the state it replaces as a checkpoint
   const guard = op === 'restore' ? beginCheckpoint({ repoId: cp.repoId, kind: 'manual', label: `Before restoring "${cp.label}"` }) : null;
   if (guard) run('UPDATE repo_checkpoints SET after_tree = before_tree, status = ?, completed_at = ? WHERE id = ?', 'applied', now(), guard.id);
-  const res = applyPatch(repo, patch, reverse);
+  const res = applyPlan(repo, tp, { partial: opts.partial });
   if (!res.ok) {
-    logOp(cp, op, false, res.message, res.conflicts, actor);
-    return { ok: false, message: res.message, preview: { ...pv, allowed: false, check: res } };
+    logOp(cp, op, false, res.message, res.skipped, actor);
+    return { ok: false, message: res.message, preview: { ...pv, allowed: false, check: { ok: false, conflicts: res.skipped, message: res.message } }, skipped: res.skipped };
   }
-  if (op !== 'restore') {
+  const partial = res.skipped.length > 0;
+  if (op !== 'restore' && !partial) {
     const status = op === 'undo' ? 'undone' : 'applied';
     run('UPDATE repo_checkpoints SET status = ?, changed_at = ? WHERE id = ?', status, now(), cp.id);
     // a task undone/redone as a whole takes its agents' checkpoints with it
     if (cp.kind === 'general') run(`UPDATE repo_checkpoints SET status = ?, changed_at = ? WHERE parent_id = ? AND status IN ('applied','undone')`, status, now(), cp.id);
   }
-  logOp(cp, op, true, `${op} applied to ${pv.files.length} file(s)`, pv.files, actor);
-  return { ok: true, message: `${op} done — ${pv.files.length} file(s) changed`, preview: pv };
+  const merged = tp.changing.filter((f) => f.state === 'merge').length;
+  const detail = partial
+    ? `${op} partly done — ${res.applied.length} file(s) changed, ${res.skipped.length} left alone because they overlap later edits`
+    : `${op} applied to ${res.applied.length} file(s)${merged ? ` (${merged} merged with later edits)` : ''}`;
+  logOp(cp, op, true, detail, pv.files, actor);
+  return { ok: true, partial, skipped: partial ? res.skipped : undefined, message: partial ? detail : `${op} done — ${res.applied.length} file(s) changed${merged ? `, ${merged} merged with your later edits` : ''}`, preview: pv };
 }
 
 /** Undo the most recent applied general checkpoint / redo the most recently undone. */
