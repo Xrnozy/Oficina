@@ -190,6 +190,11 @@ CREATE TABLE IF NOT EXISTS workflow_versions (
   graph TEXT NOT NULL, note TEXT DEFAULT '', created_by TEXT DEFAULT 'owner', created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_wfver ON workflow_versions(workflow_id, n);
+CREATE TABLE IF NOT EXISTS request_queue (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, text TEXT NOT NULL, source TEXT DEFAULT 'app',
+  status TEXT DEFAULT 'queued', run_id TEXT, created_at TEXT, started_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_queue_ws ON request_queue(workspace_id, status);
 `);
 
 // Columns added after the first release — added in place, data kept.

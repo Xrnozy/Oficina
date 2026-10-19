@@ -30,6 +30,7 @@ Because the engine is deterministic and event-sourced, every agent — including
 | **Deterministic workflow engine** | A durable state machine drives the loop. Agents are called at defined decision points; loops are bounded (3 attempts, then you decide). |
 | **Definition of Done** | Acceptance criteria map to checks: commands that must `exit 0`, zero open high/critical error reports, reviews approved by a *different* agent, required README sections, and more. |
 | **Visual workflow editor** | Edit the pipeline as a graph (agent, condition, merge, human and end nodes; success/failure/reject/message edges). Validate, dry-run with no model calls, version, clone and activate it — or pick a workflow per request. |
+| **Quick requests & queue** | Click the tray icon, type a prompt and pick the office: it joins that office's queue, which the whole app sees (the Dashboard lists it, Requests shows a badge). Start a queued request by hand, or let an office start them itself when it's idle (opt-in, one at a time). |
 | **Multiple offices** | Each office is its own set of agents, desks and workflows. Create one blank or by copying another, switch from the sidebar, and every page follows the choice. Export or import a whole office, or a single workflow, as portable JSON. |
 | **Smart model routing** | Per work item, picks the cheapest model option strong enough for the job — plan-billed CLI logins first, then lowest metered price — with circuit breakers, quota windows, budgets and failover. |
 | **Bring your own backend** | Claude Code, cursor-agent and Devin CLIs (their own logins), Devin's cloud API, OpenAI-compatible APIs (OpenAI, Ollama, LM Studio), the Anthropic API, or a scripted demo agent. |
@@ -80,6 +81,19 @@ The New office dialog explains what an office is, offers a blank start or a copy
 A new office shows a setup checklist until it has its core agents: add agents, fill the PM, developer and reviewer/QA desks, optionally choose a workflow, then send a first request.
 
 <img src="docs/screenshots/office-setup.png" alt="Offices page for an empty office showing a four-step setup checklist above its empty desks" width="900">
+
+### Quick requests from the tray
+Left-click the tray icon, write a prompt, choose the office, and press Ctrl+Enter. It is added to that office's queue; nothing runs until you start it, unless the office has auto-start on. The popup keeps an unsent draft and remembers the last office you used.
+
+<img src="docs/screenshots/tray-quick-request.png" alt="Quick request popup from the system tray with an office picker and a prompt" width="480">
+
+Right-click gives a themed menu that follows the Windows light/dark setting and shows the daemon status and how many requests are queued.
+
+<img src="docs/screenshots/tray-menu.png" alt="System tray right-click menu with status, new request, open, queue and quit" width="280">
+
+The queue appears on the Dashboard. **Start…** opens the New request form with the queued text (so you still pick the repository, budget and workflow); the checkbox lets the office start the next one automatically when it has no run in progress.
+
+<img src="docs/screenshots/queue.png" alt="Dashboard queue panel listing three queued requests with Start and remove buttons and an auto-start checkbox" width="900">
 
 ### Dropdowns
 Selects are a styled, keyboard-accessible dropdown that opens over modals and panels instead of the browser's native list.
@@ -156,7 +170,7 @@ Open <http://localhost:4780>. On first start the daemon seeds a **Demo Office** 
 ### Windows launchers
 
 - `start-office.bat` — starts the daemon in a console window and opens the UI (installs dependencies and builds the UI first if needed).
-- `start-office-tray.bat` — runs the daemon hidden with a system-tray icon; right-click for **Open officeChain** or **Quit officeChain**.
+- `start-office-tray.bat` — runs the daemon hidden with a system-tray icon. **Left-click** the icon to type a quick request into the queue; **right-click** for the menu (new request, open officeChain, queue, quit). Quit stops the daemon.
 
 ### Configuration
 
@@ -213,7 +227,7 @@ npm run bench -w daemon        # scripted end-to-end scenario (no model calls)
 npm run demo:workflow -w daemon  # end-to-end run on a custom workflow graph
 ```
 
-At the time of writing the daemon type-checks cleanly and the suite passes (139 tests).
+At the time of writing the daemon type-checks cleanly and the suite passes (146 tests).
 
 ## Status and limitations
 

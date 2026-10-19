@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
 import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'node:http';
@@ -93,6 +94,19 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.get('/api/workspaces', (_req, res) => {
     const rows = q('SELECT * FROM workspaces').map((r) => ({ ...r, repoIds: parseJson(r.repo_ids as string, []), allowedProviderIds: parseJson(r.allowed_provider_ids as string, []), settings: parseJson(r.settings as string, {}) }));
     ok(res, rows);
+  });
+
+  // ---------- request queue: prompts typed in the tray or the dashboard wait here, per office ----------
+  app.get('/api/queue', (req, res) => ok(res, listQueue(req.query.workspaceId ? String(req.query.workspaceId) : null)));
+  app.post('/api/queue', (req, res) => {
+    const r = enqueue({ text: req.body?.text, workspaceId: req.body?.workspaceId ?? null, source: req.body?.source });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
+  });
+  app.delete('/api/queue/:id', (req, res) => {
+    const r = removeQueued(req.params.id);
+    if ('error' in r) return err(res, r.error === 'not found' ? 404 : 409, r.error);
+    ok(res, r);
   });
 
   // ---------- offices (workspaces): create, clone, rename, delete, export/import ----------
@@ -548,7 +562,9 @@ export function createServer(port: number, uiDir: string): http.Server {
         const v = (limits as Record<string, unknown> | undefined)?.[k];
         if (v != null) { const n = Number(v); if (!Number.isFinite(n) || n < 0) return err(res, 400, `limits.${k} must be a non-negative number`); cleanLimits[k] = n; }
       }
-      ok(res, createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined }));
+      const created = createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined });
+      if (req.body?.queueId) markStarted(String(req.body.queueId), created.id);
+      ok(res, created);
     } catch (e) {
       if (/workflow not found/.test(String(e))) return err(res, 400, 'workflow not found or has no saved version');
       err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`);
@@ -597,6 +613,10 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (workMode != null && !['direct', 'isolated'].includes(workMode)) return err(res, 400, 'workMode must be direct | isolated');
     const commitMode = req.body?.commitMode;
     if (commitMode != null && !['auto', 'approve', 'manual'].includes(commitMode)) return err(res, 400, 'commitMode must be auto | approve | manual');
+    const autoStartQueue = req.body?.autoStartQueue;
+    if (autoStartQueue != null && typeof autoStartQueue !== 'boolean') return err(res, 400, 'autoStartQueue must be true or false');
+    const queueBudgetUsd = req.body?.queueBudgetUsd;
+    if (queueBudgetUsd != null && !(typeof queueBudgetUsd === 'number' && queueBudgetUsd > 0 && queueBudgetUsd <= 100000)) return err(res, 400, 'queueBudgetUsd must be a positive number');
     const approvalMode = req.body?.approvalMode;
     if (approvalMode != null && !['always-ask', 'ask-when-risky', 'auto'].includes(approvalMode)) return err(res, 400, 'approvalMode must be always-ask | ask-when-risky | auto');
     const settings = {
@@ -608,6 +628,8 @@ export function createServer(port: number, uiDir: string): http.Server {
       ...(workMode != null ? { workMode } : {}),
       ...(commitMode != null ? { commitMode } : {}),
       ...(approvalMode != null ? { approvalMode } : {}),
+      ...(autoStartQueue != null ? { autoStartQueue } : {}),
+      ...(queueBudgetUsd != null ? { queueBudgetUsd } : {}),
     };
     run('UPDATE workspaces SET settings = ? WHERE id = ?', JSON.stringify(settings), req.params.id);
     emit('workspace.settings', 'owner', { workspaceId: req.params.id, promptReview: settings.promptReview, selfReview: !!settings.selfReview, confirmPlan: !!settings.confirmPlan, routing: settings.routing ?? 'smart' });

@@ -16,7 +16,7 @@ type Row = Record<string, unknown>;
 const OFFICE_FORMAT = 'officechain.office';
 const WORKFLOW_FORMAT = 'officechain.workflow';
 // settings that travel with an office; the active-workflow pointer is rebuilt on import
-const PORTABLE_SETTINGS = ['promptReview', 'selfReview', 'confirmPlan', 'routing', 'workMode', 'commitMode', 'approvalMode'];
+const PORTABLE_SETTINGS = ['promptReview', 'selfReview', 'confirmPlan', 'routing', 'workMode', 'commitMode', 'approvalMode', 'queueBudgetUsd'];
 
 const clean = (s: unknown, max: number): string => String(s ?? '').trim().slice(0, max);
 const roleIdByName = (name: string): string | null => (q1('SELECT id FROM roles WHERE name = ? OR id = ?', name, name)?.id as string) ?? null;

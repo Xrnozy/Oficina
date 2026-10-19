@@ -1,5 +1,7 @@
 # officeChain tray agent - hosts a system tray icon, runs the daemon hidden,
 # and kills it on Quit. Requires Windows PowerShell (STA).
+#   left-click the icon  -> Quick request: type a prompt, it joins the office's queue
+#   right-click the icon -> menu (new request, open the app, queue, quit)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 # single instance: kill any other tray agent first - a hung one would hold
@@ -18,13 +20,25 @@ $script:daemonProc = $null
 $script:openedBrowser = $false
 $script:lastSeq = $null   # last notification seq shown (null = not seeded yet)
 $script:notifyTick = 0
+$script:queueCount = -1   # -1 = unknown (daemon down)
+
+# the daemon's port comes from daemon/office.yaml (default 4780)
+$port = 4780
+try {
+    $m = [regex]::Match((Get-Content (Join-Path $daemonDir 'office.yaml') -Raw), '(?m)^port:\s*(\d+)')
+    if ($m.Success) { $port = [int]$m.Groups[1].Value }
+} catch { }
+$appUrl = "http://localhost:$port"
+
+. (Join-Path $root 'office-tray-ui.ps1')
+$script:ApiPort = $port
 
 # Balloon tips for the three things worth interrupting the owner for:
 # a Needs-you decision, a run finishing, a run stopping badly. Everything
 # else stays in the event log.
 function Update-Notifications {
     try {
-        $url = 'http://127.0.0.1:4780/api/notifications'
+        $url = "http://127.0.0.1:$port/api/notifications"
         if ($script:lastSeq -ne $null) { $url += "?after=$($script:lastSeq)" }
         $items = Invoke-RestMethod -Uri $url -TimeoutSec 2 -ErrorAction Stop
         if ($script:lastSeq -eq $null) {
@@ -46,7 +60,7 @@ function Update-Notifications {
 function Test-Daemon {
     $client = New-Object System.Net.Sockets.TcpClient
     try {
-        $ar = $client.BeginConnect('127.0.0.1', 4780, $null, $null)
+        $ar = $client.BeginConnect('127.0.0.1', $port, $null, $null)
         if (-not $ar.AsyncWaitHandle.WaitOne(400)) { return $false }
         $client.EndConnect($ar)
         return $true
@@ -72,65 +86,25 @@ function Stop-Daemon {
         & taskkill /PID $script:daemonProc.Id /T /F 2>$null | Out-Null
     }
     # safety net: whatever is listening on the daemon port goes too
-    Get-NetTCPConnection -LocalPort 4780 -State Listen -ErrorAction SilentlyContinue |
+    Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
         ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 }
 
-# Tray icon: the app logo (four rounded squares) on a white tile, drawn at 32px so it stays crisp
-# at high DPI; Windows scales it down to the tray size. Same colours as the sidebar logo and favicon.
-function New-TrayIcon {
-    $size = 32
-    $bmp = New-Object System.Drawing.Bitmap $size, $size
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = 'AntiAlias'
-    $g.Clear([System.Drawing.Color]::Transparent)
-    function Add-Round($path, $x, $y, $w, $r) {
-        $d = $r * 2
-        $path.AddArc($x, $y, $d, $d, 180, 90); $path.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
-        $path.AddArc($x + $w - $d, $y + $w - $d, $d, $d, 0, 90); $path.AddArc($x, $y + $w - $d, $d, $d, 90, 90)
-        $path.CloseFigure()
-    }
-    function Fill-Round($color, $x, $y, $w, $r) {
-        $p = New-Object System.Drawing.Drawing2D.GraphicsPath
-        Add-Round $p $x $y $w $r
-        $b = New-Object System.Drawing.SolidBrush $color
-        $g.FillPath($b, $p); $b.Dispose(); $p.Dispose()
-    }
-    # tile
-    $tile = New-Object System.Drawing.Drawing2D.GraphicsPath
-    Add-Round $tile 0.5 0.5 31 7
-    $g.FillPath([System.Drawing.Brushes]::White, $tile)
-    $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(205, 205, 205)), 1
-    $g.DrawPath($pen, $tile); $pen.Dispose(); $tile.Dispose()
-    # logo squares: ink, lime, lilac, faded ink
-    Fill-Round ([System.Drawing.Color]::FromArgb(17, 17, 17))    6  6  9 2.5
-    Fill-Round ([System.Drawing.Color]::FromArgb(205, 232, 130)) 17 6  9 2.5
-    Fill-Round ([System.Drawing.Color]::FromArgb(176, 150, 240)) 6  17 9 2.5
-    Fill-Round ([System.Drawing.Color]::FromArgb(150, 17, 17, 17)) 17 17 9 2.5
-    $g.Dispose()
-    $h = $bmp.GetHicon()
-    $ico = [System.Drawing.Icon]::FromHandle($h).Clone()      # own copy, so the native handle can be released
-    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr h);'
-    [Win32.Native]::DestroyIcon($h) | Out-Null
-    $bmp.Dispose()
-    return $ico
-}
 $icon = New-TrayIcon
-
 $ni = New-Object System.Windows.Forms.NotifyIcon
 $ni.Icon = $icon
 $ni.Text = 'officeChain'
 $ni.Visible = $true
 
-$menu = New-Object System.Windows.Forms.ContextMenuStrip
-$miOpen = $menu.Items.Add('Open officeChain')
-$miOpen.Add_Click({ Start-Process 'http://localhost:4780' })
-$miOpen.Font = New-Object System.Drawing.Font($miOpen.Font, [System.Drawing.FontStyle]::Bold)
-$menu.Items.Add('-') | Out-Null
-$miStatus = $menu.Items.Add('daemon: starting...')
-$miStatus.Enabled = $false
-$menu.Items.Add('-') | Out-Null
-$miQuit = $menu.Items.Add('Quit officeChain')
+# ---- right-click menu -------------------------------------------------------------------------
+$dot = [string][char]0xB7
+$parts = New-TrayMenu
+$menu = $parts.Menu; $miStatus = $parts.Status; $miNew = $parts.New; $miOpen = $parts.Open; $miQueue = $parts.Queue; $miQuit = $parts.Quit
+
+$openQuick = { Show-QuickRequest { Start-Process $appUrl } { Update-QueueState } }
+$miNew.Add_Click({ & $openQuick })
+$miOpen.Add_Click({ Start-Process $appUrl })
+$miQueue.Add_Click({ Start-Process $appUrl })
 $miQuit.Add_Click({
     try { Stop-Daemon } catch {}
     $ni.Visible = $false
@@ -139,14 +113,36 @@ $miQuit.Add_Click({
     # which is exactly when you need Quit to work
     [Environment]::Exit(0)
 })
+$menu.Add_Opening({ Update-TrayMenuTheme $menu; Update-QueueState })
 $ni.ContextMenuStrip = $menu
-$ni.add_DoubleClick({ Start-Process 'http://localhost:4780' })
+$ni.add_MouseClick({ if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { & $openQuick } })
+
+# status line + queue count + tooltip, from what the daemon last said
+function Update-QueueState {
+    $up = Test-Daemon
+    if ($up) { $script:queueCount = Get-QueueCount } else { $script:queueCount = -1 }
+    if (-not $up) {
+        $miStatus.Text = 'Stopped'
+        $miQueue.Text = 'Queue'
+        $ni.Text = 'officeChain (stopped)'
+        return
+    }
+    if ($script:queueCount -gt 0) {
+        $miStatus.Text = "Running  $dot  $($script:queueCount) queued"
+        $miQueue.Text = "Queue  ($($script:queueCount) waiting)"
+        $ni.Text = "officeChain - $($script:queueCount) queued"
+    } else {
+        $miStatus.Text = "Running  $dot  queue is empty"
+        $miQueue.Text = 'Queue'
+        $ni.Text = 'officeChain (running)'
+    }
+}
 
 $already = Test-Daemon
 if ($already) {
+    $miStatus.Text = 'Running'
     $ni.Text = 'officeChain (running)'
-    $miStatus.Text = 'daemon: running on :4780'
-    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon already running - tray icon attached.', 'Info')
+    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon already running - click the icon to queue a request.', 'Info')
 } else {
     Start-Daemon
     $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon starting...', 'Info')
@@ -157,19 +153,17 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     if (Test-Daemon) {
-        if ($miStatus.Text -ne 'daemon: running on :4780') {
-            $miStatus.Text = 'daemon: running on :4780'
-            $ni.Text = 'officeChain (running)'
-        }
         if (-not $script:openedBrowser) {
             $script:openedBrowser = $true
-            Start-Process 'http://localhost:4780'
+            Start-Process $appUrl
         }
         $script:notifyTick++
-        if ($script:notifyTick % 5 -eq 0) { Update-Notifications }
-    } elseif ($miStatus.Text -ne 'daemon: down') {
-        $miStatus.Text = 'daemon: down'
-        $ni.Text = 'officeChain (down)'
+        if ($script:notifyTick % 5 -eq 0) { Update-Notifications; Update-QueueState }
+        elseif ($miStatus.Text -eq 'Stopped' -or $miStatus.Text -eq 'Starting...') { Update-QueueState }
+    } elseif ($miStatus.Text -ne 'Stopped') {
+        $miStatus.Text = 'Stopped'
+        $miQueue.Text = 'Queue'
+        $ni.Text = 'officeChain (stopped)'
     }
 })
 $timer.Start()

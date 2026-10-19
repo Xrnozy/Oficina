@@ -45,6 +45,12 @@ export function useOfficeAgents() {
   return { ...q, agents: mine, all: q.data ?? [] };
 }
 
+/** Requests waiting in the current office's queue (typed in the tray or the dashboard). */
+export function useOfficeQueue() {
+  const { office } = useOffice();
+  return useQuery<{ id: string; text: string; source: string; createdAt: string }[]>(office ? `/queue?workspaceId=${office.id}` : null, [office?.id]);
+}
+
 /** Approvals ("Needs you") raised by runs of the current office, plus any that belong to no run. */
 export function useOfficeApprovals() {
   const { office } = useOffice();

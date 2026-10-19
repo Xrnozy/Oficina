@@ -100,6 +100,16 @@ An **office** is a workspace with its own agents, desks (roles), workflows and r
 
 Agents are referenced **by name**, never by local id. On import a pinned step goes to the agent of that name in the target office (case-insensitive); if there is none it falls back to the step's role and the import reports which steps changed. Machine-specific things are not exported: backends, API keys and model fallbacks. Imported agents start on this machine's first enabled account, so check **Routing** afterwards.
 
+## Request queue
+
+Prompts typed somewhere quick wait in a **per-office queue** that the whole app shares: the Dashboard lists it, and the Requests item in the sidebar shows how many are waiting in the open office.
+
+**Adding.** Left-click the tray icon (Windows), type the prompt, pick the office and press Ctrl+Enter. The Dashboard's New request form also has **Queue for later**. A request is up to 8,000 characters and an office holds up to 200 queued requests. Over the API: `POST /api/queue { text, workspaceId, source }`, `GET /api/queue?workspaceId=`, `DELETE /api/queue/:id`.
+
+**Starting.** Nothing runs just because it was queued. **Start…** on the Dashboard opens the New request form with the text filled in, so the repository, budget and workflow are chosen as usual; sending it consumes the queue item. Alternatively tick *Start the next one automatically when <office> is idle*: the daemon then starts the oldest queued request whenever the office has no run in progress (draft, DoD review, running, paused…), one at a time, using the office's first repository and the budget shown next to the checkbox (default $50). It is off by default. An office with no repository keeps its queue and waits, and with *confirm plan* on, a started run waits at DoD review, so the office counts as busy until you act.
+
+**Tray.** The tray reads the daemon port from `daemon/office.yaml`, remembers the last office you queued into, keeps an unsent draft if you click away, and shows "<n> queued" in its status line and tooltip. The tray menu follows the Windows light/dark theme. The tray's code is in `office-tray.ps1` (the icon and daemon) and `office-tray-ui.ps1` (the menu and popup). Restart officeChain after updating so the daemon has the queue endpoints; an older daemon answers a quick request with a message saying so.
+
 ## Working in your repository (direct mode)
 
 By default (**Routing → Where agents work → direct**) agents work inside the repository you selected, on the branch you have checked out, like a coding CLI — no copies of the project. `isolated` keeps the older worktree-per-task flow.

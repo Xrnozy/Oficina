@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { post, useQuery, useWsConnected } from './api';
-import { OfficeSwitcher, useOffice, useOfficeApprovals } from './office';
+import { OfficeSwitcher, useOffice, useOfficeApprovals, useOfficeQueue } from './office';
 import {
   Activity, Bookmark, Building2, ChevronRight, GitCommitHorizontal, Clock, Command, Cpu, FileText, Inbox, LayoutDashboard, MessagesSquare,
   Library, ListChecks, Menu, Moon, Pause, Play, Plug, Route, Search, Square, Sun, TriangleAlert, Workflow, X,
@@ -297,7 +297,7 @@ export function Drawer({ title, onClose, children, footer }: { title: React.Reac
 
 const NAV: { group: string; items: { to: string; label: string; icon: LucideIcon; key?: string }[] }[] = [
   { group: 'Route', items: [
-    { to: '/', label: 'Requests', icon: LayoutDashboard },
+    { to: '/', label: 'Requests', icon: LayoutDashboard, key: 'queue' },
     { to: '/activity', label: 'Live activity', icon: Activity },
     { to: '/approvals', label: 'Needs you', icon: Inbox, key: 'approvals' },
     { to: '/tasks', label: 'Tasks', icon: ListChecks },
@@ -334,10 +334,12 @@ function Logo() {
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { data: approvals } = useOfficeApprovals();
   const { data: errors } = useQuery<any[]>('/errors');
+  const { data: queue } = useOfficeQueue();
   const connected = useWsConnected();
   const loc = useLocation();
   useEffect(() => { onClose(); }, [loc.pathname]); // eslint-disable-line react-hooks/exhaustive-deps
   const counts: Record<string, number> = {
+    queue: queue?.length ?? 0,
     approvals: approvals?.filter((a) => a.status === 'pending').length ?? 0,
     errors: errors?.filter((e) => !['resolved', 'wontfix'].includes(e.status)).length ?? 0,
   };
@@ -367,7 +369,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                         {isActive && <span className="absolute -left-2.5 top-1.5 bottom-1.5 w-[2px] rounded-r bg-accent" />}
                         <n.icon size={15} strokeWidth={1.75} className={isActive ? 'text-accent' : ''} />
                         {n.label}
-                        {c > 0 && <span className={`ml-auto num text-2xs font-semibold min-w-5 h-5 px-1.5 rounded-md grid place-items-center ${n.key === 'approvals' ? 'bg-warn/15 text-warn' : 'bg-bad/15 text-bad'}`}>{c}</span>}
+                        {c > 0 && <span className={`ml-auto num text-2xs font-semibold min-w-5 h-5 px-1.5 rounded-md grid place-items-center ${n.key === 'approvals' ? 'bg-warn/15 text-warn' : n.key === 'queue' ? 'bg-info/15 text-info' : 'bg-bad/15 text-bad'}`}>{c}</span>}
                       </>)}
                     </NavLink>
                   );

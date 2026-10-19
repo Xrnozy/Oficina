@@ -1,14 +1,14 @@
 import { Select } from '../Select';
 import { WorkflowSelect } from '../workflowPicker';
-import { useOffice, useOfficeAgents, useOfficeApprovals } from '../office';
+import { useOffice, useOfficeAgents, useOfficeApprovals, useOfficeQueue } from '../office';
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { post, useQuery } from '../api';
+import { del, post, put, useQuery } from '../api';
 import {
   Avatar, Meter, Muted, ObsBadge, PageHeader, Panel, ProgressBar, RunControls, Segmented, SevChip, Skeleton, Stat, StatusChip,
   Tag, act, fmtAgo, fmtIn, fmtNum, fmtUsd, pct, useCurrentRun,
 } from '../components';
-import { ArrowRight, CheckCircle2, Circle, Plus, Sparkles, XCircle, Zap } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Circle, ListPlus, Plus, Sparkles, X, XCircle, Zap } from 'lucide-react';
 
 // Role colours match the Workflow canvas and the Routing flow.
 const ROLE_BAR: Record<string, string> = { pm: 'bg-lilac', 'prompt-creator': 'bg-cream', developer: 'bg-lime', qa: 'bg-mint', reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream' };
@@ -17,12 +17,15 @@ export default function Dashboard() {
   const { run, loading } = useCurrentRun();
   const { data: detail } = useQuery<any>(run ? `/runs/${run.id}` : null, [run?.id]);
   const { agents } = useOfficeAgents();
+  const { office } = useOffice();
   const { data: errors } = useQuery<any[]>(run ? `/errors?runId=${run.id}` : null, [run?.id]);
   const { data: approvals } = useOfficeApprovals();
   const { data: providers } = useQuery<any>('/providers');
   const { data: usage } = useQuery<any>('/usage');
   const { data: tokenReport } = useQuery<any>(run ? `/runs/${run.id}/token-report` : null, [run?.id]);
   const [composing, setComposing] = useState(false);
+  const [prefill, setPrefill] = useState<{ goal: string; queueId: string } | null>(null);
+  const { data: queue, reload: reloadQueue } = useOfficeQueue();
 
   const openErrors = errors?.filter((e) => !['resolved', 'wontfix'].includes(e.status)) ?? [];
   const pendingApprovals = approvals?.filter((a) => a.status === 'pending') ?? [];
@@ -33,12 +36,14 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <PageHeader title="Dashboard" sub="Is the run healthy — and does it need you?">
-        {run && !composing && <button className="btn" onClick={() => setComposing(true)}><Plus size={14} /> New run</button>}
+        {run && !composing && <button className="btn" onClick={() => { setPrefill(null); setComposing(true); }}><Plus size={14} /> New run</button>}
       </PageHeader>
 
-      {(!run || composing) && <NewRun onCancel={run ? () => setComposing(false) : undefined} />}
+      {(!run || composing) && <NewRun key={prefill?.queueId ?? 'new'} prefill={prefill} onCancel={run ? () => { setComposing(false); setPrefill(null); } : undefined} onQueued={reloadQueue} />}
 
       {run && <RunCard run={run} detail={detail} live={!!live} />}
+
+      {office && <QueuePanel office={office} items={queue ?? []} reload={reloadQueue} onStart={(it) => { setPrefill({ goal: it.text, queueId: it.id }); setComposing(true); window.scrollTo?.({ top: 0 }); document.getElementById('main')?.scrollTo?.({ top: 0, behavior: 'smooth' }); }} />}
 
       <DigestPanel />
 
@@ -258,10 +263,10 @@ function TokenReportPanel({ report }: { report: any }) {
   );
 }
 
-function NewRun({ onCancel }: { onCancel?: () => void }) {
+function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefill?: { goal: string; queueId: string } | null; onQueued?: () => void }) {
   const { office, offices } = useOffice();
   const { data: repos } = useQuery<any[]>('/repos');
-  const [goal, setGoal] = useState('');
+  const [goal, setGoal] = useState(prefill?.goal ?? '');
   const [budget, setBudget] = useState('50');
   const [mode, setMode] = useState<'guided' | 'one-shot'>('guided');
   const [repoChoice, setRepoChoice] = useState('');
@@ -287,9 +292,10 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
         repoId = repo?.id;
         if (!repoId) { setBusy(false); return; }
       }
-      const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined }),
+      const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined, queueId: prefill?.queueId }),
         oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
       setBusy(false);
+      if (r?.id) onCancel?.();
       if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
     }}>
       <div className="flex items-center gap-3 mb-1 flex-wrap">
@@ -305,7 +311,8 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
       <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_auto] gap-x-3 gap-y-4 items-end">
         <label className="block">
           <span className="field-label">What do you want?</span>
-          <input className="input w-full" autoFocus placeholder="e.g. Add a --toc flag to the markdown converter, with tests and docs" value={goal} onChange={(e) => setGoal(e.target.value)} />
+          <textarea className="input w-full min-h-[3.25rem] resize-y" rows={2} autoFocus placeholder="e.g. Add a --toc flag to the markdown converter, with tests and docs" value={goal} onChange={(e) => setGoal(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit(); } }} />
         </label>
         <label className="block">
           <span className="field-label whitespace-nowrap">Budget (USD)</span>
@@ -313,6 +320,13 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
         </label>
         <div className="flex gap-2">
           {onCancel && <button type="button" className="btn btn-ghost" onClick={onCancel}>Cancel</button>}
+          {!prefill && (
+            <button type="button" className="btn" disabled={!goal.trim() || !office || busy} title="Keep it in this office's queue to start later"
+              onClick={async () => {
+                const r = await act(post('/queue', { text: goal, workspaceId: office!.id, source: 'app' }), 'Added to the queue');
+                if (r) { setGoal(''); onQueued?.(); }
+              }}><ListPlus size={13} /> Queue for later</button>
+          )}
           <button className="btn btn-primary" disabled={invalid || busy}>{busy ? 'Starting…' : oneShot ? <><Zap size={13} /> Run once</> : <>{confirmPlan ? 'Draft plan' : 'Send to PM'} <ArrowRight size={14} /></>}</button>
         </div>
       </div>
@@ -339,6 +353,52 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
       {!(budgetNum > 0) && <div className="text-xs text-bad mt-2">Budget must be a positive number.</div>}
       {offices && !offices.length && <div className="text-xs text-bad mt-2">No workspace exists yet — run <span className="mono">npm run seed</span> first.</div>}
     </form>
+  );
+}
+
+// Requests typed in the tray (or queued here) wait per office. Starting one opens the New request form with
+// its text, so the repository, budget and workflow are chosen as usual; or let the office start them itself.
+function QueuePanel({ office, items, reload, onStart }: { office: { id: string; name: string; settings: Record<string, any> }; items: { id: string; text: string; source: string; createdAt: string }[]; reload: () => void; onStart: (it: { id: string; text: string }) => void }) {
+  const { reload: reloadOffices } = useOffice();
+  const { data: repos } = useQuery<any[]>(`/repos?workspaceId=${office.id}`, [office.id]);
+  const auto = !!office.settings?.autoStartQueue;
+  const [budget, setBudget] = useState(String(office.settings?.queueBudgetUsd ?? 50));
+  useEffect(() => { setBudget(String(office.settings?.queueBudgetUsd ?? 50)); }, [office.id, office.settings?.queueBudgetUsd]);
+  const save = async (patch: Record<string, unknown>, msg: string) => { if (await act(put(`/workspaces/${office.id}/settings`, patch), msg)) reloadOffices(); };
+  const noRepo = repos != null && repos.length === 0;
+  return (
+    <Panel title={<>Queue{items.length > 0 && <span className="ml-2 chip !bg-info/10 !text-info !border-info/30">{items.length}</span>}</>}
+      action={<span className="text-2xs text-fg-4 hidden sm:inline">add one from the tray icon, or with Queue for later on the New request form</span>} bodyClass="px-2 pb-3">
+      {items.length === 0 && <div className="px-2 pb-1"><Muted>Nothing waiting. Click the officeChain tray icon, type a request, and it lands here for {office.name}.</Muted></div>}
+      <ul>
+        {items.map((it) => (
+          <li key={it.id} className="group flex items-start gap-3 px-2 py-2 rounded-lg hover:bg-raised transition-colors">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-fg-2 line-clamp-2 whitespace-pre-line">{it.text}</div>
+              <div className="text-2xs text-fg-4 mt-0.5">{it.source === 'tray' ? 'from the tray' : 'queued here'} · {fmtAgo(it.createdAt)}</div>
+            </div>
+            <button className="btn btn-xs shrink-0" onClick={() => onStart(it)} title="Open the New request form with this text">Start…</button>
+            <button className="btn btn-ghost btn-xs btn-icon shrink-0" aria-label="Remove from the queue" title="Remove"
+              onClick={async () => { if (await act(del(`/queue/${it.id}`), 'Removed')) reload(); }}><X size={13} /></button>
+          </li>
+        ))}
+      </ul>
+      <div className="mx-2 mt-2 pt-3 border-t border-line flex items-center gap-x-4 gap-y-2 flex-wrap text-xs text-fg-3">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" checked={auto} onChange={(e) => void save({ autoStartQueue: e.target.checked }, e.target.checked ? 'Queued requests will start automatically when this office is idle' : 'Auto-start is off — you start requests yourself')} />
+          Start the next one automatically when {office.name} is idle
+        </label>
+        {auto && (
+          <label className="flex items-center gap-1.5">
+            budget each $
+            <input className="input input-sm w-16 num" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)}
+              onBlur={() => { const n = Number(budget); if (n > 0 && n !== (office.settings?.queueBudgetUsd ?? 50)) void save({ queueBudgetUsd: n }, 'Budget saved'); else setBudget(String(office.settings?.queueBudgetUsd ?? 50)); }} />
+          </label>
+        )}
+        <span className="text-fg-4">{auto ? "Uses the office's first repository and runs one request at a time." : 'Off: nothing runs until you press Start.'}</span>
+        {auto && noRepo && <span className="text-warn">This office has no repository yet, so nothing can start. Start one by hand to add a folder.</span>}
+      </div>
+    </Panel>
   );
 }
 

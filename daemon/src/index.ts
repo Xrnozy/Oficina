@@ -1,3 +1,4 @@
+import { startQueueLoop } from './services/queue.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.ts';
@@ -41,6 +42,7 @@ syncConfiguredProviders(config);
 wireEngineEvents();
 reconcileOnBoot();
 startTimerLoop();
+startQueueLoop();
 createServer(config.port, config.uiDir);
 
 // Providers declared in office.yaml are upserted so accounts/agents can point
