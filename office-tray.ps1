@@ -76,15 +76,46 @@ function Stop-Daemon {
         ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 }
 
-# simple generated icon: emerald disc with "O"
-$bmp = New-Object System.Drawing.Bitmap 16, 16
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = 'AntiAlias'
-$g.Clear([System.Drawing.Color]::Transparent)
-$brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(5, 150, 105))
-$g.FillEllipse($brush, 0, 0, 15, 15)
-$g.DrawString('O', (New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold)), [System.Drawing.Brushes]::White, 2, 1)
-$icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+# Tray icon: the app logo (four rounded squares) on a white tile, drawn at 32px so it stays crisp
+# at high DPI; Windows scales it down to the tray size. Same colours as the sidebar logo and favicon.
+function New-TrayIcon {
+    $size = 32
+    $bmp = New-Object System.Drawing.Bitmap $size, $size
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'
+    $g.Clear([System.Drawing.Color]::Transparent)
+    function Add-Round($path, $x, $y, $w, $r) {
+        $d = $r * 2
+        $path.AddArc($x, $y, $d, $d, 180, 90); $path.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+        $path.AddArc($x + $w - $d, $y + $w - $d, $d, $d, 0, 90); $path.AddArc($x, $y + $w - $d, $d, $d, 90, 90)
+        $path.CloseFigure()
+    }
+    function Fill-Round($color, $x, $y, $w, $r) {
+        $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+        Add-Round $p $x $y $w $r
+        $b = New-Object System.Drawing.SolidBrush $color
+        $g.FillPath($b, $p); $b.Dispose(); $p.Dispose()
+    }
+    # tile
+    $tile = New-Object System.Drawing.Drawing2D.GraphicsPath
+    Add-Round $tile 0.5 0.5 31 7
+    $g.FillPath([System.Drawing.Brushes]::White, $tile)
+    $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(205, 205, 205)), 1
+    $g.DrawPath($pen, $tile); $pen.Dispose(); $tile.Dispose()
+    # logo squares: ink, lime, lilac, faded ink
+    Fill-Round ([System.Drawing.Color]::FromArgb(17, 17, 17))    6  6  9 2.5
+    Fill-Round ([System.Drawing.Color]::FromArgb(205, 232, 130)) 17 6  9 2.5
+    Fill-Round ([System.Drawing.Color]::FromArgb(176, 150, 240)) 6  17 9 2.5
+    Fill-Round ([System.Drawing.Color]::FromArgb(150, 17, 17, 17)) 17 17 9 2.5
+    $g.Dispose()
+    $h = $bmp.GetHicon()
+    $ico = [System.Drawing.Icon]::FromHandle($h).Clone()      # own copy, so the native handle can be released
+    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr h);'
+    [Win32.Native]::DestroyIcon($h) | Out-Null
+    $bmp.Dispose()
+    return $ico
+}
+$icon = New-TrayIcon
 
 $ni = New-Object System.Windows.Forms.NotifyIcon
 $ni.Icon = $icon
