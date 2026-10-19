@@ -899,8 +899,10 @@ function WorkflowEditor() {
     const pick = runs.find((r) => r.id === run?.id && going(r)) ?? runs.find(going);
     setWfId(pick?.workflow?.id ?? wflist.find((w) => w.active)?.id ?? wflist[0].id);
   }, [wflist, wfId, runs, run?.id]);
-  // only runs whose request picked this workflow appear here, never another workflow's
-  const wfRuns = useMemo(() => (runs ?? []).filter((r) => (r.workflow ? r.workflow.id === wfId : !!r.workflowVersionId && versionIds.has(r.workflowVersionId))), [runs, versionIds, wfId]);
+  // Only an ongoing run of the picked workflow drives the live bar and the node states; finished runs
+  // are replayed from Run replay, so a flow nobody is running shows as a plain graph.
+  const ONGOING = ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'];
+  const wfRuns = useMemo(() => (runs ?? []).filter((r) => ONGOING.includes(r.status) && (r.workflow ? r.workflow.id === wfId : !!r.workflowVersionId && versionIds.has(r.workflowVersionId))), [runs, versionIds, wfId]);
   const liveRunId = wfRuns.find((r) => r.id === run?.id)?.id ?? wfRuns[0]?.id ?? null;
   const [pickedRun, setPickedRun] = useState<string | null>(null);
   useEffect(() => { setPickedRun(null); }, [wfId]);
@@ -909,7 +911,7 @@ function WorkflowEditor() {
     liveRun ? `/runs/${liveRun}/events?types=${encodeURIComponent('workflow.step,workflow.branch,workflow.loop,workflow.enter')}` : null, [liveRun]);
 
   const liveRunObj = (runs ?? []).find((r) => r.id === liveRun) ?? null;
-  const runGoing = !!liveRunObj && ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'].includes(liveRunObj.status);
+  const runGoing = !!liveRunObj && ONGOING.includes(liveRunObj.status);
   const { data: runDetail } = useQuery<any>(liveRun ? `/runs/${liveRun}` : null, [liveRun]);
   const [liveWs, setLiveWs] = useState<OfficeEvent[]>([]);
   useEffect(() => { setLiveWs([]); }, [liveRun]);

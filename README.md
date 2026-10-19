@@ -42,7 +42,7 @@ Because the engine is deterministic and event-sourced, every agent — including
 ## Screenshots
 
 ### Workflow editor
-Build or clone a pipeline as a graph; the palette on the left is colored by role, matching the nodes it creates. When a run is selected, node rings and taken edges show what actually executed.
+Build or clone a pipeline as a graph; the palette on the left is colored by role, matching the nodes it creates. While a run of the open workflow is ongoing, node rings and taken edges show its progress live; finished runs are replayed under Run replay, so an idle workflow shows as a plain graph.
 
 <img src="docs/screenshots/workflow.png" alt="Workflow editor showing a custom graph with a condition branch, loops and a message edge, with node states from a finished run" width="900">
 
@@ -57,9 +57,14 @@ What each agent's CLI reports — prompts, messages, checks and hand-offs — wi
 <img src="docs/screenshots/activity.png" alt="Live activity feed showing review, acceptance and verification check results" width="900">
 
 ### Timeline & replay
-Every event in the run's hash-chained log, by lane. Scrub to see the board as it was at any point.
+Every event in the run's hash-chained log, by actor lane. Scrub or play the playhead to see the task board as it was at any point; replay never re-executes anything.
 
 <img src="docs/screenshots/timeline.png" alt="Timeline and replay page with event lanes and an event table" width="900">
+
+### Tasks
+The run's tasks by state, with an overall progress bar.
+
+<img src="docs/screenshots/tasks.png" alt="Tasks board with a progress bar and columns for ready, in progress, in review, done and failed" width="900">
 
 ### Office
 Rooms are workspaces and desks are roles. Drag an agent to a desk to change its permissions.

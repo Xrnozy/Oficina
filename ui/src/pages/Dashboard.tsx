@@ -8,6 +8,9 @@ import {
 } from '../components';
 import { ArrowRight, CheckCircle2, Circle, Plus, Sparkles, XCircle, Zap } from 'lucide-react';
 
+// Role colours match the Workflow canvas and the Routing flow.
+const ROLE_BAR: Record<string, string> = { pm: 'bg-lilac', 'prompt-creator': 'bg-cream', developer: 'bg-lime', qa: 'bg-mint', reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream' };
+
 export default function Dashboard() {
   const { run, loading } = useCurrentRun();
   const { data: detail } = useQuery<any>(run ? `/runs/${run.id}` : null, [run?.id]);
@@ -43,8 +46,10 @@ export default function Dashboard() {
             <div className="divide-line">
               {(agents ?? []).map((a) => {
                 const task = (detail?.tasks ?? []).find((t: any) => t.ownerAgentId === a.id && !['done', 'cancelled', 'failed'].includes(t.status));
+                const role = a.memberships?.find((m: any) => m.active)?.role as string | undefined;
                 return (
                   <div key={a.id} className="flex items-center gap-3 px-4 py-2.5">
+                    <span aria-hidden className={`w-1 h-8 rounded-full shrink-0 ${ROLE_BAR[role ?? ''] ?? 'bg-line-strong'}`} />
                     <Avatar agent={a} />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-fg truncate">{a.name}</div>
@@ -61,7 +66,7 @@ export default function Dashboard() {
           </Panel>
 
           <div className="space-y-5">
-            <Panel title="Needs you" action={<Link to="/approvals" className="text-xs text-fg-3 hover:text-fg">Inbox →</Link>} bodyClass="px-2 pb-2">
+            <Panel title={<>Needs you{pendingApprovals.length > 0 && <span className="ml-2 chip !bg-warn/15 !text-warn !border-warn/30">{pendingApprovals.length}</span>}</>} action={<Link to="/approvals" className="text-xs text-fg-3 hover:text-fg">Inbox →</Link>} bodyClass="px-2 pb-2">
               {pendingApprovals.length === 0 && <div className="px-2 pb-2"><Muted>Nothing waiting on a decision.</Muted></div>}
               {pendingApprovals.slice(0, 4).map((a) => (
                 <Link key={a.id} to="/approvals" className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-raised transition-colors">
@@ -160,13 +165,20 @@ function DigestPanel() {
   if (!d) return null;
   const quiet = !d.tasksDone.length && !d.tasksBlocked.length && !d.needsYou.length && !d.tokens?.calls;
   return (
-    <Panel title="Since your last visit" action={<span className="text-2xs text-fg-4">{fmtAgo(since)}</span>}>
-      {quiet && <Muted>Nothing happened while you were away.</Muted>}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Stat label="Tasks done" value={d.tasksDone.length} />
-        <Stat label="Blocked / failed" value={d.tasksBlocked.length} hint={d.tasksBlocked.length ? 'see below' : undefined} />
-        <Stat label="Provider calls" value={fmtNum(d.tokens?.calls)} hint={d.tokens?.promptChars ? `${fmtNum(d.tokens.promptChars)} prompt chars · ${fmtUsd(d.tokens.costUsd)}` : undefined} />
-        <Stat label="Needs you" value={d.needsYou.length} hint={d.needsYou.length ? 'pending decisions' : 'inbox zero'} />
+    <Panel title="Since your last visit" action={<span className="text-2xs text-fg-4">{quiet ? 'nothing new · ' : ''}{fmtAgo(since)}</span>}>
+      <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-line -mx-1 [&>*]:px-4 [&>*:first-child]:pl-1">
+        {[
+          { k: 'Tasks done', v: d.tasksDone.length, h: undefined as string | undefined },
+          { k: 'Blocked / failed', v: d.tasksBlocked.length, h: d.tasksBlocked.length ? 'see below' : undefined },
+          { k: 'Provider calls', v: fmtNum(d.tokens?.calls), h: d.tokens?.promptChars ? `${fmtNum(d.tokens.promptChars)} chars · ${fmtUsd(d.tokens.costUsd)}` : undefined },
+          { k: 'Needs you', v: d.needsYou.length, h: d.needsYou.length ? 'pending decisions' : 'inbox zero' },
+        ].map((c) => (
+          <div key={c.k} className="min-w-0">
+            <div className="eyebrow mb-1">{c.k}</div>
+            <div className="text-xl font-semibold tracking-[-0.02em] num leading-6 text-fg">{c.v}</div>
+            {c.h && <div className="text-2xs text-fg-4 mt-0.5 truncate">{c.h}</div>}
+          </div>
+        ))}
       </div>
       {(d.tasksDone.length > 0 || d.tasksBlocked.length > 0 || d.needsYou.length > 0) && (
         <div className="mt-4 space-y-1.5">
@@ -339,15 +351,15 @@ function RunCard({ run, detail, live }: { run: any; detail: any; live: boolean }
   const cycles = detail?.cycles ?? [];
   return (
     <section className="panel overflow-hidden animate-rise">
-      <div className={`${RUN_BLOCK[run.status] ?? 'block-cream'} px-5 pt-5 pb-4 lg:px-8 flex items-start gap-4 flex-wrap`}>
+      <div className={`${RUN_BLOCK[run.status] ?? 'block-cream'} px-5 py-4 lg:px-6 flex items-center gap-4 flex-wrap`}>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-2 flex-wrap">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <StatusChip value={run.status} />
             {run.limits?.oneShot && <Tag tone="info"><Zap size={10} /> one-shot</Tag>}
             {run.stopReason && run.status !== 'done' && <Tag tone="bad" mono>{run.stopReason}</Tag>}
-            <span className="text-xs text-fg-4 mono">run {run.id.slice(-8)} · started {fmtAgo(run.startedAt)}</span>
+            <span className="text-xs text-fg-3 mono">run {run.id.slice(-8)} · started {fmtAgo(run.startedAt)}{run.workflow ? ` · ${run.workflow.name} v${run.workflow.n}` : ''}</span>
           </div>
-          <h2 className="text-lg font-semibold tracking-[-0.01em] leading-snug">{run.goal}</h2>
+          <h2 className="text-base font-semibold tracking-[-0.01em] leading-snug">{run.goal}</h2>
         </div>
         {run.status === 'dod-review'
           ? <Link to={`/dod/${run.id}`} className="btn btn-accent">Review DoD to start <ArrowRight size={14} /></Link>

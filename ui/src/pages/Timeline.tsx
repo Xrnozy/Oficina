@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { get, useQuery, type OfficeEvent } from '../api';
 import { Empty, PageHeader, StatusChip, Tag, fmtTime } from '../components';
-import { Clock, History, X } from 'lucide-react';
+import { Clock, Pause, Play, X } from 'lucide-react';
 
 // Run timeline & replay (spec §9): lanes per actor, filterable event list;
 // clicking an event shows its payload; a replay slider reconstructs the
@@ -15,6 +15,7 @@ const KIND_COLOR: Record<string, string> = {
 };
 const colorFor = (t: string) => KIND_COLOR[Object.keys(KIND_COLOR).find((k) => t.startsWith(k)) ?? ''] ?? 'bg-fg-4';
 const KINDS = ['run', 'cycle', 'plan', 'task', 'workitem', 'checkrun', 'review', 'merge', 'error', 'approval', 'agent'];
+const LABEL_COL = '8.75rem'; // actor column (8rem) + gap — the playhead is positioned against this
 
 export default function Timeline() {
   const { data: runs } = useQuery<any[]>('/runs');
@@ -28,6 +29,7 @@ export default function Timeline() {
   const [cap, setCap] = useState(600);
   const [replaySeq, setReplaySeq] = useState<number | null>(null);
   const [replayState, setReplayState] = useState<any>(null);
+  const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
     if (run) get<OfficeEvent[]>(`/runs/${run.id}/events?limit=2000`).then(setEvents).catch(() => setEvents([]));
@@ -54,11 +56,39 @@ export default function Timeline() {
   const maxSeq = events.length ? events[events.length - 1].seq : 0;
   const span = Math.max(1, maxSeq - minSeq);
   const at = replaySeq ?? maxSeq;
+  const frac = (q: number) => (q - minSeq) / span;
+
+  const counts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of events) { const k = e.type.split('.')[0]; m.set(k, (m.get(k) ?? 0) + 1); }
+    return m;
+  }, [events]);
+  const perActor = useMemo(() => {
+    const m = new Map<string, OfficeEvent[]>();
+    for (const e of events) { const l = m.get(e.actor); if (l) l.push(e); else m.set(e.actor, [e]); }
+    return m;
+  }, [events]);
+  const errorCount = counts.get('error') ?? 0;
+  const durationMs = events.length ? Date.parse(events[events.length - 1].ts) - Date.parse(events[0].ts) : 0;
+
+  // play: step the playhead forward until it reaches the end, then drop back to live
+  useEffect(() => {
+    if (!playing) return;
+    const step = Math.max(1, Math.round(span / 140));
+    const t = setInterval(() => {
+      setReplaySeq((cur) => {
+        const next = (cur ?? minSeq) + step;
+        if (next >= maxSeq) { setPlaying(false); return null; }
+        return next;
+      });
+    }, 70);
+    return () => clearInterval(t);
+  }, [playing, span, minSeq, maxSeq]);
 
   return (
     <div>
-      <PageHeader title="Timeline & replay" sub="Every event in the run's hash-chained log. Scrub to see the task board as it was at any point — replay never re-executes anything.">
-        <select className="input max-w-[280px]" value={run?.id ?? ''} onChange={(e) => { setRunId(e.target.value); setSel(null); setReplaySeq(null); }} aria-label="Run">
+      <PageHeader title="Timeline & replay" sub="Every event in the run's hash-chained log. Scrub or play to see the task board as it was at any point — replay never re-executes anything.">
+        <select className="input max-w-[280px]" value={run?.id ?? ''} onChange={(e) => { setRunId(e.target.value); setSel(null); setReplaySeq(null); setPlaying(false); }} aria-label="Run">
           {(runs ?? []).map((r) => <option key={r.id} value={r.id}>{r.goal.length > 44 ? `${r.goal.slice(0, 44)}…` : r.goal}</option>)}
         </select>
       </PageHeader>
@@ -66,36 +96,82 @@ export default function Timeline() {
       {!events.length && <Empty icon={Clock} title="No events yet" text="Events appear here as soon as the run starts doing work." />}
 
       {events.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 mb-5 rounded-2xl border border-line bg-surface divide-x divide-line overflow-hidden">
+          {[
+            { k: 'Run', v: run ? <StatusChip value={run.status} /> : '—' },
+            { k: 'Events', v: events.length.toLocaleString() },
+            { k: 'Duration', v: fmtDuration(durationMs) },
+            { k: 'Errors', v: <span className={errorCount ? 'text-bad' : ''}>{errorCount}</span> },
+          ].map((c) => (
+            <div key={c.k} className="px-4 py-3 min-w-0">
+              <div className="eyebrow mb-1">{c.k}</div>
+              <div className="text-lg font-semibold tracking-[-0.02em] num leading-6">{c.v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {events.length > 0 && (
         <section className="panel mb-5 overflow-hidden">
-          <div className="px-4 pt-3.5 pb-2 flex items-center gap-3">
-            <h2 className="text-[13px] font-medium text-fg">Lanes</h2>
-            <span className="text-2xs text-fg-4">click a mark to inspect · {events.length} events</span>
+          <div className="px-4 pt-3.5 pb-3 flex items-center gap-3 flex-wrap">
+            <h2 className="text-[13px] font-medium text-fg">Replay</h2>
+            <span className="text-2xs text-fg-4">click a mark to inspect it</span>
+            <div className="ml-auto flex items-center gap-3 flex-wrap">
+              {KINDS.filter((k) => counts.has(k)).map((k) => (
+                <span key={k} className="flex items-center gap-1.5 text-2xs text-fg-3"><span className={`w-2 h-2 rounded-sm ${colorFor(`${k}.`)}`} />{k}</span>
+              ))}
+            </div>
           </div>
-          <div className="px-4 pb-3 space-y-1.5">
-            {actors.map((a) => (
-              <div key={a} className="flex items-center gap-3">
-                <button onClick={() => setActor(actor === a ? '' : a)} className={`w-28 shrink-0 text-left text-xs truncate ${actor === a ? 'text-accent' : 'text-fg-3 hover:text-fg'}`}>{a}</button>
-                <div className="relative flex-1 h-5 rounded bg-sunken border border-line">
-                  {events.filter((e) => e.actor === a).map((e) => (
-                    <button key={e.seq} onClick={() => setSel(e)} title={`#${e.seq} ${e.type}`}
-                      className={`absolute top-1 bottom-1 w-[3px] -ml-px rounded-sm ${colorFor(e.type)} ${sel?.seq === e.seq ? 'ring-2 ring-fg scale-y-125' : 'opacity-80 hover:opacity-100'} ${e.seq > at ? '!opacity-15' : ''}`}
-                      style={{ left: `${((e.seq - minSeq) / span) * 100}%` }} />
-                  ))}
-                </div>
+
+          <div className="px-4 pb-3">
+            <div className="relative">
+              <div className="space-y-1">
+                {actors.map((a) => (
+                  <div key={a} className="grid grid-cols-[8rem_1fr] gap-3 items-center">
+                    <button onClick={() => setActor(actor === a ? '' : a)} title="Filter the list to this actor"
+                      className={`text-left text-xs flex items-baseline gap-1.5 min-w-0 ${actor === a ? 'text-fg font-medium' : 'text-fg-3 hover:text-fg'}`}>
+                      <span className="truncate">{a}</span>
+                      <span className="text-2xs text-fg-4 num">{perActor.get(a)?.length}</span>
+                    </button>
+                    <div className="relative h-6 rounded-md bg-sunken border border-line">
+                      {(perActor.get(a) ?? []).map((e) => (
+                        <button key={e.seq} onClick={() => setSel(e)} title={`#${e.seq} ${e.type}`}
+                          className={`absolute top-1 bottom-1 w-[3px] -ml-px rounded-sm ${colorFor(e.type)} ${sel?.seq === e.seq ? 'ring-2 ring-fg scale-y-125 z-10' : 'opacity-85 hover:opacity-100'} ${e.seq > at ? '!opacity-15' : ''}`}
+                          style={{ left: `${frac(e.seq) * 100}%` }} />
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
+              <div aria-hidden className="absolute top-0 bottom-0 w-px bg-fg/70 pointer-events-none" style={{ left: `calc(${LABEL_COL} + (100% - ${LABEL_COL}) * ${frac(at)})` }}>
+                <span className="absolute -top-1 -left-[3px] w-[7px] h-[7px] rounded-full bg-fg" />
+              </div>
+            </div>
+            <div className="grid grid-cols-[8rem_1fr] gap-3 mt-1.5 text-2xs text-fg-4 num">
+              <span />
+              <div className="flex justify-between"><span>{fmtTime(events[0].ts)}</span><span>{fmtTime(events[events.length - 1].ts)}</span></div>
+            </div>
           </div>
-          <div className="flex items-center gap-3 px-4 py-3 border-t border-line bg-sunken/40">
-            <History size={14} className="text-fg-3 shrink-0" />
+
+          <div className="grid grid-cols-[8rem_1fr_auto] gap-3 items-center px-4 py-3 border-t border-line bg-sunken/40">
+            <div>
+              <button className="btn btn-xs w-[4.5rem] justify-center"
+                onClick={() => { if (playing) setPlaying(false); else { if (replaySeq == null) setReplaySeq(minSeq); setPlaying(true); } }}>
+                {playing ? <><Pause size={12} /> Pause</> : <><Play size={12} /> Play</>}
+              </button>
+            </div>
             <input type="range" min={minSeq} max={maxSeq} value={at} aria-label="Replay position"
-              onChange={(e) => setReplaySeq(+e.target.value >= maxSeq ? null : +e.target.value)} className="flex-1 min-w-0 sm:ml-[98px]" />
+              onChange={(e) => { setPlaying(false); setReplaySeq(+e.target.value >= maxSeq ? null : +e.target.value); }} className="min-w-0 w-full" />
             {/* fixed-width slots: the label and button never change size, so the slider doesn't move under the cursor */}
-            <span className="mono text-fg-3 w-24 shrink-0 text-right tabular-nums">{replaySeq == null ? <Tag tone="ok">live</Tag> : `seq ${replaySeq}`}</span>
-            <button className={`btn btn-xs shrink-0 w-24 justify-center ${replaySeq == null ? 'invisible' : ''}`} tabIndex={replaySeq == null ? -1 : 0} onClick={() => setReplaySeq(null)}>Back to live</button>
+            <div className="flex items-center gap-2">
+              <span className="mono text-fg-3 w-20 text-right tabular-nums">{replaySeq == null ? <Tag tone="ok">live</Tag> : `seq ${replaySeq}`}</span>
+              <button className={`btn btn-xs w-24 justify-center ${replaySeq == null ? 'invisible' : ''}`} tabIndex={replaySeq == null ? -1 : 0}
+                onClick={() => { setPlaying(false); setReplaySeq(null); }}>Back to live</button>
+            </div>
           </div>
           {replayState && (
             <div className="px-4 py-3 border-t border-line flex flex-wrap items-center gap-2 min-h-[3.25rem]">
-              <span className="text-xs text-fg-3 mr-1">As of #{replaySeq}:</span>
+              <span className="text-xs text-fg-3 mr-1">Board as of #{replaySeq}:</span>
               <StatusChip value={replayState.runStatus} />
               {replayState.tasks.map((t: any) => (
                 <span key={t.id} className="chip" title={t.title}><span className="max-w-[22ch] truncate text-fg-2">{t.title || t.id}</span> → {t.status}</span>
@@ -109,9 +185,9 @@ export default function Timeline() {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <input className="input input-sm w-52" placeholder="Search events…" value={text} onChange={(e) => setText(e.target.value)} />
           <div className="flex flex-wrap gap-1">
-            {KINDS.map((k) => (
+            {KINDS.filter((k) => counts.has(k)).map((k) => (
               <button key={k} onClick={() => setKind(kind === k ? '' : k)} className={`h-7 px-2 rounded-md text-xs border transition-colors flex items-center gap-1.5 ${kind === k ? 'bg-raised border-line-strong text-fg' : 'border-transparent text-fg-3 hover:text-fg'}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${colorFor(`${k}.`)}`} />{k}
+                <span className={`w-1.5 h-1.5 rounded-full ${colorFor(`${k}.`)}`} />{k}<span className="text-fg-4 num">{counts.get(k)}</span>
               </button>
             ))}
           </div>
@@ -122,7 +198,15 @@ export default function Timeline() {
 
       {events.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-4 items-start">
-          <div className="panel max-h-[62vh] overflow-auto divide-line">
+          <div className="panel max-h-[62vh] overflow-auto">
+            <div className="sticky top-0 z-10 flex items-center gap-3 px-3.5 h-8 bg-surface border-b border-line eyebrow">
+              <span className="w-10 shrink-0">Seq</span>
+              <span className="w-1.5 shrink-0" />
+              <span className="w-24 shrink-0">Actor</span>
+              <span className="w-40 shrink-0">Event</span>
+              <span className="hidden sm:block">Summary</span>
+              <span className="ml-auto shrink-0">Time</span>
+            </div>
             {/* cap rendered rows — a long run mounts the latest 600, earlier on demand */}
             {filtered.length > cap && (
               <button className="w-full text-center py-2 text-2xs text-fg-3 hover:text-fg hover:bg-raised/60" onClick={() => setCap((n) => n + 800)}>
@@ -130,7 +214,7 @@ export default function Timeline() {
               </button>
             )}
             {filtered.slice(-cap).map((e) => (
-              <button key={e.seq} onClick={() => setSel(e)} className={`w-full text-left px-3.5 h-9 flex items-center gap-3 transition-colors ${sel?.seq === e.seq ? 'bg-raised' : 'hover:bg-raised/60'} ${e.seq > at ? 'opacity-35' : ''}`}>
+              <button key={e.seq} onClick={() => setSel(e)} className={`w-full text-left px-3.5 h-9 flex items-center gap-3 border-b border-line/60 last:border-0 transition-colors ${sel?.seq === e.seq ? 'bg-raised' : 'hover:bg-raised/60'} ${e.seq > at ? 'opacity-35' : ''}`}>
                 <span className="mono text-2xs text-fg-4 w-10 shrink-0">#{e.seq}</span>
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${colorFor(e.type)}`} />
                 <span className="text-xs text-fg-3 w-24 shrink-0 truncate">{e.actor}</span>
@@ -169,4 +253,12 @@ export default function Timeline() {
 function summarizePayload(e: OfficeEvent): string {
   const p = e.payload as Record<string, unknown>;
   return String(p.summary ?? p.title ?? p.line ?? p.status ?? p.decision ?? p.reason ?? p.goal ?? Object.values(p)[0] ?? '').slice(0, 90);
+}
+
+function fmtDuration(ms: number): string {
+  if (!(ms > 0)) return '—';
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  return m < 60 ? `${m}m ${sec % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
