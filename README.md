@@ -72,6 +72,20 @@ Create, copy, rename, export and import offices; the sidebar switcher scopes the
 
 <img src="docs/screenshots/office.png" alt="Office page showing roles as desks with agents assigned to them" width="900">
 
+### Creating an office
+The New office dialog explains what an office is, offers a blank start or a copy of an existing office, and spells out what happens next. A duplicate name is flagged as you type.
+
+<img src="docs/screenshots/new-office.png" alt="New office dialog with a name field, a blank-or-copy choice and a what-happens-next list" width="900">
+
+A new office shows a setup checklist until it has its core agents: add agents, fill the PM, developer and reviewer/QA desks, optionally choose a workflow, then send a first request.
+
+<img src="docs/screenshots/office-setup.png" alt="Offices page for an empty office showing a four-step setup checklist above its empty desks" width="900">
+
+### Dropdowns
+Selects are a styled, keyboard-accessible dropdown that opens over modals and panels instead of the browser's native list.
+
+<img src="docs/screenshots/dropdown.png" alt="Hire agent dialog with the observability dropdown open" width="900">
+
 ## How it works
 
 ```mermaid
