@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { post, put, useQuery } from '../api';
-import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, useCurrentRun, type Tone } from '../components';
+import { post, put, useEvents, useQuery } from '../api';
+import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, toast, useCurrentRun, type Tone } from '../components';
 import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, Mail, Pencil, Plus, X } from 'lucide-react';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
@@ -293,6 +293,16 @@ export default function Routing() {
   const { data: decisions } = useQuery<any[]>('/routing/decisions');
   const ws = workspaces?.find((w) => w.id === run?.workspaceId) ?? workspaces?.[0];
   const { data: rv, reload: reloadRv } = useQuery<RoutingView>(ws?.id ? `/workflows/active/routing?workspaceId=${ws.id}` : null, [ws?.id]);
+  // workflow.saved / .activated / .deleted already flow over the event stream
+  // and useQuery's throttled tick refetches the view — the toast just says so.
+  const lastWfToast = useRef(0);
+  useEvents(useCallback((e) => {
+    if (!e.type.startsWith('workflow.')) return;
+    const t = Date.now();
+    if (t - lastWfToast.current < 1500) return;   // save+activate bursts coalesce
+    lastWfToast.current = t;
+    toast('Workflow changed — Routing updated');
+  }, []));
   const s = ws?.settings ?? {};
   const strategy: (typeof STRATEGIES)[number] = s.routing === 'fixed' ? 'fixed' : 'smart';
   const prompts: (typeof PROMPTS)[number] = s.promptReview === 'off' ? 'off' : s.promptReview === 'all' ? 'all' : s.promptReview === 'handoffs' || s.promptReview === 'implement' ? 'handoffs' : 'pipeline';
@@ -332,7 +342,7 @@ export default function Routing() {
             ))}
           </ul>
         )}
-        <p className="text-xs text-fg-3 mt-3">Every step is a node on the active workflow — click one to open it in the editor. Loops are bounded, then you decide. You can message any agent, edit requirements, change models, or pause at any time; every change can be undone from Checkpoints.</p>
+        <p className="text-xs text-fg-3 mt-3">Every step is a node on the active workflow — click one to open it in the editor. Routing follows the <em>saved</em> active version: an unsaved Workflow draft doesn't change this page until it's saved. Loops are bounded, then you decide. You can message any agent, edit requirements, change models, or pause at any time; every change can be undone from Checkpoints.</p>
       </Panel>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-5 items-start [&>*]:min-w-0">
