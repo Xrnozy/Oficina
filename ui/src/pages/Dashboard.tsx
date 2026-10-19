@@ -1,3 +1,4 @@
+import { WorkflowSelect } from '../workflowPicker';
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { post, useQuery } from '../api';
@@ -248,6 +249,7 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
   const [mode, setMode] = useState<'guided' | 'one-shot'>('guided');
   const [repoChoice, setRepoChoice] = useState('');
   const [repoPath, setRepoPath] = useState('');
+  const [workflowId, setWorkflowId] = useState('');
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
   const budgetNum = Number(budget);
@@ -268,7 +270,7 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
         repoId = repo?.id;
         if (!repoId) { setBusy(false); return; }
       }
-      const r = await act(post('/runs', { workspaceId: workspaces![0].id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId }),
+      const r = await act(post('/runs', { workspaceId: workspaces![0].id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined }),
         oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
       setBusy(false);
       if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
@@ -304,6 +306,10 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
             {wsRepos.map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
             <option value="__custom__">A different folder on this machine…</option>
           </select>
+        </label>
+        <label className="block">
+          <span className="field-label">Workflow</span>
+          <WorkflowSelect wsId={workspaces?.[0]?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
         </label>
         {custom && (
           <label className="block">

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Route, Routes, useLocation } from 'react-router-dom';
 import { CommandPalette, Empty, RunBar, Sidebar, Toasts } from './components';
 import Dashboard from './pages/Dashboard';
 import Office from './pages/Office';
@@ -24,14 +24,16 @@ import { Compass } from 'lucide-react';
 export default function App() {
   const [nav, setNav] = useState(false);
   const [palette, setPalette] = useState(false);
+  // the workflow canvas uses the whole content area instead of the centred column
+  const full = useLocation().pathname.startsWith('/workflow');
   return (
     <div className="grain h-[100dvh] flex overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[80] btn btn-primary">Skip to content</a>
       <Sidebar open={nav} onClose={() => setNav(false)} />
       <div className="relative z-10 flex-1 min-w-0 flex flex-col">
         <RunBar onMenu={() => setNav(true)} onPalette={() => setPalette(true)} />
-        <main id="main" className="flex-1 min-h-0 min-w-0 overflow-auto">
-          <div className="mx-auto w-full max-w-[1320px] min-w-0 px-4 lg:px-8 py-6 lg:py-8">
+        <main id="main" className={`flex-1 min-h-0 min-w-0 ${full ? 'overflow-hidden' : 'overflow-auto'}`}>
+          <div className={full ? 'h-full w-full min-w-0' : 'mx-auto w-full max-w-[1320px] min-w-0 px-4 lg:px-8 py-6 lg:py-8'}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/office" element={<Office />} />

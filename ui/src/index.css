@@ -82,6 +82,7 @@
 
 @layer components {
   .panel { @apply bg-surface border border-line rounded-2xl min-w-0; }
+  .card { @apply bg-surface border border-line rounded-xl min-w-0; }
   .panel-head { @apply flex items-center gap-2 px-4 pt-3.5 pb-2.5; }
   /* figmaMono-style eyebrow: mono, uppercase, positive tracking */
   .eyebrow { @apply font-mono text-2xs text-fg-3 uppercase tracking-[0.05em]; }
@@ -136,3 +137,20 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* workflow canvas: connection dots are easy to hit and light up when a line is being drawn */
+.react-flow__handle.wf-handle { width: 12px; height: 12px; }
+.react-flow__handle.wf-handle::after { content: ''; position: absolute; inset: -8px; }
+.react-flow__node:hover .wf-handle, .react-flow__node.selected .wf-handle { border-color: rgb(var(--accent)); }
+.react-flow.connecting .wf-handle { background: rgb(var(--accent)); border-color: rgb(var(--accent)); transform: scale(1.25); }
+.react-flow__connection-path { stroke: rgb(var(--accent)); stroke-width: 2; }
+.react-flow__edge.selected .react-flow__edge-path { stroke: rgb(var(--fg)); }
+.react-flow__controls { box-shadow: none; border: 1px solid rgb(var(--line)); border-radius: 10px; overflow: hidden; }
+.react-flow__controls-button { background: rgb(var(--surface)); border-bottom: 1px solid rgb(var(--line)); color: rgb(var(--fg-2)); }
+.react-flow__controls-button:hover { background: rgb(var(--raised)); }
+.react-flow__controls-button svg { fill: currentColor; }
+
+/* a line feeding the step that is running right now */
+@keyframes wf-flow { to { stroke-dashoffset: -26; } }
+.wf-flowing .react-flow__edge-path { animation: wf-flow 0.9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .wf-flowing .react-flow__edge-path { animation: none; } }

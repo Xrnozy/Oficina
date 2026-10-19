@@ -32,7 +32,7 @@ import { buildCommitMessage, commitPaths, currentBranch, dirtyPaths, planTaskCom
 import { skillsFor } from '../services/skills.ts';
 import { finalizeRunSummary } from '../services/summary.ts';
 import {
-  activeWorkflowFor, getWorkflowVersion, DEFAULT_MAX_LOOPS,
+  activeWorkflowFor, getWorkflowVersion, latestVersionOf, DEFAULT_MAX_LOOPS,
   type WfCondition, type WfEdge, type WfGraph, type WfNode,
 } from '../services/workflow.ts';
 import path from 'node:path';
@@ -273,7 +273,7 @@ function runTasks(runId: string, statuses?: TaskStatus[]): Task[] {
 // Run lifecycle
 // ---------------------------------------------------------------------------
 
-export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean; limits?: Partial<StopLimits> }): Run {
+export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean; limits?: Partial<StopLimits>; workflowId?: string | null }): Run {
   const ws = getWorkspace(opts.workspaceId);
   if (!ws) throw new Error('workspace not found');
   const repoId = opts.repoId ?? ws.repoIds[0];
@@ -285,7 +285,10 @@ export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?:
   const dodId = ulid();
   // runs pin the workspace's active workflow version at creation so a later
   // edit can't change a run mid-flight
-  const wf = activeWorkflowFor(ws.id);
+  // workflowId: undefined = the workspace default; "builtin" = the standard pipeline; else a saved workflow
+  const chosen = opts.workflowId && opts.workflowId !== "builtin" ? latestVersionOf(opts.workflowId) : null;
+  if (opts.workflowId && opts.workflowId !== "builtin" && !chosen) throw new Error("workflow not found or has no saved version");
+  const wf = opts.workflowId === "builtin" ? null : chosen ?? activeWorkflowFor(ws.id);
   tx(() => {
     run(`INSERT INTO runs (id, workspace_id, repo_id, goal, status, dod_id, budget, limits, current_cycle, started_at, workflow_version_id)
          VALUES (?,?,?,?,?,?,?,?,0,?,?)`,
@@ -300,6 +303,27 @@ export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?:
   // Bootstrap phase: PM drafts DoD + initial task graph
   void dispatchPlan(runId, true);
   return getRun(runId)!;
+}
+
+// Switch the workflow a run follows. Only while nothing is mid-flight on the
+// old graph (its node ids would not exist on the new one).
+export function setRunWorkflow(runId: string, workflowId: string): { ok: true } | { error: string } {
+  const r = getRun(runId);
+  if (!r) return { error: 'run not found' };
+  if (!['draft', 'dod-review', 'paused'].includes(r.status)) return { error: 'pause the run first (or wait for it to finish) to change its workflow' };
+  const mid = q(`SELECT id, meta FROM tasks WHERE run_id = ? AND status NOT IN ('done','cancelled')`, runId)
+    .some((t) => { try { return ((JSON.parse((t.meta as string) || '{}').wf?.nodes ?? []).length > 0); } catch { return false; } });
+  if (mid) return { error: 'tasks are mid-flow on the current workflow — let them finish or stop the run' };
+  let versionId: string | null = null;
+  if (workflowId !== 'builtin') {
+    const wf = latestVersionOf(workflowId);
+    if (!wf) return { error: 'workflow not found or has no saved version' };
+    versionId = wf.versionId;
+  }
+  run('UPDATE runs SET workflow_version_id = ? WHERE id = ?', versionId, runId);
+  wfGraphCache.delete(runId);
+  emit('workflow.run', 'owner', { workflowId, versionId, switched: true }, runId);
+  return { ok: true };
 }
 
 export function approveDod(runId: string): void {

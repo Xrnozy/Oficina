@@ -75,8 +75,8 @@ export type RoutingRow =
   | { kind: 'back'; toNodeId: string; toLabel: string }
   | { kind: 'branches'; viaNodeId: string; lanes: { edgeId: string; label: string; isElse: boolean; rows: RoutingRow[] }[] };
 export interface RoutingView {
-  workflow: { id: string; name: string; versionN: number | null; builtin: boolean };
-  custom: boolean; issues: WfIssue[]; fallback: boolean;
+  workflow: { id: string; name: string; versionN: number | null; builtin: boolean; active: boolean };
+  custom: boolean; issues: WfIssue[]; fallback: boolean; preview?: boolean;
   rows: RoutingRow[]; agentNodes: RoutingStep[];
   notInWorkflow: { id: string; name: string; avatar: string | null; status: string; roles: string[] }[];
 }
@@ -99,6 +99,11 @@ export const EDGE_KINDS: { kind: WfEdgeKind; hint: string }[] = [
   { kind: 'on-reject', hint: 'only on reject/changes-requested — a bounded loop edge' },
   { kind: 'message', hint: 'deliver a message, no work item' },
 ];
+
+// short names for the legend and for lines without a label of their own
+export const EDGE_SHORT: Record<WfEdgeKind, string> = {
+  next: 'Continue', 'on-success': 'If it succeeds', 'on-failure': 'If it fails', 'on-reject': 'Send back', message: 'Message',
+};
 
 export const COND_FIELDS: { field: string; label: string }[] = [
   { field: 'step.status', label: 'step status' },
@@ -184,20 +189,28 @@ export function spliceOut(g: WfGraph, nodeId: string): WfGraph {
 // Layered left-to-right layout: longest-path layering from start, ordered
 // within a layer by the average row of their sources. No dependencies.
 export function layoutLR(g: WfGraph): WfGraph {
-  const flow = (id: string) => g.edges.filter((e) => e.from === id && e.kind !== 'message');
   const layer = new Map<string, number>();
   const start = g.nodes.find((n) => n.type === 'start') ?? g.nodes[0];
   if (!start) return g;
-  const depth = (id: string, seen: Set<string>): number => {
-    if (layer.has(id)) return layer.get(id)!;
-    if (seen.has(id)) return 0;
-    seen.add(id);
-    const ins = g.edges.filter((e) => e.to === id && e.kind !== 'message' && e.from !== id);
-    const d = ins.length ? Math.max(...ins.map((e) => depth(e.from, seen))) + 1 : 0;
-    layer.set(id, d);
-    return d;
-  };
-  for (const n of g.nodes) depth(n.id, new Set());
+  // A retry / send-back line points backwards in the flow: it must not push its target to the right.
+  // Rank nodes by shortest path from Start, then drop loop lines that return to an earlier-or-equal rank.
+  const rank = new Map<string, number>([[start.id, 0]]);
+  for (let queue = [start.id]; queue.length;) {
+    const id = queue.shift()!;
+    for (const e of g.edges) if (e.from === id && e.kind !== 'message' && !rank.has(e.to)) { rank.set(e.to, rank.get(id)! + 1); queue.push(e.to); }
+  }
+  const isBack = (e: WfEdge) => (e.kind === 'on-reject' || e.kind === 'on-failure') && (rank.get(e.to) ?? 1e9) <= (rank.get(e.from) ?? -1);
+  const fwd = g.edges.filter((e) => e.kind !== 'message' && e.from !== e.to && !isBack(e));
+  // longest path over the remaining (acyclic) lines
+  for (const n of g.nodes) layer.set(n.id, 0);
+  for (let pass = 0; pass < g.nodes.length; pass++) {
+    let changed = false;
+    for (const e of fwd) {
+      const want = (layer.get(e.from) ?? 0) + 1;
+      if (want > (layer.get(e.to) ?? 0)) { layer.set(e.to, want); changed = true; }
+    }
+    if (!changed) break;
+  }
   const layers = new Map<number, WfNode[]>();
   for (const n of g.nodes) {
     const l = layer.get(n.id) ?? 0;
@@ -205,7 +218,7 @@ export function layoutLR(g: WfGraph): WfGraph {
     layers.get(l)!.push(n);
   }
   const pos = new Map<string, { x: number; y: number }>();
-  const GX = 230; const GY = 150;
+  const GX = 300; const GY = 190;
   const sortedLayers = [...layers.entries()].sort((a, b) => a[0] - b[0]);
   // initial order within each layer, then two barycenter sweeps
   const order = new Map<number, string[]>();
@@ -216,7 +229,7 @@ export function layoutLR(g: WfGraph): WfGraph {
     for (const [l, ids] of order) {
       if (!ids.length) continue;
       const scored = ids.map((id) => {
-        const ins = g.edges.filter((e) => e.to === id && e.kind !== 'message');
+        const ins = fwd.filter((e) => e.to === id);
         const b = ins.length ? ins.reduce((a, e) => a + (rowOf.get(e.from) ?? 0), 0) / ins.length : rowOf.get(id) ?? 0;
         return { id, b };
       });
@@ -225,10 +238,21 @@ export function layoutLR(g: WfGraph): WfGraph {
       scored.forEach((s, i) => rowOf.set(s.id, i));
     }
   }
-  for (const [l, ids] of order) {
-    const total = ids.length;
-    ids.forEach((id, i) => pos.set(id, { x: l * GX + 40, y: i * GY + 40 - (total - 1) * (GY / 2) + 140 }));
-  }
+  // A long flow folds into rows (left to right, then right to left) so the whole thing fits on screen
+  // instead of stretching into one line that has to be zoomed out until nothing is readable.
+  const cols = sortedLayers.length <= 6 ? sortedLayers.length : 5;
+  const rowsOf: number[][] = [];
+  sortedLayers.forEach(([l], i) => { (rowsOf[Math.floor(i / cols)] ??= []).push(l); });
+  let top = 40;
+  rowsOf.forEach((layersInRow, r) => {
+    const tallest = Math.max(...layersInRow.map((l) => order.get(l)?.length ?? 1));
+    layersInRow.forEach((l, c) => {
+      const ids = order.get(l) ?? [];
+      const col = r % 2 ? cols - 1 - c : c;
+      ids.forEach((id, i) => pos.set(id, { x: col * GX + 40, y: top + (i + (tallest - ids.length) / 2) * GY }));
+    });
+    top += tallest * GY + (r < rowsOf.length - 1 ? 70 : 0);
+  });
   return { ...g, nodes: g.nodes.map((n) => ({ ...n, position: pos.get(n.id) ?? n.position })) };
 }
 
@@ -236,7 +260,7 @@ export function layoutLR(g: WfGraph): WfGraph {
 export function edgeMid(g: WfGraph, e: WfEdge): { x: number; y: number } | null {
   const a = g.nodes.find((n) => n.id === e.from); const b = g.nodes.find((n) => n.id === e.to);
   if (!a || !b) return null;
-  return { x: (a.position.x + b.position.x) / 2 + 90, y: (a.position.y + b.position.y) / 2 + 30 };
+  return { x: (a.position.x + b.position.x) / 2 + 100, y: (a.position.y + b.position.y) / 2 + 40 };
 }
 
 // Nearest edge within `radius` px of a flow point (excluding edges touching a node).

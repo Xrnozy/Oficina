@@ -11,7 +11,7 @@ import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
 import {
-  approveDod, assignSweep, createRun, evaluateDodOnIntegration, getRun, getTask,
+  approveDod, assignSweep, createRun, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
   pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
@@ -156,7 +156,11 @@ export function createServer(port: number, uiDir: string): http.Server {
     } catch (e) { err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`); }
   });
 
-  app.get('/api/runs', (_req, res) => ok(res, q('SELECT * FROM runs ORDER BY rowid DESC LIMIT 50').map(rowToRun)));
+  // each run carries the workflow it is pinned to (null = the standard pipeline)
+  app.get('/api/runs', (_req, res) => ok(res, q('SELECT * FROM runs ORDER BY rowid DESC LIMIT 50').map((r) => {
+    const v = r.workflow_version_id ? q1('SELECT v.n, w.id, w.name FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE v.id = ?', r.workflow_version_id as string) : null;
+    return { ...rowToRun(r), workflow: v ? { id: v.id as string, name: v.name as string, n: v.n as number } : null };
+  })));
 
   app.get('/api/runs/:id', (req, res) => {
     const r = getRun(req.params.id);
@@ -404,7 +408,13 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.get('/api/workflows/active/routing', (req, res) => {
     const wsId = String(req.query.workspaceId ?? '');
     if (!wsId) return err(res, 400, 'workspaceId required');
-    ok(res, routingView(wsId));
+    ok(res, routingView(wsId, req.query.workflowId ? String(req.query.workflowId) : null));
+  });
+  // Same view for an unsaved draft graph from the editor (live preview, nothing is stored).
+  app.post('/api/workflows/routing-preview', (req, res) => {
+    const { workspaceId, workflowId, graph } = req.body ?? {};
+    if (!workspaceId || !graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return err(res, 400, 'workspaceId and graph required');
+    ok(res, routingView(String(workspaceId), workflowId ? String(workflowId) : null, graph));
   });
   // Per-node model tier / prompt budget / bypass — written as a new version
   // so the Workflow inspector and this page always edit the same field.
@@ -492,17 +502,27 @@ export function createServer(port: number, uiDir: string): http.Server {
   // ---------- commands ----------
   app.post('/api/runs', (req, res) => {
     try {
-      const { workspaceId, goal, budgetUsd, repoId, oneShot, limits } = req.body ?? {};
+      const { workspaceId, goal, budgetUsd, repoId, oneShot, limits, workflowId } = req.body ?? {};
       if (!workspaceId || !goal) return err(res, 400, 'workspaceId and goal required');
       const cleanLimits: Record<string, number> = {};
       for (const k of ['maxParallel', 'maxReadOnly', 'maxCycles', 'maxWallclockMin', 'sameErrorAttempts', 'noProgressCycles', 'maxTaskMinutes']) {
         const v = (limits as Record<string, unknown> | undefined)?.[k];
         if (v != null) { const n = Number(v); if (!Number.isFinite(n) || n < 0) return err(res, 400, `limits.${k} must be a non-negative number`); cleanLimits[k] = n; }
       }
-      ok(res, createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits }));
-    } catch (e) { err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`); }
+      ok(res, createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined }));
+    } catch (e) {
+      if (/workflow not found/.test(String(e))) return err(res, 400, 'workflow not found or has no saved version');
+      err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`);
+    }
   });
 
+  app.post('/api/runs/:id/workflow', (req, res) => {
+    const wfId = String(req.body?.workflowId ?? '');
+    if (!wfId) return err(res, 400, 'workflowId required');
+    const r = setRunWorkflow(req.params.id, wfId);
+    if ('error' in r) return err(res, 409, r.error);
+    ok(res, getRun(req.params.id));
+  });
   app.post('/api/runs/:id/pause', (req, res) => { pauseRun(req.params.id, !!req.body?.hard); ok(res, getRun(req.params.id)); });
   app.post('/api/runs/:id/resume', (req, res) => { resumeRun(req.params.id); ok(res, getRun(req.params.id)); });
   app.post('/api/runs/:id/stop', (req, res) => { stopRun(req.params.id); ok(res, getRun(req.params.id)); });

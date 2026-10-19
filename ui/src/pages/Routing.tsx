@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { post, put, useEvents, useQuery } from '../api';
 import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, toast, useCurrentRun, type Tone } from '../components';
 import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, Mail, Pencil, Plus, X } from 'lucide-react';
+import type { WorkflowRow } from '../workflow';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
 // Routing: who does each step of the flow, which models each step may run
@@ -140,7 +141,7 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
 // budget (node.config — the same fields the Workflow inspector edits), then
 // the ordered model options of every agent the node can dispatch to.
 function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: RoutingStep; rv: RoutingView; agentFor: (id: string) => any; providers: any; onSaved: () => void }) {
-  const editable = rv.custom;
+  const editable = rv.custom && !rv.preview;
   const [tier, setTier] = useState(step.modelTier ?? '');
   const [budget, setBudget] = useState(step.budgetChars != null ? String(step.budgetChars) : '');
   useEffect(() => { setTier(step.modelTier ?? ''); setBudget(step.budgetChars != null ? String(step.budgetChars) : ''); }, [step.nodeId, step.modelTier, step.budgetChars]);
@@ -292,7 +293,37 @@ export default function Routing() {
   const { data: providers, reload: reloadProviders } = useQuery<any>('/providers');
   const { data: decisions } = useQuery<any[]>('/routing/decisions');
   const ws = workspaces?.find((w) => w.id === run?.workspaceId) ?? workspaces?.[0];
-  const { data: rv, reload: reloadRv } = useQuery<RoutingView>(ws?.id ? `/workflows/active/routing?workspaceId=${ws.id}` : null, [ws?.id]);
+  // which workflow to show: '' = the active one. Remembered, and shared with the Workflow editor's last pick.
+  const [viewId, setViewId] = useState(() => { try { return localStorage.getItem('routing-wf') ?? ''; } catch { return ''; } });
+  const pickView = (id: string) => { setViewId(id); try { localStorage.setItem('routing-wf', id); } catch { /* private mode */ } };
+  const { data: wfList } = useQuery<WorkflowRow[]>(ws?.id ? `/workflows?workspaceId=${ws.id}` : null, [ws?.id]);
+  const knownView = !viewId || (wfList ?? []).some((w) => w.id === viewId);
+  const { data: saved, reload: reloadRv } = useQuery<RoutingView>(
+    ws?.id ? `/workflows/active/routing?workspaceId=${ws.id}${viewId && knownView ? `&workflowId=${viewId}` : ''}` : null, [ws?.id, viewId, knownView]);
+  // the editor keeps unsaved edits in localStorage; show them here as a live preview so Routing
+  // follows the canvas without waiting for a save (read-only: saving happens in the editor)
+  const [draftTick, setDraftTick] = useState(0);
+  useEffect(() => {
+    const on = (e: StorageEvent) => { if (e.key?.startsWith('wf-draft:')) setDraftTick((t) => t + 1); };
+    window.addEventListener('storage', on);
+    const t = setInterval(() => setDraftTick((x) => x + 1), 4000);   // same-tab edits don't fire 'storage'
+    return () => { window.removeEventListener('storage', on); clearInterval(t); };
+  }, []);
+  const [draftRv, setDraftRv] = useState<{ key: string; rv: RoutingView } | null>(null);
+  const draftRaw = (() => { try { return saved ? localStorage.getItem(`wf-draft:${saved.workflow.id}`) : null; } catch { return null; } })();
+  useEffect(() => {
+    if (!saved || !ws?.id || !draftRaw || saved.workflow.builtin) { setDraftRv(null); return; }
+    if (draftRv?.key === draftRaw) return;
+    let dead = false;
+    try {
+      const graph = JSON.parse(draftRaw).graph;
+      post<RoutingView>('/workflows/routing-preview', { workspaceId: ws.id, workflowId: saved.workflow.id, graph })
+        .then((r) => { if (!dead) setDraftRv({ key: draftRaw, rv: r }); }).catch(() => { if (!dead) setDraftRv(null); });
+    } catch { setDraftRv(null); }
+    return () => { dead = true; };
+  }, [saved?.workflow.id, ws?.id, draftRaw, draftTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rv: RoutingView | null = draftRaw && draftRv ? draftRv.rv : saved;
+  const discardDraft = () => { try { if (saved) localStorage.removeItem(`wf-draft:${saved.workflow.id}`); } catch { /* ignore */ } setDraftRv(null); setDraftTick((t) => t + 1); };
   // workflow.saved / .activated / .deleted already flow over the event stream
   // and useQuery's throttled tick refetches the view — the toast just says so.
   const lastWfToast = useRef(0);
@@ -331,10 +362,24 @@ export default function Routing() {
       <Panel title="Flow"
         action={
           <div className="flex items-center gap-2">
-            {rv && <Tag tone={rv.custom ? 'info' : 'idle'} title={rv.workflow.builtin ? 'the read-only built-in pipeline' : 'a custom workflow is active'}>{rv.workflow.name} · v{rv.workflow.versionN ?? '—'}</Tag>}
+            <select className="input input-sm !w-auto max-w-[240px]" value={knownView ? viewId : ''} onChange={(e) => pickView(e.target.value)} aria-label="Workflow to show">
+              <option value="">Active workflow{(wfList ?? []).find((w) => w.active) ? ` · ${(wfList ?? []).find((w) => w.active)!.builtin ? 'Standard pipeline' : (wfList ?? []).find((w) => w.active)!.name}` : ''}</option>
+              {(wfList ?? []).map((w) => <option key={w.id} value={w.id}>{w.builtin ? 'Standard pipeline' : w.name}{w.active ? ' (active)' : ''}</option>)}
+            </select>
+            {rv && <Tag tone={rv.custom ? 'info' : 'idle'} title={rv.workflow.builtin ? 'the read-only standard pipeline' : 'a custom workflow'}>{rv.workflow.name} · v{rv.workflow.versionN ?? '—'}</Tag>}
+            {rv && !rv.workflow.active && !rv.workflow.builtin && !rv.preview && (
+              <button className="btn btn-xs" onClick={async () => { const r = await act(post(`/workflows/${rv.workflow.id}/activate`), 'Now the default for new runs'); if (r) { pickView(''); reloadRv(); } }}>Make active</button>
+            )}
             <Link to="/workflow" className="btn btn-ghost btn-xs"><Pencil size={11} /> Edit in Workflow</Link>
           </div>
         }>
+        {rv?.preview && (
+          <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn mb-3 flex items-center gap-3">
+            <span className="flex-1">Showing your <b>unsaved changes</b> from the Workflow editor. Save them there to make this final; per-step settings here are read-only until then.</span>
+            <Link to="/workflow" className="underline">Open editor</Link>
+            <button className="underline" onClick={discardDraft}>Discard draft</button>
+          </div>
+        )}
         {!rv?.custom && <p className="text-xs text-fg-3 mb-3">Default pipeline. <Link to="/workflow" className="underline">Clone it in Workflow</Link> to customize.</p>}
         {rv?.fallback && (
           <div className="rounded-lg border border-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad mb-3">
@@ -354,7 +399,7 @@ export default function Routing() {
             ))}
           </ul>
         )}
-        <p className="text-xs text-fg-3 mt-3">Every step is a node on the active workflow — click one to open it in the editor. Routing follows the <em>saved</em> active version: an unsaved Workflow draft doesn't change this page until it's saved. Loops are bounded, then you decide. You can message any agent, edit requirements, change models, or pause at any time; every change can be undone from Checkpoints.</p>
+        <p className="text-xs text-fg-3 mt-3">Every step is a node of the workflow shown above. Click one to open it in the editor. Routing updates as you edit it there (unsaved edits show as a preview) and when you switch or activate a workflow.</p>
       </Panel>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-5 items-start [&>*]:min-w-0">

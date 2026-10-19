@@ -5,15 +5,16 @@ import ReactFlow, {
   EdgeLabelRenderer, EdgeProps, Handle, MarkerType, MiniMap, Node, NodeProps, Panel,
   Position, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
 } from 'reactflow';
+import { layoutEdges, type EdgeGeo } from '../wfEdges';
 import {
   ArrowDown, ArrowLeftRight, ArrowUp, Ban, Bell, BookMarked, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2, FlaskConical,
-  GitBranch, GitMerge, LayoutDashboard, ListPlus, Lock,
+  Cpu, GitBranch, GitMerge, History as HistoryIcon, LayoutDashboard, ListPlus, Lock, Maximize2, PanelLeft, PanelRight,
   MessageSquare, Plus, Redo2, Save, Scissors, Shield, Trash2, Undo2, Upload, User, Zap,
 } from 'lucide-react';
 import { get, post, put, del, useFetch, useQuery, useEvents, OfficeEvent } from '../api';
 import { Dot, Empty, Modal, PageHeader, StatusChip, Tag, act, fmtAgo, roleLabel, toast, useCurrentRun } from '../components';
 import {
-  COND_FIELDS, COND_OPS, EDGE_KINDS, NODE_TYPE_LABEL, PURPOSES, PURPOSE_LABEL, WfAuditRow, WfCondition,
+  COND_FIELDS, COND_OPS, EDGE_KINDS, EDGE_SHORT, NODE_TYPE_LABEL, PURPOSES, PURPOSE_LABEL, WfAuditRow, WfCondition,
   WfEdge, WfEdgeKind, WfEstimate, WfGraph, WfGuardrails, WfIssue, WfNode, WfNodeType, WfSimResult, WfTemplate,
   WorkflowRow, WorkflowVersionRow,
   WfValidation, condText, emptyGraph, insertOnEdge, layoutLR, nearestEdge, spliceOut, uid,
@@ -22,7 +23,7 @@ import {
 // ---------------------------------------------------------------------------
 // data shapes from the API
 type WorkflowDetail = { workflow: WorkflowRow; versions: WorkflowVersionRow[]; graph: WfGraph | null; issues: WfValidation | null; estimate: WfEstimate | null; audit: WfAuditRow[] };
-type AgentRow = { id: string; name: string; status?: string; model?: { backend?: string; model?: string }; memberships?: { role?: string; workspace_id: string; active: number }[] };
+type AgentRow = { id: string; name: string; status?: string; accountId?: string; modelId?: string; model?: { backend?: string; model?: string; fallbacks?: unknown[] }; memberships?: { role?: string; workspace_id: string; active: number }[] };
 type RoleRow = { id: string; name: string };
 type SkillRow = { id: string; name: string; description?: string; enabled: number; owner_origin: string; latest_version_id?: string | null };
 type SkillVersionRow = { id: string; skill_id: string; review_status: string; content?: string | null; hasContent?: boolean };
@@ -31,7 +32,7 @@ type SkillPreview = { applied: { skillId: string; name: string; chars: number; v
 
 // ---------------------------------------------------------------------------
 // reactflow <-> workflow graph conversion
-type RfData = { wf: WfNode; live?: { status: string; taskId?: string }; issues?: number; simVisited?: boolean };
+type RfData = { wf: WfNode; live?: { status: string; taskId?: string; agent?: string; since?: string; human?: boolean }; issues?: number; simVisited?: boolean; step?: number; prov?: string[]; provTitle?: string };
 
 const toRfNodes = (g: WfGraph): Node<RfData>[] =>
   g.nodes.map((n) => ({ id: n.id, type: 'wf', position: n.position, data: { wf: { ...n, position: undefined as never } } }));
@@ -56,28 +57,70 @@ const toWfGraph = (nodes: Node<RfData>[], edges: Edge[]): WfGraph => ({
 
 // ---------------------------------------------------------------------------
 // custom node — one component renders every type
-const NODE_W = 176;
+const NODE_W = 200;
+const PILL_W = 120;
 
-const TYPE_TINT: Record<WfNodeType, string> = {
-  start: 'bg-mint', end: 'bg-navy text-white', agent: 'bg-raised',
-  condition: 'bg-cream', merge: 'bg-lilac', human: 'bg-pink',
+// Role colours reuse the app's pastel blocks so a step reads at a glance.
+const ROLE_TINT: Record<string, string> = {
+  pm: 'bg-lilac', 'prompt-creator': 'bg-cream', developer: 'bg-lime', qa: 'bg-mint',
+  reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream',
 };
 
 const TYPE_ICON: Record<WfNodeType, React.ReactNode> = {
-  start: <CirclePlay size={13} />, end: <Check size={13} />, agent: <User size={13} />,
-  condition: <GitBranch size={13} />, merge: <GitMerge size={13} />, human: <Bell size={13} />,
+  start: <CirclePlay size={14} />, end: <Check size={14} />, agent: <User size={14} />,
+  condition: <GitBranch size={14} />, merge: <GitMerge size={14} />, human: <Bell size={14} />,
 };
+
+// Plain-language one-liner under each step's name.
+const TYPE_HINT: Partial<Record<WfNodeType, string>> = {
+  start: 'The request comes in here',
+  end: 'The work is accepted',
+  condition: 'Chooses a path',
+  human: 'Waits for you',
+};
+
+const SIDES: { id: string; pos: Position }[] = [
+  { id: 'top', pos: Position.Top }, { id: 'right', pos: Position.Right },
+  { id: 'bottom', pos: Position.Bottom }, { id: 'left', pos: Position.Left },
+];
+const HANDLE_CLS = 'wf-handle !w-3 !h-3 !bg-canvas !border-2 !border-fg-3 hover:!border-accent hover:!bg-accent !transition-colors';
+
+// "Provider · model" for each agent a step can run on, from the agent's account and model.
+type ProvData = { providers?: { id: string; name: string }[]; accounts?: { id: string; provider_id: string; label?: string }[]; models?: { id: string; name: string; label?: string }[] };
+function providerInfo(wf: WfNode, agents: AgentRow[], wsId: string, pd: ProvData | null): { prov: string[]; provTitle: string } | null {
+  if (wf.type !== 'agent') return null;
+  const who = wf.agentId ? agents.filter((a) => a.id === wf.agentId)
+    : wf.role ? agents.filter((a) => (a.memberships ?? []).some((m) => m.role === wf.role && m.active && m.workspace_id === wsId)) : [];
+  if (!who.length) return { prov: [], provTitle: wf.role ? `No agent holds the "${wf.role}" role` : 'No agent chosen' };
+  const lines: string[] = []; const detail: string[] = [];
+  for (const a of who) {
+    const acct = pd?.accounts?.find((x) => x.id === a.accountId);
+    const prov = pd?.providers?.find((x) => x.id === acct?.provider_id)?.name ?? acct?.label ?? '';
+    const m = pd?.models?.find((x) => x.id === a.modelId);
+    const model = m?.label ?? m?.name ?? a.modelId?.split(':').pop() ?? '';
+    const line = [prov, model].filter(Boolean).join(' · ') || 'no provider set';
+    if (!lines.includes(line)) lines.push(line);
+    const fb = a.model?.fallbacks?.length ?? 0;
+    detail.push(`${a.name}: ${line}${fb ? ` (+${fb} fallback${fb > 1 ? 's' : ''})` : ''}`);
+  }
+  return { prov: lines, provTitle: detail.join('\n') };
+}
 
 const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<RfData>) {
   const n = data.wf;
   const live = data.live;
   const err = (data.issues ?? 0) > 0;
   const isAgent = n.type === 'agent';
+  const pill = n.type === 'start' || n.type === 'end';
   const [skillOver, setSkillOver] = useState(false);
+  const tint = isAgent ? ROLE_TINT[n.role ?? ''] ?? 'bg-raised' : n.type === 'condition' ? 'bg-cream' : n.type === 'merge' ? 'bg-lilac' : n.type === 'human' ? 'bg-pink' : n.type === 'start' ? 'bg-mint' : 'bg-navy text-white';
+  const ring = selected ? 'border-fg ring-2 ring-fg/20' : err ? 'border-bad' : 'border-line-strong';
+  const liveCls = live?.status === 'running' ? 'ring-2 ring-info/40 border-info' : live?.status === 'failed' ? 'border-bad' : live?.status === 'done' ? 'border-ok' : '';
+  const tone = live?.status === 'failed' ? 'bad' : live?.status === 'running' ? 'info' : 'ok';
   return (
     <div
-      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${n.config?.disabled ? 'opacity-55' : ''} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''} ${data.simVisited ? 'ring-2 ring-accent' : ''}`}
-      style={{ width: n.type === 'start' || n.type === 'end' ? 110 : NODE_W }}
+      className={`group relative rounded-2xl border bg-surface shadow-pop transition-shadow ${ring} ${liveCls} ${n.config?.disabled ? 'opacity-55' : ''} ${data.simVisited ? 'outline outline-2 outline-accent/50' : ''} ${skillOver ? 'ring-2 ring-accent' : ''}`}
+      style={{ width: pill ? PILL_W : NODE_W }}
       title={n.label}
       onDragOver={isAgent ? (ev) => { if (ev.dataTransfer.types.includes('application/x-officechain-skill')) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; setSkillOver(true); } } : undefined}
       onDragLeave={isAgent ? () => setSkillOver(false) : undefined}
@@ -90,71 +133,91 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
         skillDropOp(n.id, ref);
       } : undefined}
     >
-      {n.type !== 'start' && <Handle type="target" position={Position.Left} className="!bg-fg-3 !w-2 !h-2 !border-0" />}
-      <div className="px-3 py-2">
-        <div className="flex items-center gap-1.5 text-2xs text-fg-3">
-          {TYPE_ICON[n.type]}
-          <span className="uppercase tracking-[0.05em] font-mono">{NODE_TYPE_LABEL[n.type]}</span>
-          {live && <span className={`ml-auto flex items-center gap-1 ${live.status === 'failed' ? 'text-bad' : live.status === 'running' ? 'text-info' : 'text-ok'}`}><Dot tone={live.status === 'failed' ? 'bad' : live.status === 'running' ? 'info' : 'ok'} live={live.status === 'running'} />{live.status}</span>}
-          {err && !live && <Dot tone="bad" className="ml-auto" />}
-        </div>
-        <div className="mt-0.5 text-[13px] font-medium leading-4 truncate">{n.label || n.id}</div>
-        {isAgent && (
-          <div className="mt-1 flex items-center gap-1 flex-wrap">
-            <Tag mono>{n.role ?? n.agentId?.slice(0, 8) ?? 'unassigned'}</Tag>
-            {n.config?.purpose && <Tag>{PURPOSE_LABEL[n.config.purpose] ?? n.config.purpose}</Tag>}
-            {n.config?.writable === false && <Tag title="read-only: does not edit files">ro</Tag>}
-            {n.config?.disabled && <Tag title="bypassed: the engine passes through without dispatching">bypassed</Tag>}
-            {(n.config?.skills?.length ?? 0) > 0 && <Tag title={`${n.config!.skills!.length} node skill(s) attached`}><BookMarked size={9} />{n.config!.skills!.length}</Tag>}
-          </div>
+      {SIDES.map((s) => <Handle key={s.id} id={s.id} type="source" position={s.pos} className={HANDLE_CLS} />)}
+      {/* header strip: step number, kind of step, live state */}
+      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-t-2xl ${tint} ${pill ? 'rounded-b-2xl justify-center' : ''}`}>
+        {data.step != null && !pill && (
+          <span className="grid place-items-center w-5 h-5 rounded-full bg-fg text-canvas text-[10px] font-semibold tabular-nums shrink-0" title={`Step ${data.step} in the flow`}>{data.step}</span>
         )}
-        {n.type === 'condition' && <div className="mt-0.5 text-2xs text-fg-3">branches on edges →</div>}
-        {n.type === 'merge' && <div className="mt-0.5 text-2xs text-fg-3">waits for {(n.config?.mergeMode ?? 'all') === 'all' ? 'all branches' : 'any branch'}</div>}
+        {TYPE_ICON[n.type]}
+        <span className="text-[11px] font-medium truncate">{pill ? n.label : isAgent ? (n.role ? roleLabel(n.role) : 'Agent') : NODE_TYPE_LABEL[n.type]}</span>
+        {live && <span className={`ml-auto flex items-center gap-1 text-2xs ${live.status === 'failed' ? 'text-bad' : live.status === 'running' ? 'text-info' : 'text-ok'}`}><Dot tone={tone} live={live.status === 'running'} />{live.status}</span>}
+        {err && !live && <Dot tone="bad" className="ml-auto" />}
       </div>
-      {n.type !== 'end' && <Handle type="source" position={Position.Right} className="!bg-fg-3 !w-2 !h-2 !border-0" />}
+      {!pill && (
+        <div className="px-3 py-2.5">
+          <div className="text-[13px] font-semibold leading-4 text-fg break-words line-clamp-2">{n.label || n.id}</div>
+          {isAgent && data.prov && (
+            <div className="mt-1 flex items-center gap-1 text-2xs text-fg-3 min-w-0" title={data.provTitle}>
+              <Cpu size={10} className="shrink-0" />
+              {data.prov.length ? <span className="truncate">{data.prov[0]}</span> : <span className="text-warn">no agent</span>}
+              {data.prov.length > 1 && <span className="shrink-0 text-fg-4">+{data.prov.length - 1}</span>}
+            </div>
+          )}
+          {isAgent ? (
+            <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+              {n.config?.purpose && <Tag>{PURPOSE_LABEL[n.config.purpose] ?? n.config.purpose}</Tag>}
+              {n.config?.writable === false && <Tag title="Read-only: this step never edits files">read-only</Tag>}
+              {n.config?.disabled && <Tag title="Bypassed: the engine passes straight through this step">bypassed</Tag>}
+              {(n.config?.skills?.length ?? 0) > 0 && <Tag title={`${n.config!.skills!.length} skill(s) attached to this step`}><BookMarked size={9} />{n.config!.skills!.length}</Tag>}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-2xs text-fg-3">
+              {n.type === 'merge' ? `Waits for ${(n.config?.mergeMode ?? 'all') === 'all' ? 'all branches' : 'any branch'}` : TYPE_HINT[n.type]}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 });
 
 // ---------------------------------------------------------------------------
-// custom edge — label + midpoint "+" insert button
-function WfEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected, markerEnd }: EdgeProps) {
+// custom edge — drawn from geometry the editor computes for the whole graph
+// (see wfEdges.ts), with its label and an "insert a step here" button
+function WfEdgeView({ id, data, selected, markerEnd }: EdgeProps) {
   const e: WfEdge = data.wf;
+  const geo: EdgeGeo | undefined = data.geo;
   const taken: boolean = !!data.taken;
   const simTaken: boolean = !!data.simTaken;
   const style = EDGE_STYLE[e.kind] ?? EDGE_STYLE.next;
-  const [path, labelX, labelY] = edgePath(sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition);
-  const label = e.else ? 'else' : e.label ?? (e.condition ? condText(e.condition) : '');
+  if (!geo) return null;
+  const label = e.else ? 'otherwise' : e.label ?? (e.condition ? condText(e.condition) : '');
+  const showChip = e.kind !== 'next' || !!label;
   return (
     <>
+      {/* wide invisible stroke: an easy target to click */}
+      <path d={geo.path} fill="none" stroke="transparent" strokeWidth={18} className="react-flow__edge-interaction" />
+      <g className={data.flowing ? 'wf-flowing' : undefined}>
       <BaseEdge
-        id={id} path={path} markerEnd={markerEnd}
+        id={id} path={geo.path} markerEnd={markerEnd}
         style={{
-          stroke: taken ? 'rgb(var(--info))' : simTaken ? 'rgb(var(--accent))' : style.stroke,
-          strokeWidth: selected ? 2.5 : taken || simTaken ? 2 : 1.5,
-          strokeDasharray: style.dash,
+          stroke: taken ? 'rgb(var(--info))' : simTaken ? 'rgb(var(--accent))' : selected ? 'rgb(var(--fg))' : style.stroke,
+          strokeWidth: selected ? 2.5 : taken || simTaken ? 2.25 : 1.75,
+          strokeDasharray: data.flowing ? '8 5' : style.dash,
         }}
       />
+      </g>
       <EdgeLabelRenderer>
-        <div className="absolute pointer-events-auto" style={{ transform: `translate(-50%,-50%) translate(${labelX}px,${labelY}px)` }}>
+        <div className="absolute pointer-events-auto" style={{ transform: `translate(-50%,-50%) translate(${geo.mx}px,${geo.my}px)` }}>
           <div className="group flex items-center gap-1">
-            {(e.kind !== 'next' || label) && (
-              <span className={`chip !h-5 text-2xs max-w-[190px] truncate ${selected ? 'border-fg' : 'border-line'} ${taken ? 'border-info text-info' : style.tone} bg-canvas`} title={e.else ? 'fallback branch' : label}>
+            {showChip && (
+              <span className={`chip !h-5 text-2xs max-w-[190px] truncate ${selected ? 'border-fg' : 'border-line'} ${taken ? 'border-info text-info' : style.tone} bg-canvas`} title={e.else ? 'Used when no other path matches' : label}>
                 {e.kind === 'message' && <MessageSquare size={10} />}
                 {e.kind === 'on-failure' && <Ban size={10} />}
                 {e.kind === 'on-reject' && <Undo2 size={10} />}
                 {e.kind === 'on-success' && <Check size={10} />}
-                {label || EDGE_KINDS.find((k) => k.kind === e.kind)?.hint}
-                {e.maxLoops != null && ` ·${e.maxLoops}`}
+                {label || EDGE_SHORT[e.kind]}
+                {e.maxLoops != null && ` · up to ${e.maxLoops}×`}
               </span>
             )}
-            <button
-              className="nodrag nopan hidden group-hover:inline-flex items-center justify-center w-4 h-4 rounded-full bg-fg text-canvas hover:bg-fg-2"
-              title="Insert a node here"
+            {!data.ro && <button
+              className="nodrag nopan hidden group-hover:inline-flex items-center justify-center w-5 h-5 rounded-full bg-fg text-canvas hover:bg-fg-2 shadow-pop"
+              title="Insert a step on this line"
               onClick={(ev) => { ev.stopPropagation(); insertOnEdgeOp(id); }}
             >
-              <Plus size={10} />
-            </button>
+              <Plus size={11} />
+            </button>}
           </div>
         </div>
       </EdgeLabelRenderer>
@@ -166,13 +229,6 @@ function WfEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
 let insertOnEdgeOp: (edgeId: string) => void = () => undefined;
 // Same for a skill dropped onto a node.
 let skillDropOp: (nodeId: string, ref: { skillId: string; name: string }) => void = () => undefined;
-
-// left-to-right orthogonal-ish path: horizontal out, soft curve into target
-function edgePath(sx: number, sy: number, tx: number, ty: number, _sp: Position, _tp: Position): [string, number, number] {
-  const mx = sx + Math.max(48, (tx - sx) / 2);
-  const p = `M ${sx} ${sy} C ${mx} ${sy}, ${tx - Math.max(48, (tx - sx) / 2)} ${ty}, ${tx} ${ty}`;
-  return [p, (sx + tx) / 2, (sy + ty) / 2];
-}
 
 const nodeTypes = { wf: WfNodeView };
 const edgeTypes = { wf: WfEdgeView };
@@ -685,6 +741,7 @@ function WorkflowEditor() {
   const wsId = ws?.id ?? '';
   const { data: wflist, reload: reloadList } = useQuery<WorkflowRow[]>(wsId ? `/workflows?workspaceId=${wsId}` : null);
   const { data: agents } = useQuery<AgentRow[]>('/agents');
+  const { data: provData } = useQuery<ProvData>('/providers');
   const { data: roles } = useQuery<RoleRow[]>('/roles');
   const { data: skillsData, reload: reloadSkills } = useQuery<SkillsData>('/skills');
 
@@ -710,7 +767,19 @@ function WorkflowEditor() {
   const [note, setNote] = useState('');
   const { data: templates } = useQuery<WfTemplate[]>('/workflows/templates');
 
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [hintOpen, setHintOpen] = useState(() => { try { return localStorage.getItem('wf-hint-dismissed') !== '1'; } catch { return true; } });
+  // the canvas changes size when a side panel opens or closes: refit so the graph uses the room
+  useEffect(() => { const t = setTimeout(() => fitView({ padding: 0.14, maxZoom: 1, duration: 200 }), 60); return () => clearTimeout(t); }, [leftOpen, rightOpen, fitView]);
+  // switching workflows (or the first load of one): show the whole flow
+  useEffect(() => {
+    if (!detail?.workflow.id) return;
+    const t = setTimeout(() => fitView({ padding: 0.14, maxZoom: 1, duration: 200 }), 220);
+    return () => clearTimeout(t);
+  }, [detail?.workflow.id, fitView]);
+  const dismissHint = () => { setHintOpen(false); try { localStorage.setItem('wf-hint-dismissed', '1'); } catch { /* private mode */ } };
 
   // ---- history ----
   const past = useRef<string[]>([]);
@@ -742,7 +811,10 @@ function WorkflowEditor() {
     setNodes(toRfNodes(g)); setEdges(toRfEdges(g)); setGuardrails(g.guardrails ?? {});
     if (markDirty) setDirty(true);
   }, [setNodes, setEdges]);
-  const mutate = useCallback((f: (g: WfGraph) => WfGraph) => { pushHistory(); applyGraph(f(currentGraph())); }, [pushHistory, applyGraph, currentGraph]);
+  const mutate = useCallback((f: (g: WfGraph) => WfGraph) => {
+    if (readOnly) { toast('The standard pipeline is read-only. Clone it to change it.'); return; }
+    pushHistory(); applyGraph(f(currentGraph()));
+  }, [readOnly, pushHistory, applyGraph, currentGraph]);
 
   // ---- load workflow detail into canvas ----
   // detail refetches on every ws tick — re-applying the same graph would
@@ -760,13 +832,19 @@ function WorkflowEditor() {
     if (draft) {
       try { applyGraph(JSON.parse(draft).graph as WfGraph, false); setDraftBanner(true); setDirty(true); return; } catch { /* fall through */ }
     }
-    applyGraph(detail.graph ?? emptyGraph(), false);
+    if (builtin && detail.graph) {
+      // read-only graph: arrange it for reading, then apply the layout you last left it in (kept in this browser only)
+      let laid = layoutLR(detail.graph);
+      try {
+        const saved = JSON.parse(localStorage.getItem(`wf-view:${detail.workflow.id}`) ?? 'null') as Record<string, { x: number; y: number }> | null;
+        if (saved) laid = { ...laid, nodes: laid.nodes.map((n) => (saved[n.id] ? { ...n, position: saved[n.id] } : n)) };
+      } catch { /* ignore a corrupt view */ }
+      applyGraph(laid, false);
+    } else applyGraph(detail.graph ?? emptyGraph(), false);
     setDraftBanner(false); setDirty(false); setIssues(detail.issues?.issues ?? []); setEstimate(detail.estimate ?? null);
     setSim(null);
   }, [detail, builtin]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // auto-select first workflow
-  useEffect(() => { if (!wfId && wflist?.length) setWfId(wflist.find((w) => w.active)?.id ?? wflist[0].id); }, [wflist, wfId]);
 
   // deep link: /workflow?node=<id> (from Routing's step cards) selects the
   // node — switching to the active workflow first when another is open
@@ -807,13 +885,25 @@ function WorkflowEditor() {
   // ---- live view ----
   const versionIds = useMemo(() => new Set((detail?.versions ?? []).map((v) => v.id)), [detail]);
   const { data: runs } = useQuery<any[]>('/runs');
-  const wfRuns = useMemo(() => (runs ?? []).filter((r) => r.workflowVersionId && versionIds.has(r.workflowVersionId)), [runs, versionIds]);
+  // first open: show the workflow the current (or any running) request picked, else the active one
+  useEffect(() => {
+    if (wfId || !wflist?.length || runs == null) return;
+    const going = (r: any) => ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'].includes(r.status) && r.workflow?.id && wflist.some((w) => w.id === r.workflow.id);
+    const pick = runs.find((r) => r.id === run?.id && going(r)) ?? runs.find(going);
+    setWfId(pick?.workflow?.id ?? wflist.find((w) => w.active)?.id ?? wflist[0].id);
+  }, [wflist, wfId, runs, run?.id]);
+  // only runs whose request picked this workflow appear here, never another workflow's
+  const wfRuns = useMemo(() => (runs ?? []).filter((r) => (r.workflow ? r.workflow.id === wfId : !!r.workflowVersionId && versionIds.has(r.workflowVersionId))), [runs, versionIds, wfId]);
   const liveRunId = wfRuns.find((r) => r.id === run?.id)?.id ?? wfRuns[0]?.id ?? null;
   const [pickedRun, setPickedRun] = useState<string | null>(null);
-  const liveRun = pickedRun ?? liveRunId;
+  useEffect(() => { setPickedRun(null); }, [wfId]);
+  const liveRun = pickedRun && wfRuns.some((r) => r.id === pickedRun) ? pickedRun : liveRunId;
   const { data: runEvents } = useFetch<OfficeEvent[]>(
     liveRun ? `/runs/${liveRun}/events?types=${encodeURIComponent('workflow.step,workflow.branch,workflow.loop,workflow.enter')}` : null, [liveRun]);
 
+  const liveRunObj = (runs ?? []).find((r) => r.id === liveRun) ?? null;
+  const runGoing = !!liveRunObj && ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'].includes(liveRunObj.status);
+  const { data: runDetail } = useQuery<any>(liveRun ? `/runs/${liveRun}` : null, [liveRun]);
   const [liveWs, setLiveWs] = useState<OfficeEvent[]>([]);
   useEffect(() => { setLiveWs([]); }, [liveRun]);
   useEvents(useCallback((e: OfficeEvent) => {
@@ -824,7 +914,7 @@ function WorkflowEditor() {
   }, [liveRun]));
 
   const live = useMemo(() => {
-    const nodeStatus = new Map<string, { status: string; taskId?: string; at: number }>();
+    const nodeStatus = new Map<string, { status: string; taskId?: string; at: number; agent?: string; since?: string; human?: boolean }>();
     const taken = new Set<string>();
     const mark = (evs: OfficeEvent[]) => {
       for (const e of evs) {
@@ -832,7 +922,14 @@ function WorkflowEditor() {
         if (e.type === 'workflow.step' && p.nodeId) {
           const cur = nodeStatus.get(String(p.nodeId));
           const status = p.done ? 'done' : 'running';
-          if (!cur || cur.status !== 'running' || status === 'done') nodeStatus.set(String(p.nodeId), { status, taskId: p.taskId as string | undefined, at: e.seq });
+          if (!cur || cur.status !== 'running' || status === 'done') {
+            nodeStatus.set(String(p.nodeId), {
+              status, taskId: p.taskId as string | undefined, at: e.seq,
+              agent: (p.agent as string | undefined) ?? cur?.agent,
+              since: status === 'running' ? e.ts : cur?.since,
+              human: !!p.human,
+            });
+          }
         }
         if (e.type === 'workflow.branch') {
           for (const eid of (p.edges as string[] | undefined) ?? []) taken.add(eid);
@@ -843,7 +940,7 @@ function WorkflowEditor() {
           if (p.edgeId) taken.add(String(p.edgeId));
         }
         if (e.type === 'workflow.enter' && Array.isArray(p.nodes)) {
-          for (const nid of p.nodes as string[]) if (!nodeStatus.has(nid)) nodeStatus.set(nid, { status: 'running', taskId: p.taskId as string | undefined, at: e.seq });
+          for (const nid of p.nodes as string[]) if (!nodeStatus.has(nid)) nodeStatus.set(nid, { status: 'running', taskId: p.taskId as string | undefined, at: e.seq, since: e.ts });
         }
       }
     };
@@ -861,30 +958,102 @@ function WorkflowEditor() {
     }
     return m;
   }, [issues]);
-  const liveStable = useRef(new Map<string, { status: string; taskId?: string }>());
+  // order in which the flow reaches each step (breadth-first from Start, message lines excluded)
+  const flowRank = useMemo(() => {
+    const rank = new Map<string, number>();
+    const start = nodes.find((n) => n.data.wf.type === 'start') ?? nodes[0];
+    if (!start) return rank;
+    const out = new Map<string, string[]>();
+    for (const e of edges) {
+      if (e.data.wf.kind === 'message') continue;
+      const l = out.get(e.source); if (l) l.push(e.target); else out.set(e.source, [e.target]);
+    }
+    const q = [start.id]; rank.set(start.id, 0);
+    while (q.length) {
+      const id = q.shift()!;
+      for (const t of out.get(id) ?? []) if (!rank.has(t)) { rank.set(t, rank.size); q.push(t); }
+    }
+    return rank;
+  }, [nodes, edges]);
+  const liveStable = useRef(new Map<string, { status: string; taskId?: string; agent?: string; since?: string; human?: boolean }>());
   const dNodes = useMemo(() => {
     const prev = liveStable.current;
-    const next = new Map<string, { status: string; taskId?: string }>();
-    for (const [id, l] of live.nodeStatus) {
+    const next = new Map<string, { status: string; taskId?: string; agent?: string; since?: string; human?: boolean }>();
+    for (const [id, l0] of live.nodeStatus) {
+      const l = l0.status === 'running' && !runGoing ? { ...l0, status: 'stopped' } : l0;
       const p = prev.get(id);
-      next.set(id, p && p.status === l.status && p.taskId === l.taskId ? p : l);
+      next.set(id, p && p.status === l.status && p.taskId === l.taskId && p.agent === l.agent && p.human === l.human ? p : l);
     }
     liveStable.current = next;
     const simVisited = new Set(sim?.steps.map((s) => s.nodeId) ?? []);
     return nodes.map((n) => {
       const l = next.get(n.id); const iss = issueMap.get(n.id) ?? 0;
       const sv = simVisited.has(n.id) || undefined;
-      if (n.data.live === l && n.data.issues === iss && n.data.simVisited === sv) return n;
-      return { ...n, data: { ...n.data, live: l, issues: iss, simVisited: sv } };
+      const step = n.data.wf.type === 'start' || n.data.wf.type === 'end' ? undefined : flowRank.get(n.id);
+      const pi = providerInfo(n.data.wf, agents ?? [], wsId, provData);
+      const prov = pi ? (n.data.prov && n.data.provTitle === pi.provTitle && n.data.prov.join('|') === pi.prov.join('|') ? n.data.prov : pi.prov) : undefined;
+      if (n.data.live === l && n.data.issues === iss && n.data.simVisited === sv && n.data.step === step && n.data.prov === prov && n.data.provTitle === pi?.provTitle) return n;
+      return { ...n, data: { ...n.data, live: l, issues: iss, simVisited: sv, step, prov, provTitle: pi?.provTitle } };
     });
-  }, [nodes, live, issueMap, sim]);
+  }, [nodes, live, issueMap, sim, flowRank, runGoing, agents, provData, wsId]);
+  // where each line attaches (side of each node), computed for the whole graph so lines fan out instead of tangling
+  const geoPrev = useRef(new Map<string, EdgeGeo>());
+  const edgeGeo = useMemo(() => {
+    const rects = new Map<string, { x: number; y: number; w: number; h: number }>();
+    for (const n of nodes) {
+      const pill = n.data.wf.type === 'start' || n.data.wf.type === 'end';
+      rects.set(n.id, { x: n.position.x, y: n.position.y, w: n.width ?? (pill ? PILL_W : NODE_W), h: n.height ?? (pill ? 32 : 78) });
+    }
+    const fresh = layoutEdges(rects, edges.map((e) => {
+      const kind = e.data.wf.kind;
+      const back = (kind === 'on-reject' || kind === 'on-failure') && (flowRank.get(e.target) ?? 1e9) <= (flowRank.get(e.source) ?? -1);
+      return { id: e.id, source: e.source, target: e.target, back };
+    }));
+    const prev = geoPrev.current;
+    for (const [id, g] of fresh) {   // keep identity when nothing moved, so untouched lines don't re-render
+      const o = prev.get(id);
+      if (o && o.path === g.path && o.mx === g.mx && o.my === g.my) fresh.set(id, o);
+    }
+    geoPrev.current = fresh;
+    return fresh;
+  }, [nodes, edges, flowRank]);
   const dEdges = useMemo(() => edges.map((e) => {
     const taken = live.taken.has(e.id) || undefined;
     const simTaken = (sim ? new Set(sim.takenEdges) : new Set()).has(e.id) || undefined;
-    if (e.data.taken === taken && e.data.simTaken === simTaken) return e;
-    return { ...e, data: { ...e.data, taken, simTaken } };
-  }), [edges, live, sim]);
+    const geo = edgeGeo.get(e.id);
+    const flowing = (taken && runGoing && live.nodeStatus.get(e.target)?.status === 'running') || undefined;
+    const ro = readOnly || undefined;
+    if (e.data.taken === taken && e.data.simTaken === simTaken && e.data.geo === geo && e.data.flowing === flowing && e.data.ro === ro) return e;
+    return { ...e, data: { ...e.data, taken, simTaken, geo, flowing, ro } };
+  }), [edges, live, sim, edgeGeo, runGoing, readOnly]);
 
+  const focusNode = useCallback((id: string) => {
+    setNodes((ns) => ns.map((n) => (n.selected === (n.id === id) ? n : { ...n, selected: n.id === id })));
+    setSelNodes([id]); setSelEdges([]);
+    fitView({ nodes: [{ id }], duration: 300, maxZoom: 1, padding: 1.2 });
+  }, [setNodes, fitView]);
+  const [clock, setClock] = useState(() => Date.now());
+  const working = useMemo(() => dNodes.filter((n) => n.data.live?.status === 'running'), [dNodes]);
+  useEffect(() => {
+    if (!working.length) return;
+    const t = setInterval(() => setClock(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [working.length]);
+  const lastDone = useMemo(() => {
+    let best: { label: string; at: number } | null = null;
+    for (const [id, l] of live.nodeStatus) {
+      if (l.status !== 'done') continue;
+      const n = nodes.find((x) => x.id === id);
+      if (n && (!best || l.at > best.at)) best = { label: n.data.wf.label, at: l.at };
+    }
+    return best;
+  }, [live, nodes]);
+  const taskTitle = (id?: string) => (id ? (runDetail?.tasks ?? []).find((t: any) => t.id === id)?.title as string | undefined : undefined);
+  const elapsed = (since?: string) => {
+    if (!since) return '';
+    const sec = Math.max(0, Math.round((clock - Date.parse(since)) / 1000));
+    return sec >= 3600 ? `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m` : sec >= 60 ? `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s` : `${sec}s`;
+  };
   // ---- selection ----
   const selNode = dNodes.find((n) => selNodes.includes(n.id));
   const selEdge = dEdges.find((e) => selEdges.includes(e.id));
@@ -935,8 +1104,16 @@ function WorkflowEditor() {
     toast(`Skill config applied to all ${roleLabel(src.role)} nodes`);
   }, [nodes, pushHistory, setNodes]);
 
+  // loose mode lets a line start from any of a node's four dots; the direction is still start -> end
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const isValidConnection = useCallback((c: Connection) => {
+    if (!c.source || !c.target || c.source === c.target) return false;
+    const type = (id: string) => nodesRef.current.find((n) => n.id === id)?.data.wf.type;
+    return type(c.source) !== 'end' && type(c.target) !== 'start';
+  }, []);
   const onConnect = useCallback((c: Connection) => {
-    if (!c.source || !c.target) return;
+    if (!c.source || !c.target || !isValidConnection(c)) return;
     mutate((g) => {
       const src = g.nodes.find((n) => n.id === c.source);
       const e: WfEdge = { id: uid('e'), from: c.source!, to: c.target!, kind: 'next' };
@@ -947,15 +1124,16 @@ function WorkflowEditor() {
       }
       return { ...g, edges: [...g.edges, e] };
     });
-  }, [mutate]);
+  }, [mutate, isValidConnection]);
 
   const onDrop = useCallback((ev: React.DragEvent) => {
     ev.preventDefault();
     const raw = ev.dataTransfer.getData('application/x-officechain-node');
-    if (!raw || readOnly) return;
+    if (raw && readOnly) { toast('The standard pipeline is read-only. Clone it to add steps.'); return; }
+    if (!raw) return;
     const p = JSON.parse(raw) as { type: WfNodeType; agentId?: string; role?: string; label: string };
     const pos = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-    pos.x = Math.round(pos.x / 20) * 20 - 80; pos.y = Math.round(pos.y / 20) * 20 - 30;
+    pos.x = Math.round(pos.x / 20) * 20 - 100; pos.y = Math.round(pos.y / 20) * 20 - 40;
     mutate((g) => {
       const node: WfNode = {
         id: uid('n'), type: p.type, label: p.label,
@@ -963,7 +1141,7 @@ function WorkflowEditor() {
         config: p.type === 'agent' ? { purpose: 'custom' } : p.type === 'merge' ? { mergeMode: 'all' } : undefined,
         position: pos,
       };
-      const near = nearestEdge(g, { x: pos.x + 88, y: pos.y + 30 }, 80);
+      const near = nearestEdge(g, { x: pos.x + 100, y: pos.y + 40 }, 80);
       return near ? insertOnEdge(g, near.id, node) : { ...g, nodes: [...g.nodes, node] };
     });
   }, [readOnly, screenToFlowPosition, mutate]);
@@ -971,14 +1149,25 @@ function WorkflowEditor() {
   const dragSnapshot = useRef<string | null>(null);
   const onNodeDragStart = useCallback(() => { dragSnapshot.current = snapshot(); }, [snapshot]);
   const onNodeDragStop = useCallback((_e: React.MouseEvent, node: Node<RfData>) => {
-    if (readOnly) { dragSnapshot.current = null; return; }
+    if (readOnly) {
+      // moving steps on the standard pipeline only changes how you see it: remember it here, don't touch the workflow
+      dragSnapshot.current = null;
+      if (wfId) {
+        try {
+          const cur = JSON.parse(localStorage.getItem(`wf-view:${wfId}`) ?? '{}') as Record<string, { x: number; y: number }>;
+          cur[node.id] = { x: node.position.x, y: node.position.y };
+          localStorage.setItem(`wf-view:${wfId}`, JSON.stringify(cur));
+        } catch { /* private mode */ }
+      }
+      return;
+    }
     // a click reports as a drag with no real movement — without this guard a
     // click near an edge splices the node out of the graph by accident
     const before = dragSnapshot.current ? (JSON.parse(dragSnapshot.current) as { n: Node<RfData>[] }) : null;
     const prev = before?.n.find((n) => n.id === node.id)?.position;
     if (prev && Math.abs(prev.x - node.position.x) < 6 && Math.abs(prev.y - node.position.y) < 6) { dragSnapshot.current = null; return; }
     const g = currentGraph();
-    const near = nearestEdge(g, { x: node.position.x + 88, y: node.position.y + 30 }, 70, node.id);
+    const near = nearestEdge(g, { x: node.position.x + 100, y: node.position.y + 40 }, 70, node.id);
     // splicing is only unambiguous on a chain node — a node with several
     // in/out edges gets a plain move instead of losing its other links
     const multiDegree = g.edges.filter((e) => e.to === node.id && e.kind !== 'message').length > 1
@@ -993,8 +1182,16 @@ function WorkflowEditor() {
       future.current = [];
     }
     dragSnapshot.current = null;
-  }, [readOnly, currentGraph, mutate]);
+  }, [readOnly, wfId, currentGraph, mutate]);
 
+  const tidyUp = useCallback(() => {
+    if (readOnly) {
+      // view only: re-arrange, forget any positions you had saved, nothing is marked as a change
+      try { if (wfId) localStorage.removeItem(`wf-view:${wfId}`); } catch { /* ignore */ }
+      applyGraph(layoutLR(currentGraph()), false);
+    } else mutate((g) => layoutLR(g));
+    setTimeout(() => fitView({ padding: 0.14, maxZoom: 1, duration: 250 }), 80);
+  }, [readOnly, wfId, applyGraph, currentGraph, mutate, fitView]);
   const deleteSelection = useCallback(() => {
     if (readOnly || (!selNodes.length && !selEdges.length)) return;
     mutate((g) => {
@@ -1116,42 +1313,97 @@ function WorkflowEditor() {
 
   // ---- render ----
   return (
-    <div className="flex flex-col h-[calc(100dvh-9.5rem)] min-h-[540px]">
-      <PageHeader
-        title="Workflow"
-        sub="Draw the routing graph agents follow for each task. Drag agents onto the canvas; drop on an edge to insert between its ends."
-      >
-        <button className="btn btn-sm" onClick={createNew}><FilePlus2 size={14} /> New workflow</button>
-      </PageHeader>
+    <div className="h-full min-h-0 flex flex-col bg-canvas">
+      {/* toolbar: pick a workflow, then the few things you do to it */}
+      <div className="h-12 shrink-0 border-b border-line bg-surface px-3 flex items-center gap-2 overflow-x-auto">
+        <button className="btn btn-ghost btn-xs" onClick={() => setLeftOpen((o) => !o)} title={leftOpen ? 'Hide the agent list' : 'Show the agent list'} aria-pressed={leftOpen}><PanelLeft size={15} /></button>
+        <GitBranch size={15} className="text-fg-3 shrink-0" />
+        <select className="input input-sm !w-auto max-w-[260px] font-medium" value={wfId ?? ''} onChange={(e) => setWfId(e.target.value)} aria-label="Workflow">
+          {(wflist ?? []).map((w) => <option key={w.id} value={w.id}>{w.builtin ? 'Standard pipeline (read-only)' : w.name}{w.active ? '  ● active' : ''}</option>)}
+          {!wflist?.length && <option value="">No workflows yet</option>}
+        </select>
+        <button className="btn btn-sm shrink-0" onClick={createNew}><FilePlus2 size={14} /> New</button>
+        {detail && (
+          <div className="hidden md:flex items-center gap-1.5 shrink-0">
+            {detail.versions.length > 0 && <span className="chip">v{detail.versions[detail.versions.length - 1]?.n ?? '?'}</span>}
+            {detail.workflow.builtin && <span className="chip"><Lock size={10} /> read-only</span>}
+            {detail.workflow.active && <span className="chip !border-ok/30 !text-ok">active</span>}
+            {dirty && !readOnly && <span className="chip !border-warn/30 !text-warn">unsaved</span>}
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+          {!readOnly && (
+            <>
+              <button className="btn btn-xs" onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)"><Undo2 size={13} /></button>
+              <button className="btn btn-xs" onClick={redo} disabled={!future.current.length} title="Redo (Ctrl+Y)"><Redo2 size={13} /></button>
+              <button className="btn btn-xs" onClick={copySelection} disabled={!selNodes.length} title="Copy the selected steps (Ctrl+C)"><Copy size={13} /></button>
+              <button className="btn btn-xs" onClick={deleteSelection} disabled={!selNodes.length && !selEdges.length} title="Delete the selection (Del)"><Scissors size={13} /></button>
+            </>
+          )}
+          <button className="btn btn-xs" onClick={tidyUp} title={readOnly ? 'Rearrange the steps left to right (only changes your view)' : 'Tidy the layout, left to right'}><ArrowLeftRight size={13} /> Tidy up</button>
+          <button className="btn btn-xs" onClick={() => fitView({ padding: 0.14, maxZoom: 1, duration: 250 })} title="Zoom to show the whole flow"><Maximize2 size={13} /> Fit</button>
+          <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run: walk through the flow with pretend results. No model calls."><FlaskConical size={13} /> Dry run</button>
+          {detail && <button className="btn btn-xs" onClick={() => setShowVersions(true)} title="Saved versions and who changed what"><HistoryIcon size={13} /> History</button>}
+          <span className="w-px h-5 bg-line mx-1" />
+          {detail && builtin && <button className="btn btn-accent btn-xs" onClick={cloneWf}><Copy size={13} /> Clone to edit</button>}
+          {detail && !builtin && (
+            <>
+              <button className="btn btn-xs" onClick={cloneWf} title="Make a copy"><Copy size={13} /> Clone</button>
+              <button className="btn btn-primary btn-xs" onClick={() => void save()} disabled={hasErrors || !dirty} title={hasErrors ? 'Fix the problems first' : 'Save as a new version (Ctrl+S)'}><Save size={13} /> Save</button>
+              {detail.workflow.active
+                ? <button className="btn btn-danger btn-xs" onClick={() => void setActive(false)}><Ban size={13} /> Deactivate</button>
+                : <button className="btn btn-accent btn-xs" onClick={() => void setActive(true)} disabled={hasErrors} title="New runs use this workflow by default"><Zap size={13} /> Set active</button>}
+            </>
+          )}
+          <button className="btn btn-ghost btn-xs" onClick={() => setRightOpen((o) => !o)} title={rightOpen ? 'Hide the details panel' : 'Show the details panel'} aria-pressed={rightOpen}><PanelRight size={15} /></button>
+        </div>
+      </div>
 
-      <div className="flex flex-1 min-h-0 gap-3">
-        {/* left rail: workflow list + palette */}
-        <aside className="w-56 shrink-0 flex flex-col gap-3 min-h-0">
-          <div className="card overflow-hidden shrink-0 max-h-44 flex flex-col">
-            <div className="px-3 py-2 border-b border-line text-2xs font-mono text-fg-3 uppercase tracking-[0.05em]">Workflows</div>
-            <div className="overflow-auto">
-              {(wflist ?? []).map((w) => (
-                <button key={w.id} onClick={() => setWfId(w.id)}
-                  className={`w-full text-left px-3 py-2 flex items-center gap-2 text-xs hover:bg-raised transition-colors ${w.id === wfId ? 'bg-raised' : ''}`}>
-                  {w.builtin ? <Lock size={11} className="text-fg-4 shrink-0" /> : <GitBranch size={11} className="text-fg-4 shrink-0" />}
-                  <span className="truncate flex-1">{w.name}</span>
-                  {w.active && <span className="chip !h-4 !px-1 text-[9px] border-ok/30 text-ok">active</span>}
-                  {w.versionN != null && <span className="text-2xs text-fg-4">v{w.versionN}</span>}
-                </button>
-              ))}
-              {!wflist?.length && <div className="px-3 py-3 text-2xs text-fg-4">{wflist ? 'No workflows yet — create one.' : '…'}</div>}
-            </div>
-          </div>
-          <div className="card flex-1 min-h-0 overflow-auto p-3">
+      {liveRunObj && (
+        <div className="shrink-0 border-b border-line bg-surface px-3 h-10 flex items-center gap-3 text-xs overflow-x-auto" aria-live="polite">
+          <span className="flex items-center gap-2 shrink-0 min-w-0">
+            <Dot tone={working.length ? 'info' : runGoing ? 'warn' : 'idle'} live={working.length > 0} />
+            <span className="font-medium text-fg">{working.length ? 'Working now' : runGoing ? (liveRunObj.status === 'paused' ? 'Paused' : 'Waiting') : 'Run finished'}</span>
+            <span className="text-fg-3 max-w-[22ch] truncate" title={liveRunObj.goal}>{liveRunObj.goal}</span>
+            <StatusChip value={liveRunObj.status} />
+          </span>
+          <span className="w-px h-4 bg-line shrink-0" />
+          {working.map((n) => {
+            const l = n.data.live!;
+            const t = taskTitle(l.taskId);
+            return (
+              <button key={n.id} onClick={() => focusNode(n.id)} title="Show this step on the canvas"
+                className={`chip !h-6 !px-2 shrink-0 gap-1.5 text-fg ${l.human ? 'border-warn/50' : 'border-info/50'} hover:bg-raised`}>
+                <Dot tone={l.human ? 'warn' : 'info'} live />
+                <b className="font-medium">{n.data.wf.label}</b>
+                {l.human ? <span className="text-warn">waiting for you</span> : l.agent && <span className="text-fg-3">{l.agent}</span>}
+                {t && <span className="text-fg-4 max-w-[26ch] truncate">· {t}</span>}
+                <span className="mono tabular-nums text-fg-3">{elapsed(l.since)}</span>
+              </button>
+            );
+          })}
+          {!working.length && (
+            <span className="text-fg-3 shrink-0">
+              {runGoing ? 'No step is running at the moment.' : 'No step is running.'}
+              {lastDone && <> Last finished: <button className="underline hover:text-fg" onClick={() => { const n = nodes.find((x) => x.data.wf.label === lastDone.label); if (n) focusNode(n.id); }}>{lastDone.label}</button></>}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-1 min-h-0">
+        {/* left rail: palette */}
+        {leftOpen && (
+          <aside className="w-64 shrink-0 min-h-0 overflow-auto p-3 border-r border-line bg-surface">
             <Palette agents={agents ?? []} roles={roles ?? []} wsId={wsId} skills={(skillsData?.skills ?? []).filter((s) => s.enabled)} />
-          </div>
-        </aside>
+          </aside>
+        )}
 
         {/* canvas */}
-        <div className="flex-1 min-w-0 card overflow-hidden relative">
+        <div className="flex-1 min-w-0 relative">
           <ReactFlow
             nodes={dNodes} edges={dEdges}
-            onNodesChange={readOnly ? ((chs) => onNodesChange(chs.filter((c) => c.type === 'select'))) : onNodesChange}
+            onNodesChange={readOnly ? ((chs) => onNodesChange(chs.filter((c) => c.type === 'select' || c.type === 'position' || c.type === 'dimensions'))) : onNodesChange}
             onEdgesChange={readOnly ? ((chs) => onEdgesChange(chs.filter((c) => c.type === 'select'))) : onEdgesChange}
             onConnect={readOnly ? undefined : onConnect}
             onSelectionChange={useCallback(({ nodes: ns, edges: es }: { nodes: Node[]; edges: Edge[] }) => { setSelNodes(ns.map((x) => x.id)); setSelEdges(es.map((x) => x.id)); }, [])}
@@ -1159,26 +1411,18 @@ function WorkflowEditor() {
             onNodeDragStart={onNodeDragStart} onNodeDragStop={onNodeDragStop}
             nodeTypes={nodeTypes} edgeTypes={edgeTypes}
             defaultEdgeOptions={{ type: 'wf', markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 } }}
-            connectionMode={ConnectionMode.Loose}
+            connectionMode={ConnectionMode.Loose} connectionRadius={36} isValidConnection={isValidConnection}
             snapToGrid snapGrid={[20, 20]}
-            fitView minZoom={0.2} maxZoom={2}
+            fitView fitViewOptions={{ padding: 0.14, maxZoom: 1 }} minZoom={0.2} maxZoom={2}
             deleteKeyCode={null}
             proOptions={{ hideAttribution: true }}
-            nodesDraggable={!readOnly} nodesConnectable={!readOnly} elementsSelectable
+            nodesDraggable nodesConnectable={!readOnly} elementsSelectable
             multiSelectionKeyCode="Shift" selectionKeyCode="Shift"
           >
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="rgb(var(--line))" />
-            <Controls showInteractive={false} />
-            <MiniMap pannable zoomable className="!bg-raised !border !border-line !rounded-lg" nodeColor="rgb(var(--line-strong))" maskColor="rgb(var(--canvas) / 0.7)" />
+            <Controls showInteractive={false} position="bottom-left" />
+            <MiniMap pannable zoomable position="bottom-right" className="!bg-raised !border !border-line !rounded-lg" nodeColor="rgb(var(--line-strong))" maskColor="rgb(var(--canvas) / 0.7)" />
             <Panel position="top-left" className="flex flex-col gap-1.5 !m-3 max-w-[60%]">
-              {detail && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="chip !h-6 text-xs font-medium">{detail.workflow.name}{detail.versions.length ? ` · v${detail.versions[detail.versions.length - 1]?.n ?? '?'}` : ''}</span>
-                  {detail.workflow.builtin && <span className="chip !h-6 border-line text-fg-3"><Lock size={10} /> built-in · read-only</span>}
-                  {detail.workflow.active && <span className="chip !h-6 border-ok/30 text-ok">active</span>}
-                  {dirty && !readOnly && <span className="chip !h-6 border-warn/30 text-warn">unsaved draft</span>}
-                </div>
-              )}
               {draftBanner && (
                 <div className="card !border-warn/40 px-3 py-1.5 text-2xs flex items-center gap-2">
                   Autosaved draft restored.
@@ -1187,34 +1431,46 @@ function WorkflowEditor() {
               )}
               {errorsList.length > 0 && (
                 <div className="card !border-bad/40 px-3 py-1.5 text-2xs text-bad max-w-full">
-                  {errorsList.length} error{errorsList.length > 1 ? 's' : ''} — save and activate are blocked.
+                  {errorsList.length} problem{errorsList.length > 1 ? 's' : ''} to fix before you can save or activate. See the Details panel.
                 </div>
               )}
+              {readOnly && (
+                <div className="card px-3 py-1.5 text-2xs text-fg-2 flex items-center gap-2"><Lock size={11} /> This is the standard pipeline: its steps can't be edited, but you can drag them around to read it. Use <b>Clone to edit</b> to make your own.</div>
+              )}
             </Panel>
-            <Panel position="bottom-left" className="!m-3">
-              <div className="flex items-center gap-1.5">
-                {wfRuns.length > 0 && (
-                  <select className="inp !h-6 !text-2xs !w-auto" value={liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Overlay a run's actual path">
-                    {wfRuns.map((r) => <option key={r.id} value={r.id}>{r.id === run?.id ? '● ' : ''}run {r.id.slice(0, 8)} · {r.status}</option>)}
-                  </select>
-                )}
-                <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run — simulate the graph with mocked outcomes, no model calls"><FlaskConical size={11} /> Dry run</button>
-                {!readOnly && (
-                  <>
-                    <button className="btn btn-xs" onClick={() => mutate((g) => layoutLR(g))} title="Arrange the graph left to right"><ArrowLeftRight size={11} /> Auto-layout</button>
-                    <button className="btn btn-xs" onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)"><Undo2 size={11} /></button>
-                    <button className="btn btn-xs" onClick={redo} disabled={!future.current.length} title="Redo (Ctrl+Y)"><Redo2 size={11} /></button>
-                    <button className="btn btn-xs" onClick={copySelection} disabled={!selNodes.length} title="Copy (Ctrl+C)"><Copy size={11} /></button>
-                    <button className="btn btn-xs" onClick={deleteSelection} disabled={!selNodes.length && !selEdges.length} title="Delete selection"><Scissors size={11} /></button>
-                  </>
-                )}
+            {hintOpen && !readOnly && (
+              <Panel position="bottom-center" className="!m-3 !mb-4 max-w-[min(560px,50%)]">
+                <div className="card px-3.5 py-2 text-xs text-fg-2 flex items-center gap-x-3 gap-y-1 flex-wrap shadow-pop">
+                  <span><b className="text-fg">1</b> Drag an agent in</span>
+                  <span><b className="text-fg">2</b> Pull from a dot to connect</span>
+                  <span><b className="text-fg">3</b> Drop on a line to insert</span>
+                  <button className="btn btn-ghost btn-xs ml-auto" onClick={dismissHint} aria-label="Dismiss tips">Got it</button>
+                </div>
+              </Panel>
+            )}
+            <Panel position="top-right" className="!m-3 flex flex-col items-end gap-1.5">
+              {wfRuns.length > 0 && (
+                <select className="input input-sm !w-auto" value={liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Show where a run actually went on this workflow">
+                  {wfRuns.map((r) => <option key={r.id} value={r.id}>{r.id === run?.id ? '● ' : ''}run {r.id.slice(0, 8)} · {r.status}</option>)}
+                </select>
+              )}
+              <div className="card px-2.5 py-2 text-2xs text-fg-3 space-y-1">
+                <div className="font-medium text-fg-2">Lines</div>
+                {EDGE_KINDS.map((k) => (
+                  <div key={k.kind} className="flex items-center gap-2">
+                    <svg width="26" height="6" aria-hidden><line x1="0" y1="3" x2="26" y2="3" stroke={EDGE_STYLE[k.kind].stroke} strokeWidth="2" strokeDasharray={EDGE_STYLE[k.kind].dash} /></svg>
+                    <span>{EDGE_SHORT[k.kind]}</span>
+                  </div>
+                ))}
               </div>
             </Panel>
           </ReactFlow>
         </div>
 
         {/* right rail: inspector */}
-        <aside className="w-72 shrink-0 card p-3 overflow-auto min-h-0">
+        {rightOpen && <aside className="w-80 shrink-0 p-3 overflow-auto min-h-0 border-l border-line bg-surface">
+          {readOnly && (selNode || selEdge) && <div className="flex items-center gap-1.5 text-2xs text-fg-3 mb-3"><Lock size={11} /> Read-only. Clone the workflow to change this.</div>}
+          <fieldset disabled={readOnly && !!(selNode || selEdge)} className="min-w-0 border-0 p-0 m-0">
           {selNode ? (
             <NodeInspector
               node={selNode} agents={agents ?? []} roles={roles ?? []} wsId={wsId} allNodes={dNodes}
@@ -1239,20 +1495,7 @@ function WorkflowEditor() {
               {detail ? (
                 <>
                   <div className="text-xs text-fg-3 mb-3">{detail.workflow.description || 'No description.'}</div>
-                  <div className="flex flex-wrap gap-1.5 mb-3">
-                    {!readOnly && <button className="btn btn-primary btn-xs" onClick={() => void save()} disabled={hasErrors || !dirty}><Save size={11} /> Save version</button>}
-                    {builtin ? (
-                      <button className="btn btn-accent btn-xs" onClick={cloneWf}><Copy size={11} /> Clone to edit</button>
-                    ) : (
-                      <>
-                        <button className="btn btn-xs" onClick={cloneWf}><Copy size={11} /> Clone</button>
-                        {detail.workflow.active
-                          ? <button className="btn btn-danger btn-xs" onClick={() => void setActive(false)}><Ban size={11} /> Deactivate</button>
-                          : <button className="btn btn-accent btn-xs" onClick={() => void setActive(true)} disabled={hasErrors}><Zap size={11} /> Set active</button>}
-                      </>
-                    )}
-                    <button className="btn btn-ghost btn-xs" onClick={() => setShowVersions(true)}>v{detail.versions.length} · history</button>
-                  </div>
+                  <div className="text-2xs text-fg-4 mb-3">Save, clone, activate and history are in the bar above.</div>
                   {!readOnly && (
                     <Field label="Version note (saved with the version)">
                       <input className="inp" value={note} onChange={(e) => setNote(e.target.value)} placeholder="what changed" />
@@ -1319,7 +1562,8 @@ function WorkflowEditor() {
               )}
             </div>
           )}
-        </aside>
+          </fieldset>
+        </aside>}
       </div>
 
       {/* versions modal */}

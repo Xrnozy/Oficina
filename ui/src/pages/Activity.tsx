@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { get, post, useEvents, useFetch, useQuery, type OfficeEvent } from '../api';
 import { Avatar, Empty, PageHeader, StatusChip, Tag, act, fmtAgo, fmtTime } from '../components';
 import { DiffStat, DiffView } from '../diff';
+import { RunWorkflow } from '../workflowPicker';
 import {
   AlertTriangle, ArrowDown, CheckCircle2, ChevronDown, ChevronRight, CircleDot, FileEdit, FileSearch, FileText, Globe,
   ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Users, Wrench, XCircle,
@@ -46,7 +47,7 @@ function workState(events: OfficeEvent[]) {
 
 export default function Activity() {
   const { data: agents } = useQuery<any[]>('/agents');
-  const { data: runs } = useQuery<any[]>('/runs');
+  const { data: runs, reload: reloadRuns } = useQuery<any[]>('/runs');
   const active = useMemo(() => (runs ?? []).filter((r) => ACTIVE_RUN.includes(r.status)), [runs]);
   const activeKey = active.map((r) => r.id).join(',');
   const [events, setEvents] = useState<OfficeEvent[]>([]);
@@ -95,7 +96,9 @@ export default function Activity() {
 
   return (
     <div className="flex flex-col h-[calc(100dvh-3.5rem-4rem)] min-h-[560px]">
-      <PageHeader title="Live activity" sub={`What each agent is doing, as its CLI reports it — across ${active.length || 'no'} active run${active.length === 1 ? '' : 's'}.`} />
+      <PageHeader title="Live activity" sub={`What each agent is doing, as its CLI reports it — across ${active.length || 'no'} active run${active.length === 1 ? '' : 's'}.`}>
+        {(active[0] ?? runs?.[0]) && <RunWorkflow run={active[0] ?? runs![0]} onChanged={reloadRuns} />}
+      </PageHeader>
       {!members.length && <Empty icon={Radio} title="No active agents" text="Agents appear here once they hold a role. Assign one under Roles." />}
       {members.length > 0 && (
         <div className="grid gap-4 flex-1 min-h-0 grid-cols-1 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_24rem]">

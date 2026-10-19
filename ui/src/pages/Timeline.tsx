@@ -33,9 +33,15 @@ export default function Timeline() {
     if (run) get<OfficeEvent[]>(`/runs/${run.id}/events?limit=2000`).then(setEvents).catch(() => setEvents([]));
   }, [run?.id]);
 
+  // debounce the state fetch while dragging and drop stale answers, so the
+  // panel below the slider doesn't flicker (and resize the page) on every tick
   useEffect(() => {
-    if (replaySeq != null && run) get(`/runs/${run.id}/state-at?seq=${replaySeq}`).then(setReplayState).catch(() => {});
-    else setReplayState(null);
+    if (replaySeq == null || !run) { setReplayState(null); return; }
+    let dead = false;
+    const t = setTimeout(() => {
+      get(`/runs/${run.id}/state-at?seq=${replaySeq}`).then((st) => { if (!dead) setReplayState(st); }).catch(() => {});
+    }, 120);
+    return () => { dead = true; clearTimeout(t); };
   }, [replaySeq, run?.id]);
 
   const filtered = events.filter((e) =>
@@ -82,12 +88,13 @@ export default function Timeline() {
           <div className="flex items-center gap-3 px-4 py-3 border-t border-line bg-sunken/40">
             <History size={14} className="text-fg-3 shrink-0" />
             <input type="range" min={minSeq} max={maxSeq} value={at} aria-label="Replay position"
-              onChange={(e) => setReplaySeq(+e.target.value === maxSeq ? null : +e.target.value)} className="flex-1 sm:ml-[98px]" />
-            <span className="mono text-fg-3 w-20 text-right">{replaySeq == null ? <Tag tone="ok">live</Tag> : `seq ${replaySeq}`}</span>
-            {replaySeq != null && <button className="btn btn-xs" onClick={() => setReplaySeq(null)}>Back to live</button>}
+              onChange={(e) => setReplaySeq(+e.target.value >= maxSeq ? null : +e.target.value)} className="flex-1 min-w-0 sm:ml-[98px]" />
+            {/* fixed-width slots: the label and button never change size, so the slider doesn't move under the cursor */}
+            <span className="mono text-fg-3 w-24 shrink-0 text-right tabular-nums">{replaySeq == null ? <Tag tone="ok">live</Tag> : `seq ${replaySeq}`}</span>
+            <button className={`btn btn-xs shrink-0 w-24 justify-center ${replaySeq == null ? 'invisible' : ''}`} tabIndex={replaySeq == null ? -1 : 0} onClick={() => setReplaySeq(null)}>Back to live</button>
           </div>
           {replayState && (
-            <div className="px-4 py-3 border-t border-line flex flex-wrap items-center gap-2 animate-rise">
+            <div className="px-4 py-3 border-t border-line flex flex-wrap items-center gap-2 min-h-[3.25rem]">
               <span className="text-xs text-fg-3 mr-1">As of #{replaySeq}:</span>
               <StatusChip value={replayState.runStatus} />
               {replayState.tasks.map((t: any) => (

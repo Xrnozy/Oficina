@@ -376,6 +376,14 @@ export function activeWorkflowFor(wsId: string): { workflowId: string; versionId
   return v ? { workflowId: id, versionId: v.version.id, graph: v.graph } : null;
 }
 
+// Latest saved version of one workflow (for pinning a run to a chosen workflow).
+export function latestVersionOf(workflowId: string): { workflowId: string; versionId: string; graph: WfGraph } | null {
+  const w = q1('SELECT latest_version_id FROM workflows WHERE id = ?', workflowId);
+  if (!w?.latest_version_id) return null;
+  const v = getWorkflowVersion(w.latest_version_id as string);
+  return v ? { workflowId, versionId: v.version.id, graph: v.graph } : null;
+}
+
 // ---------- Phase 4: templates, estimates, referenced-by, audit ----------
 
 // What changed between two versions — recorded on the audit event.
@@ -564,7 +572,8 @@ export type RoutingRow =
   | { kind: 'branches'; viaNodeId: string; lanes: { edgeId: string; label: string; isElse: boolean; rows: RoutingRow[] }[] };
 
 export interface RoutingView {
-  workflow: { id: string; name: string; versionN: number | null; builtin: boolean };
+  workflow: { id: string; name: string; versionN: number | null; builtin: boolean; active: boolean };
+  preview?: boolean;        // showing an unsaved editor draft, not the saved version
   custom: boolean;          // a non-builtin workflow is active
   issues: WfIssue[];
   fallback: boolean;        // the active graph has errors — rows show the default pipeline
@@ -701,12 +710,15 @@ export function flowRowsFor(g: WfGraph, decorate?: (n: WfNode) => Pick<RoutingSt
 // The effective workflow for a workspace: the active custom one, else the
 // built-in default pipeline. Routing follows the saved version only — a
 // Workflow draft is localStorage until it is saved.
-export function routingView(wsId: string): RoutingView {
+// graphOverride: an unsaved draft from the editor, shown as a preview (Routing stays in step with the canvas before it is saved)
+export function routingView(wsId: string, forWorkflowId?: string | null, graphOverride?: WfGraph | null): RoutingView {
   ensureBuiltinWorkflow(wsId);
   const activeId = activeWorkflowId(wsId);
-  const active = activeId ? getWorkflow(activeId) : null;
+  // any saved workflow can be viewed (the page's selector, or the one a run is pinned to)
+  const picked = forWorkflowId ? getWorkflow(forWorkflowId) : null;
+  const active = picked && picked.workflow.workspaceId === wsId ? picked : activeId ? getWorkflow(activeId) : null;
   const shown = active ?? getWorkflow(BUILTIN_ID(wsId))!;
-  const graph = shown?.graph ?? defaultWorkflowGraph();
+  const graph = graphOverride ?? shown?.graph ?? defaultWorkflowGraph();
   const wf = shown!.workflow;
   const versionN = wf.latestVersionId ? ((q1('SELECT n FROM workflow_versions WHERE id = ?', wf.latestVersionId)?.n as number) ?? null) : null;
   const custom = !!active && !wf.builtin;
@@ -762,8 +774,8 @@ export function routingView(wsId: string): RoutingView {
   const inWorkflow = (agentId: string, roles: string[]) =>
     agentNodes.some((n) => n.agentId === agentId || (n.role && roles.includes(n.role)));
   return {
-    workflow: { id: wf.id, name: wf.name, versionN, builtin: wf.builtin },
-    custom, issues, fallback: broken,
+    workflow: { id: wf.id, name: wf.name, versionN, builtin: wf.builtin, active: wf.id === activeId || (!activeId && wf.builtin) },
+    custom, issues, fallback: broken, preview: !!graphOverride,
     rows: display.rows,
     agentNodes,
     notInWorkflow: [...membersByAgent.values()].filter((a) => !inWorkflow(a.id, a.roles)),
