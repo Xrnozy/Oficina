@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import db, { q, q1, run, DATA_DIR } from '../db.ts';
 import { emit } from '../bus.ts';
 import { excerptLines, head, now, parseJson, sha256, tail, ulid } from '../util.ts';
-import type { Check, CheckRun } from '../types.ts';
+import type { Check, CheckKind, CheckRun } from '../types.ts';
 
 // Verification service (spec: "verification is code; analysis is AI").
 // A check's pass/fail is NEVER set by a model. Command checks run in the
@@ -206,3 +206,44 @@ export function logExcerptFor(cr: CheckRun): string {
   const full = checkRunEvidence(cr);
   return excerptLines(full, FAIL_NEEDLES, 5, 200);
 }
+
+// ---------------------------------------------------------------------------
+// Derived checks (spec 6.3): map a free-text acceptance criterion to a repo
+// check the runner can execute — by an explicit check name mention, or by a
+// keyword→kind hint where a check of that kind exists. Criteria that map to
+// nothing runnable are flagged non-checkable so DoD review can catch them.
+// ---------------------------------------------------------------------------
+
+export interface DerivedCheck { criterion: string; checkId: string | null; checkName: string | null; checkable: boolean }
+
+const CRITERION_KIND_HINTS: [RegExp, CheckKind[]][] = [
+  [/\btests?\b|\bspec\b|coverage|assert|unit[ -]test/i, ['unit', 'integration', 'e2e', 'coverage']],
+  [/\bbuild|compil|bundle|typecheck|type-?check|tsc\b/i, ['build', 'typecheck']],
+  [/\blint|eslint|format|prettier|style\b/i, ['lint']],
+  [/\bsecurity|vuln|audit\b/i, ['security']],
+  [/\bdocs?\b|documentation|readme|changelog/i, ['doc']],
+];
+
+function criterionToCheck(checks: Check[], criterion: string): Check | null {
+  // runnable = has a command, or a pass-rule gate (doc checks verify a file)
+  const runnable = checks.filter((c) => c.command || c.kind === 'doc');
+  // explicit mention: `npm test`, `check "build"`, or a check name in the text
+  const byName = runnable.find((c) => new RegExp(`\\b${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(criterion));
+  if (byName) return byName;
+  for (const c of runnable) if (c.command && criterion.toLowerCase().includes(c.command.toLowerCase())) return c;
+  for (const [hint, kinds] of CRITERION_KIND_HINTS) {
+    if (!hint.test(criterion)) continue;
+    const byKind = runnable.find((c) => kinds.includes(c.kind));
+    if (byKind) return byKind;
+  }
+  return null;
+}
+
+export function deriveChecks(repoId: string, criteria: string[]): DerivedCheck[] {
+  const checks = repoChecks(repoId);
+  return criteria.map((criterion) => {
+    const c = criterionToCheck(checks, criterion);
+    return { criterion, checkId: c?.id ?? null, checkName: c?.name ?? null, checkable: !!c };
+  });
+}
+

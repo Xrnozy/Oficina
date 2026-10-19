@@ -20,6 +20,7 @@ import { ensureIntegration, ensureRepo, gitOk } from '../services/git.ts';
 import { getAgent, getAccount, getProvider } from '../services/router.ts';
 import { resolveManual } from '../adapters/manual.ts';
 import { estimatedWindows, spendTodayUsd, tokenReport, usageTotals } from '../services/usage.ts';
+import { buildRunSummary, summaryMarkdown } from '../services/summary.ts';
 import { deleteSecret, storeSecret } from '../config.ts';
 import { rowToAgent } from '../services/router.ts';
 import { execFileSync } from 'node:child_process';
@@ -150,6 +151,23 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.get('/api/runs/:id/token-report', (req, res) => {
     if (!getRun(req.params.id)) return err(res, 404, 'run not found');
     ok(res, tokenReport(req.params.id));
+  });
+
+  // Run summary (spec 6.6): terminal runs return the stored summary; live runs
+  // are summarized on the fly. `?format=md` exports Markdown for download.
+  app.get('/api/runs/:id/summary', (req, res) => {
+    const run = getRun(req.params.id);
+    if (!run) return err(res, 404, 'run not found');
+    if (req.query.format === 'md') {
+      const row = q1('SELECT summary_md FROM runs WHERE id = ?', run.id);
+      const md = (row?.summary_md as string | null) ?? (() => { const s = buildRunSummary(run.id); return s ? summaryMarkdown(s) : null; })();
+      if (!md) return err(res, 404, 'no summary');
+      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="run-${run.id}.md"`);
+      res.send(md);
+      return;
+    }
+    ok(res, buildRunSummary(run.id));
   });
 
   app.get('/api/runs/:id/events', (req, res) => {
@@ -338,9 +356,14 @@ export function createServer(port: number, uiDir: string): http.Server {
   // ---------- commands ----------
   app.post('/api/runs', (req, res) => {
     try {
-      const { workspaceId, goal, budgetUsd, repoId, oneShot } = req.body ?? {};
+      const { workspaceId, goal, budgetUsd, repoId, oneShot, limits } = req.body ?? {};
       if (!workspaceId || !goal) return err(res, 400, 'workspaceId and goal required');
-      ok(res, createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot }));
+      const cleanLimits: Record<string, number> = {};
+      for (const k of ['maxParallel', 'maxReadOnly', 'maxCycles', 'maxWallclockMin', 'sameErrorAttempts', 'noProgressCycles', 'maxTaskMinutes']) {
+        const v = (limits as Record<string, unknown> | undefined)?.[k];
+        if (v != null) { const n = Number(v); if (!Number.isFinite(n) || n < 0) return err(res, 400, `limits.${k} must be a non-negative number`); cleanLimits[k] = n; }
+      }
+      ok(res, createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits }));
     } catch (e) { err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`); }
   });
 

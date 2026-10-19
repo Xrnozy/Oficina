@@ -213,7 +213,9 @@ export interface TokenReportTop {
 // (chars — always known), billed tokens from usage_records (0 for sources
 // that do not meter, e.g. the scripted adapter). Subqueries are grouped
 // before joining so neither side fans out the other.
-export function tokenReport(runId: string): { byKind: TokenReportRow[]; top: TokenReportTop[] } {
+export interface TokenReportCache { hits: number; savedPromptChars: number; savedTokens: number }
+
+export function tokenReport(runId: string): { byKind: TokenReportRow[]; top: TokenReportTop[]; cache: TokenReportCache } {
   const perItem = `
     LEFT JOIN (SELECT work_item_id, SUM(LENGTH(rendered_text)) chars FROM prompt_versions GROUP BY work_item_id) p
       ON p.work_item_id = w.id
@@ -253,5 +255,13 @@ export function tokenReport(runId: string): { byKind: TokenReportRow[]; top: Tok
       modelId: r.model_id as string | null, promptChars: r.prompt_chars as number,
       reportedTokens: r.reported_tokens as number, costUsd: r.cost as number,
     }));
-  return { byKind, top };
+  // result cache (spec 6.2): hits reuse a stored result — the saved counts are
+  // what the identical dispatch would have spent, recorded on the hit's result
+  const c = q1(`SELECT COUNT(*) hits,
+                 COALESCE(SUM(json_extract(w.result, '$.cached.saved.promptChars')),0) chars,
+                 COALESCE(SUM(json_extract(w.result, '$.cached.saved.inputTokens')),0)
+                   + COALESCE(SUM(json_extract(w.result, '$.cached.saved.outputTokens')),0) toks
+               FROM work_items w
+               WHERE w.run_id = ? AND json_extract(w.result, '$.cached') IS NOT NULL`, runId);
+  return { byKind, top, cache: { hits: (c?.hits as number) ?? 0, savedPromptChars: (c?.chars as number) ?? 0, savedTokens: (c?.toks as number) ?? 0 } };
 }

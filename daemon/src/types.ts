@@ -150,6 +150,8 @@ export interface StopLimits {
   maxCycles: number; maxWallclockMin: number; maxParallel: number;
   sameErrorAttempts: number; noProgressCycles: number; disagreeK: number;
   stuckAgentMinApi: number; stuckAgentMinHosted: number; cycleMaxMinutes: number;
+  maxReadOnly?: number;   // read-only lane in direct mode: prompt drafting/review beside the writer
+  maxTaskMinutes?: number; // optional per-task time ceiling (stage 4)
 }
 
 export interface Run {
@@ -256,6 +258,7 @@ export interface WorkItem {
   modelId: string | null;
   promptVersionId: string | null;
   idempotencyKey: string;
+  cacheKey: string | null;
   status: WorkItemStatus;
   startedAt: string | null;
   heartbeatAt: string | null;

@@ -301,6 +301,12 @@ export function renderPrompt(opts: {
     if (task.description) brief.push(task.description);
     if (task.acceptanceCriteria.length)
       brief.push(`Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`);
+    // spec 6.3: the checks derived at plan time — the developer knows the gate
+    // before writing a line, and sees which criteria are review-only
+    const derived = (task.meta?.derivedChecks as { criterion: string; check: string | null }[] | undefined) ?? [];
+    if (derived.length) brief.push(`Verified by checks: ${derived.map((d) => d.check).filter(Boolean).join(', ')}`);
+    const nc = (task.meta?.nonCheckable as string[] | undefined) ?? [];
+    if (nc.length) brief.push(`Criteria without a runnable check (judged at review):\n${nc.map((c) => `- ${c}`).join('\n')}`);
     stable.push(brief.join('\n'));
   }
   if (extra.approvedPrompt) stable.push(dataBlock('APPROVED_PROMPT', String(extra.approvedPrompt).slice(0, 8000)));

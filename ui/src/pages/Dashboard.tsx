@@ -116,7 +116,36 @@ export default function Dashboard() {
       </div>
 
       {run && <TokenReportPanel report={tokenReport} />}
+      {run && <RunSummaryPanel runId={run.id} done={['done', 'stopped'].includes(run.status)} />}
     </div>
+  );
+}
+
+// End-of-run summary (spec 6.6): built on the server from stored data only —
+// goal, tasks, commits, checks, tokens per stage, retries, interventions.
+// Exportable as Markdown; shows while running too (re-derived live).
+function RunSummaryPanel({ runId, done }: { runId: string; done: boolean }) {
+  const { data: s } = useQuery<any>(`/runs/${runId}/summary`, [runId]);
+  if (!s) return null;
+  const doneTasks = (s.tasks ?? []).filter((t: any) => t.status === 'done' || t.status === 'approved').length;
+  return (
+    <Panel title="Run summary" action={
+      <a className="btn btn-ghost btn-sm text-2xs" href={`/api/runs/${runId}/summary?format=md`} download>Export Markdown</a>
+    }>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <Stat label="Tasks" value={`${doneTasks}/${s.tasks?.length ?? 0}`} />
+        <Stat label="Commits" value={s.commits?.length ?? 0} />
+        <Stat label="Checks" value={s.checks ? `${s.checks.passed}/${s.checks.total}` : '0'} hint={s.checks?.failed ? `${s.checks.failed} failed` : undefined} />
+        <Stat label="Retries" value={(s.retries?.retriedWorkItems ?? 0) + (s.retries?.repairRetries ?? 0)} />
+        <Stat label="Needs you" value={s.humanInterventions?.approvalsDecided ?? 0} hint={s.humanInterventions?.approvalsDecided ? undefined : done ? 'ran unattended' : 'so far'} />
+      </div>
+      <div className="mt-3 flex items-center gap-4 text-2xs text-fg-3 flex-wrap">
+        <span>{fmtNum(s.totals?.tokens)} tokens{!s.totals?.tokens && s.totals?.promptChars ? ` (${fmtNum(s.totals.promptChars)} prompt chars)` : ''}</span>
+        {s.totals?.costUsd > 0 && <span>{fmtUsd(s.totals.costUsd)}</span>}
+        {s.totals?.cacheHits > 0 && <span className="text-ok">{s.totals.cacheHits} cache hit{s.totals.cacheHits > 1 ? 's' : ''} · ~{fmtNum(s.totals.tokensSaved)} tokens saved</span>}
+        {done && <span className="text-fg-4">final</span>}
+      </div>
+    </Panel>
   );
 }
 

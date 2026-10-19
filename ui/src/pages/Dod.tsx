@@ -8,7 +8,7 @@ import { ArrowRight, CheckCircle2, Circle, Plus, Save, Trash2, XCircle } from 'l
 // as suggested changes in the approval inbox. Each item lists its checks and
 // current pass/fail on integration HEAD.
 
-interface Item { id: string; text: string; kind: string; checks: string[]; optional?: boolean; status?: string }
+interface Item { id: string; text: string; kind: string; checks: string[]; optional?: boolean; status?: string; checkable?: boolean; checkNote?: string | null }
 
 const KIND_PREFIX: Record<string, string> = { feature: 'F', quality: 'Q', review: 'R', docs: 'D' };
 
@@ -107,6 +107,7 @@ export default function DodEditor() {
                     <input type="checkbox" checked={!!item.optional} onChange={(e) => update(i, { optional: e.target.checked })} /> optional
                   </label>
                   {bad && <span className="text-2xs text-bad">{!item.text.trim() ? 'needs text' : 'needs at least one check'}</span>}
+                  {item.checkable === false && <span className="text-2xs text-warn" title={item.checkNote ?? 'no runnable check covers this item'}>not machine-checkable — judged at review</span>}
                 </div>
               </div>
               <button className="btn btn-ghost btn-icon btn-sm opacity-0 group-hover:opacity-100 focus:opacity-100 hover:!text-bad" aria-label="Delete item" onClick={() => { setItems(items.filter((_, j) => j !== i)); setDirty(true); }}><Trash2 size={13} /></button>

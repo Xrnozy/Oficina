@@ -70,6 +70,7 @@ export function buildContextPack(opts: {
     }
     const wanted = task?.affectedPaths ?? [];
     for (const rel of wanted.slice(0, 8)) {
+      if (files.some((f) => f.path === rel)) continue; // README may already be packed
       const ex = excerpt(repo.path, rel, 120);
       if (ex && used + ex.excerpt.length < budgetChars) { files.push(ex); used += ex.excerpt.length; }
     }

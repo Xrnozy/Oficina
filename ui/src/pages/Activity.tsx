@@ -16,7 +16,8 @@ import {
 
 const READABLE = new Set(['agent.activity', 'workitem.started', 'workitem.delivered', 'workitem.failed', 'agent.msg', 'checkrun.completed',
   'task.status', 'review.decided', 'qa.decided', 'accept.decided', 'error.reported', 'error.resolved', 'merge.completed', 'prompt.drafted',
-  'prompt.reviewed', 'model.switched', 'skill.applied', 'readonly.violation', 'commit.created', 'agent.stuck', 'checkpoint.error', 'prompt.retry', 'run.blocked', 'plan.started', 'plan.validated']);
+  'prompt.reviewed', 'model.switched', 'skill.applied', 'readonly.violation', 'commit.created', 'agent.stuck', 'checkpoint.error', 'prompt.retry', 'run.blocked', 'plan.started', 'plan.validated',
+  'cache.hit', 'scope.violation', 'dod.flagged', 'lessons.injected']);
 const TECHNICAL = new Set(['agent.output', 'agent.heartbeat', 'agent.thinking', 'agent.status', 'model.routed', 'checkpoint.created', 'checkpoint.completed', 'quota.blocked', 'adapter.failed', 'engine.reconciled']);
 const ALL = new Set([...READABLE, ...TECHNICAL, 'agent.diff']);
 const ACTIVE_RUN = ['draft', 'dod-review', 'running', 'pausing', 'paused', 'verifying'];
@@ -339,6 +340,10 @@ function ActivityRow({ e, wide }: { e: OfficeEvent; wide: boolean }) {
     case 'skill.applied': return line(Sparkles, 'text-info', <>Skills: {(p.applied ?? []).map((s: any) => s.name).join(', ') || 'none applied'}{(p.skipped ?? []).length ? <span className="text-fg-4"> · skipped {(p.skipped as any[]).map((s) => `${s.name} (${s.reason})`).join(', ')}</span> : null}</>);
     case 'readonly.violation': return line(AlertTriangle, 'text-warn', <>Changed files during read-only {p.kind}: {(p.files ?? []).join(', ')} — undo it from Checkpoints if unwanted</>);
     case 'commit.created': return line(CheckCircle2, 'text-ok', <>Committed {String(p.sha).slice(0, 8)} — {p.title}</>);
+    case 'cache.hit': return line(CheckCircle2, 'text-ok', <>Cache hit — reused the identical {p.kind} result{Number(p.savedPromptChars) ? ` (saved ~${Number(p.savedPromptChars).toLocaleString()} prompt chars)` : ''}</>);
+    case 'scope.violation': return line(AlertTriangle, 'text-warn', <>Scope check: {(p.files ?? []).slice(0, 5).join(', ')} outside the declared paths — asked the PM</>);
+    case 'dod.flagged': return line(AlertTriangle, 'text-warn', <>{(p.items ?? []).length} DoD item(s) have no runnable check — judged at review</>);
+    case 'lessons.injected': return line(Sparkles, 'text-info', <>Lessons from this repo: {p.count} injected into the prompt</>);
     case 'error.reported': return line(AlertTriangle, 'text-bad', <>{p.errorId} [{p.severity}] {p.title}</>);
     case 'error.resolved': return line(CheckCircle2, 'text-ok', <>{p.errorId} resolved</>);
     case 'merge.completed': return line(CheckCircle2, 'text-ok', 'Merged');

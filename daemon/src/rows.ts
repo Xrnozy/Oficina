@@ -41,6 +41,7 @@ export function rowToWorkItem(r: Record<string, unknown>): WorkItem {
     kind: r.kind as WorkItem['kind'], agentId: (r.agent_id as string) ?? '',
     accountId: r.account_id as string | null, modelId: r.model_id as string | null,
     promptVersionId: r.prompt_version_id as string | null, idempotencyKey: (r.idempotency_key as string) ?? '',
+    cacheKey: r.cache_key as string | null,
     status: r.status as WorkItem['status'], startedAt: (r.started_at as string) ?? null,
     heartbeatAt: r.heartbeat_at as string | null, finishedAt: r.finished_at as string | null,
     result: r.result ? parseJson(r.result as string, null) : null,

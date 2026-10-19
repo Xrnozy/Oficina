@@ -1,17 +1,17 @@
 import { q, q1, run, tx } from '../db.ts';
 import { emit, onEvent } from '../bus.ts';
-import { compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
+import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import type {
   Check, DodItem, PlanDiff, PlanTaskSpec, Repo, Run, StopLimits, Task,
-  TaskStatus, WorkItem, WorkItemKind, Workspace,
+  TaskStatus, WorkItem, WorkItemKind, WorkItemResult, Workspace,
 } from '../types.ts';
 import {
   changedFiles, commitAll, createWorktree, diffText, ensureIntegration, gitOk,
   headSha, mergeIntoIntegration, removeWorktree, renameBranch, taskBranch,
 } from '../services/git.ts';
-import { checkByName, repoChecks, runCheck } from '../services/verify.ts';
-import { fileErrorReport, openErrorBySignature, resolveError, rowToError } from '../services/errors.ts';
+import { checkByName, deriveChecks, repoChecks, runCheck } from '../services/verify.ts';
+import { fileErrorReport, lessonsFor, openErrorBySignature, recordReviewerFlag, resolveError, rowToError } from '../services/errors.ts';
 import { buildContextPack, type ContextPack } from '../services/context.ts';
 import { finalizeApprovedPrompt, renderPrompt, type RenderedPrompt } from './prompts.ts';
 import {
@@ -30,6 +30,7 @@ import { beginCheckpoint, endCheckpoint, getCheckpoint, recoverInterruptedCheckp
 import { changedFilesBetween, displayDiff, liveChanges, snapshotTree } from '../services/snapshot.ts';
 import { buildCommitMessage, commitPaths, currentBranch, dirtyPaths, planTaskCommit } from '../services/commits.ts';
 import { skillsFor } from '../services/skills.ts';
+import { finalizeRunSummary } from '../services/summary.ts';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -40,7 +41,7 @@ import fs from 'node:fs';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_LIMITS: StopLimits = {
-  maxCycles: 30, maxWallclockMin: 2880, maxParallel: 3,
+  maxCycles: 30, maxWallclockMin: 2880, maxParallel: 3, maxReadOnly: 2,
   sameErrorAttempts: 3, noProgressCycles: 3, disagreeK: 3,
   stuckAgentMinApi: 10, stuckAgentMinHosted: 45, cycleMaxMinutes: 60,
 };
@@ -86,6 +87,9 @@ export function getWorkspace(id: string): Workspace | undefined {
 function setRunStatus(runId: string, status: Run['status'], extra: Record<string, unknown> = {}): void {
   run(`UPDATE runs SET status = ?${extra.stopReason !== undefined ? ', stop_reason = ?' : ''} WHERE id = ?`,
     ...(extra.stopReason !== undefined ? [status, extra.stopReason, runId] : [status, runId]));
+  // spec 6.6: a terminal run gets a stored summary built from tables only —
+  // no model call. Paused/stopped states stay live, so summarize the finals.
+  if (status === 'done' || status === 'stopped') finalizeRunSummary(runId);
   emit('run.status', 'engine', { status, ...extra }, runId, runId);
 }
 
@@ -131,6 +135,19 @@ function packFor(repo: Repo | null | undefined, task: Task | null, c: Candidate,
     return { ...pack, files: [], repoSummary: `${pack.repoSummary}\n\nRelevant files (open them yourself as needed):\n${list}`.trim() };
   }
   return pack;
+}
+
+// Per-repo lessons for a task's next prompt (spec 6.5): at most 3, ~300 tokens.
+function lessonNotes(r: Run, task: Task, extraFiles: string[] = []): string | undefined {
+  const lessons = lessonsFor({
+    workspaceId: r.workspaceId, repoId: r.repoId,
+    files: [...task.affectedPaths, ...extraFiles],
+    text: `${task.title} ${task.description} ${task.acceptanceCriteria.join(' ')}`,
+  });
+  if (!lessons.length) return undefined;
+  const text = lessons.map((l) => `- ${l.text}`).join('\n');
+  emit('lessons.injected', 'engine', { taskId: task.id, count: lessons.length, chars: text.length }, r.id, task.id);
+  return text;
 }
 
 // No repository context at all — the budget still applies to the prompt.
@@ -250,7 +267,7 @@ function runTasks(runId: string, statuses?: TaskStatus[]): Task[] {
 // Run lifecycle
 // ---------------------------------------------------------------------------
 
-export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean }): Run {
+export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean; limits?: Partial<StopLimits> }): Run {
   const ws = getWorkspace(opts.workspaceId);
   if (!ws) throw new Error('workspace not found');
   const repoId = opts.repoId ?? ws.repoIds[0];
@@ -265,7 +282,7 @@ export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?:
          VALUES (?,?,?,?,?,?,?,?,0,?)`,
       runId, ws.id, repoId, opts.goal, 'draft', dodId,
       JSON.stringify({ runUsd: opts.budgetUsd ?? 50, taskUsd: 10, warnPct: 80 }),
-      JSON.stringify(opts.oneShot ? { ...DEFAULT_LIMITS, maxCycles: 1, oneShot: true } : DEFAULT_LIMITS), null);
+      JSON.stringify({ ...DEFAULT_LIMITS, ...(opts.limits ?? {}), ...(opts.oneShot ? { maxCycles: 1, oneShot: true } : {}) }), null);
     run(`INSERT INTO dod (id, run_id, version, items, status) VALUES (?,?,1,'[]','draft')`, dodId, runId);
   });
   emit('run.created', 'owner', { goal: opts.goal }, runId, runId);
@@ -451,7 +468,18 @@ function applyPlanDiff(runId: string, diff: PlanDiff, plannedBy: string, dodItem
     if (dodItems && r.status === 'draft') {
       const dod = q1('SELECT * FROM dod WHERE id = ?', r.dodId);
       const version = (dod?.version as number ?? 0) + 1;
-      run(`UPDATE dod SET items = ?, version = ? WHERE id = ?`, JSON.stringify(dodItems.map((d) => ({ ...d, status: 'pending' }))), version, r.dodId);
+      // spec 6.3: flag DoD items no runnable check can verify — the owner sees
+      // them at DoD review instead of discovering a hollow gate later
+      const repoId = r.repoId;
+      const flagged = dodItems.map((d) => {
+        const named = (d.checks ?? []).map((n) => checkByName(repoId, n)).filter(Boolean);
+        const derived = deriveChecks(repoId, [d.text, ...(d.checks ?? [])]);
+        const checkable = named.length > 0 || derived.some((x) => x.checkable);
+        return { ...d, status: 'pending', checkable, checkNote: checkable ? null : 'no runnable check covers this item' };
+      });
+      const uncheckable = flagged.filter((d) => !d.checkable);
+      if (uncheckable.length) emit('dod.flagged', 'engine', { items: uncheckable.map((d) => d.id), reason: 'no runnable check covers these DoD items — they rely on review alone' }, runId, r.dodId);
+      run(`UPDATE dod SET items = ?, version = ? WHERE id = ?`, JSON.stringify(flagged), version, r.dodId);
     }
     const existingByTitle = new Map(runTasks(runId).map((t) => [t.title, t.id]));
     for (const spec of diff.add ?? []) {
@@ -459,15 +487,23 @@ function applyPlanDiff(runId: string, diff: PlanDiff, plannedBy: string, dodItem
       if (dupId) { keyMap.set(spec.key, dupId); continue; }
       const id = `T-${shortId('')}${(spec.key ?? '').replace(/\W/g, '')}`.replace('T--', 'T-');
       const status: TaskStatus = r.status === 'running' ? 'ready' : 'backlog';
+      // derived checks (spec 6.3): which repo check verifies each acceptance
+      // criterion — known before the developer starts, not after it delivers
+      const derived = deriveChecks(r.repoId, spec.acceptanceCriteria ?? []);
+      const meta = {
+        ...(spec.meta ?? {}),
+        derivedChecks: derived.filter((d) => d.checkable).map((d) => ({ criterion: d.criterion.slice(0, 200), check: d.checkName })),
+        nonCheckable: derived.filter((d) => !d.checkable).map((d) => d.criterion.slice(0, 200)),
+      };
       run(`INSERT INTO tasks (id, run_id, title, description, type, status, priority, depends_on, acceptance_criteria, deliverables, planned_by, difficulty, budget_usd, dod_item_ids, affected_paths, meta)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         id, runId, spec.title, spec.description ?? '', spec.type ?? 'feature', status, spec.priority ?? 1,
         '[]', JSON.stringify(spec.acceptanceCriteria ?? []), JSON.stringify(spec.deliverables ?? []),
         plannedBy, Math.min(5, spec.difficulty ?? 2), spec.budgetUsd ?? 5,
         JSON.stringify(spec.dodItemIds ?? []), JSON.stringify(spec.affectedPaths ?? []),
-        JSON.stringify(spec.meta ?? {}));
+        JSON.stringify(meta));
       keyMap.set(spec.key, id);
-      emit('task.created', actor, { taskId: id, title: spec.title }, runId, id);
+      emit('task.created', actor, { taskId: id, title: spec.title, checks: derived.filter((d) => d.checkable).map((d) => d.checkName) }, runId, id);
     }
     // second pass: resolve dependsOn keys (plan keys or existing task ids)
     for (const spec of diff.add ?? []) {
@@ -505,10 +541,13 @@ export function createWorkItemRecord(runId: string, task: Task | null, kind: Wor
   run(`INSERT INTO prompt_versions (id, work_item_id, template_id, version, rendered_text, context_pack_hash, dropped, budget_chars, created_at)
        VALUES (?,?,?,?,?,?,?,?,?)`, pvId, wiId, `${kind}/${candidate.provider?.adapterId ?? 'none'}`, 1, text, packHash, JSON.stringify(dropped), budgetChars, now());
   if (dropped.length) emit('prompt.trimmed', 'engine', { workItemId: wiId, taskId: task?.id, kind, dropped }, runId, wiId);
-  run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, status, started_at, heartbeat_at, attempt)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  // result cache key (spec 6.2): same kind + prompt + context pack + model ⇒
+  // the same work — a later dispatch may reuse the delivered result
+  const cacheKey = sha256(`${kind}\n${text}\n${packHash}\n${candidate.model?.id ?? ''}`);
+  run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, cache_key, status, started_at, heartbeat_at, attempt)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wiId, task?.id ?? null, runId, kind, candidate.agent.id, candidate.account?.id ?? null, candidate.model?.id ?? null,
-    pvId, key, 'queued', now(), now(), task ? task.attempts + 1 : 1);
+    pvId, key, cacheKey, 'queued', now(), now(), task ? task.attempts + 1 : 1);
   emit('workitem.created', 'engine', { kind, agent: candidate.agent.name, taskId: task?.id }, runId, wiId);
   return getWorkItem(wiId)!;
 }
@@ -570,6 +609,29 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
     if (!roleMayDo(candidate.role.name, wi.kind)) {
       emit('role.violation', 'engine', { agent: candidate.agent.name, role: candidate.role.name, kind: wi.kind }, wi.runId, wi.id);
       throw new Error(`role '${candidate.role.name}' may not do '${wi.kind}' work`);
+    }
+    // Result cache (spec 6.2): an identical dispatch (kind + prompt + context
+    // pack + model) already delivered — reuse it instead of calling a backend.
+    const prevHit = wi.cacheKey
+      ? q1(`SELECT id, result FROM work_items WHERE cache_key = ? AND status = 'delivered' AND id != ? AND result IS NOT NULL ORDER BY finished_at DESC LIMIT 1`, wi.cacheKey, wi.id)
+      : null;
+    if (prevHit) {
+      const cached = parseJson<WorkItemResult & { cached?: unknown }>(prevHit.result as string, {} as never);
+      const srcUsage = q1(`SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o FROM usage_records WHERE work_item_id = ?`, prevHit.id);
+      const srcChars = (q1(`SELECT COALESCE(SUM(LENGTH(rendered_text)),0) c FROM prompt_versions WHERE work_item_id = ?`, prevHit.id)?.c as number) ?? 0;
+      const result: WorkItemResult & { cached?: unknown } = {
+        ...cached,
+        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, costSource: 'estimate' },
+        cached: { from: prevHit.id, saved: { promptChars: srcChars, inputTokens: srcUsage?.i ?? 0, outputTokens: srcUsage?.o ?? 0 } },
+      };
+      run(`UPDATE work_items SET status = 'delivered', finished_at = ?, result = ? WHERE id = ?`, now(), JSON.stringify(result), wi.id);
+      emit('cache.hit', candidate.agent.name, { workItemId: wi.id, taskId: task?.id, kind: wi.kind, from: prevHit.id, savedPromptChars: srcChars }, wi.runId, wi.id);
+      emit('agent.activity', candidate.agent.name, { workItemId: wi.id, taskId: task?.id, kind: 'status', text: `Cache hit — reusing the identical ${wi.kind} result (saved ~${srcChars} prompt chars)` }, wi.runId, wi.id);
+      emit('workitem.delivered', candidate.agent.name, { kind: wi.kind, summary: result.summary, cached: true }, wi.runId, wi.id);
+      setAgentStatus(candidate.agent.id, 'idle');
+      if (live) clearInterval(live);
+      await handleDelivered(wi, result, candidate.agent.id);
+      return;
     }
     // agent checkpoint: exactly what this agent changed in the repository
     if (direct && worktree && task && repo) {
@@ -1045,6 +1107,11 @@ async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['resul
       }
       // findings go to the PM, who accepts or prepares the correction
       const reviewReport = `REVIEW ${decision === 'approve' ? 'PASSED' : 'FAILED'}: ${j.notes ?? ''}`;
+      if (decision !== 'approve' && j.notes) {
+        // spec 6.5: reviewer flags teach the KB — a repeated flag becomes a
+        // lesson injected into the next implement/fix prompt
+        recordReviewerFlag({ workspaceId: r.workspaceId, repoId: r.repoId, flag: j.notes, files: task.affectedPaths });
+      }
       const reviewFails = Number(task.meta?.qaFails ?? 0);
       if (decision !== 'approve') setTaskMeta(task.id, 'qaFails', reviewFails + 1);
       if (decision !== 'approve' && reviewFails === 0) {
@@ -1230,6 +1297,25 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
     });
   }
 
+  // Scope guard (spec 6.4): files outside the prompt's declared paths don't
+  // block the change — they go to the PM as a question, and the accept stage
+  // decides whether the extra files belong.
+  const declared = (task.affectedPaths ?? []).filter(Boolean);
+  const delivered = files.filter((f) => f !== 'HANDOFF.md' && !f.startsWith('.office/'));
+  if (declared.length && delivered.length) {
+    const outside = delivered.filter((f) => !anyGlobMatch(f, declared));
+    if (outside.length) {
+      emit('scope.violation', 'engine', { taskId: task.id, files: outside.slice(0, 20), declared }, r.id, task.id);
+      const pm = pickHelper(r.workspaceId, 'pm', [task.ownerAgentId ?? undefined]);
+      if (pm) postMessage({
+        runId: r.id, taskId: task.id, workItemId: wi.id,
+        from: wi.agentId ?? 'engine', to: pm.agent.id, kind: 'question',
+        text: `Scope check on "${task.title}": the delivery changed files outside the declared paths.\nDeclared: ${declared.join(', ')}\nUnexpected: ${outside.join(', ')}\nDo these belong, or should the change be narrowed?`,
+      });
+      setTaskMeta(task.id, 'scopeViolation', { files: outside.slice(0, 20), at: now() });
+    }
+  }
+
   setTaskStatus(task.id, 'verifying');
   const checks = selectChecksForTask(repo, files);
   const results: { cr: ReturnType<typeof rowToCheckRun>; check: Check }[] = [];
@@ -1384,7 +1470,8 @@ function dispatchFix(task: Task, reason: string, fromError: boolean, pmPrompt?: 
   const prompt = renderPrompt({
     kind: 'fix', agent: candidate.agent, role: candidate.role, task, pack, adapterId: candidate.provider?.adapterId,
     extra: { handoff: envelopeText(handoffEnvelope(task, 'developer', { blockers: [reason.split('\n')[0].slice(0, 300)] })),
-      checkResults: reason, requirementsChanged: takeRequirementNote(task), inbox: reviewed ? '' : inboxText(candidate, r.id, task.id), handoffPath: handoffPath(task, isDirect(r)), approvedPrompt: approvedPromptFor(task.id) },
+      checkResults: reason, requirementsChanged: takeRequirementNote(task), inbox: reviewed ? '' : inboxText(candidate, r.id, task.id), handoffPath: handoffPath(task, isDirect(r)), approvedPrompt: approvedPromptFor(task.id),
+      kbNotes: lessonNotes(r, task) },
   });
   setTaskStatus(task.id, 'assigned', 'analyst', { fixer: candidate.agent.name, route: reviewed ? 'correction prompt' : 'direct' });
   dispatchWork(r, task, 'fix', candidate, prompt, pack.hash, task.worktree, reviewed, reason);
@@ -1687,6 +1774,20 @@ function dispatchApprovedPrompt(job: PromptJob): void {
   const r = getRun(job.runId)!;
   const task = getTask(job.taskId);
   if (!task) return;
+  // read-only lane (direct mode): a task that drafted its prompt while another
+  // task held the tree parks here — the write stage still needs the tree.
+  // assignSweep resumes it the moment the holder finishes.
+  if (isDirect(r) && ['implement', 'fix', 'test', 'doc'].includes(job.kind)) {
+    const held = q(`SELECT t.id FROM tasks t WHERE t.id != ? AND t.status NOT IN ('done','failed','cancelled','blocked')
+                    AND json_extract(t.meta, '$.generalCheckpointId') IS NOT NULL`, task.id)
+      .some((x) => { const h = getTask(x.id as string); return h ? holdsRepo(h) : false; });
+    if (held) {
+      setTaskMeta(task.id, 'parkedPrompt', job);
+      setTaskMeta(task.id, 'promptReady', true);
+      emit('task.parked', 'engine', { taskId: task.id, reason: 'approved prompt ready — waiting for the repository' }, r.id, task.id);
+      return;
+    }
+  }
   const role = roleNameFor(job.kind, task);
   const target = candidatesForRole(r.workspaceId, role).find((c) => c.agent.id === job.targetAgentId && !c.blocked)
     ?? pickAgent(r.workspaceId, role, task, job.kind, task.difficulty);
@@ -1703,7 +1804,8 @@ function dispatchApprovedPrompt(job: PromptJob): void {
   if (task.status === 'waiting-input') setTaskStatus(task.id, 'assigned', 'engine', { agent: target.agent.name });
   const wi = createWorkItemRecord(r.id, task, job.kind, target, prompt, job.packHash);
   run('UPDATE prompt_versions SET template_id = ?, version = ? WHERE id = ?', `${job.kind}/approved`, job.revision + 1, wi.promptVersionId);
-  void executeWorkItem(wi, target, prompt.text, job.worktree);
+  // a parked lane job carried worktree=null — resolve the real cwd now
+  void executeWorkItem(wi, target, prompt.text, job.worktree ?? (isDirect(r) ? getRepo(r.repoId)?.path ?? null : task.worktree ?? null));
 }
 
 function escalatePrompt(job: PromptJob, why: string): void {
@@ -1819,8 +1921,51 @@ export function assignSweep(runId: string): void {
   const inFlight = direct ? holding : tasks.filter((t) => ACTIVE_TASK.includes(t.status));
   const lockedPaths = new Set(inFlight.flatMap((t) => t.affectedPaths));
 
+  // Resume tasks whose approved prompt parked while the tree was busy
+  // (direct-mode read-only lane). Runs before picking new work.
+  if (direct) {
+    for (const t of tasks.filter((x) => x.status === 'assigned' && x.meta?.promptReady && x.meta?.parkedPrompt)) {
+      if (inFlight.some((h) => h.id !== t.id)) continue; // tree still held
+      const job = t.meta.parkedPrompt as PromptJob;
+      run(`UPDATE tasks SET meta = json_remove(meta, '$.parkedPrompt', '$.promptReady', '$.treeWait') WHERE id = ?`, t.id);
+      openTaskCheckpoint(r, repo, getTask(t.id)!);
+      dispatchApprovedPrompt(job);
+    }
+  }
+
+  const readOnlyCap = Math.max(0, Number(r.limits.maxReadOnly ?? 2));
+  // lane occupancy, fresh from the DB (the resume loop above already cleared
+  // the flags of tasks it dispatched)
+  let readOnlyLane = direct
+    ? (q1(`SELECT COUNT(*) c FROM tasks WHERE run_id = ? AND status NOT IN ('done','failed','cancelled') AND (json_extract(meta,'$.treeWait') IS NOT NULL OR json_extract(meta,'$.promptReady') IS NOT NULL)`, runId)?.c as number)
+    : 0;
+
   for (const task of tasks.filter((t) => t.status === 'ready').sort((a, b) => a.priority - b.priority)) {
-    if (direct && inFlight.some((t) => t.id !== task.id)) break;
+    const held = direct && inFlight.some((t) => t.id !== task.id);
+    if (held) {
+      // direct mode with a writer on the tree: a ready task may still do its
+      // read-only stages (prompt draft/review on a desk) when its paths don't
+      // overlap, up to maxReadOnly. The write stage parks until the tree frees.
+      if (task.affectedPaths.some((p) => lockedPaths.has(p))) continue;
+      if (readOnlyLane >= readOnlyCap || !pmWritesPrompt(r, 'implement')) continue;
+      const laneCand = pickAgent(r.workspaceId, roleNameFor('implement', task), task, 'implement', task.difficulty);
+      if (!laneCand) continue;
+      readOnlyLane++;
+      run('UPDATE tasks SET owner_agent_id = ? WHERE id = ?', laneCand.agent.id, task.id);
+      setTaskMeta(task.id, 'treeWait', true);
+      setTaskStatus(task.id, 'assigned', 'engine', { agent: laneCand.agent.name, lane: 'read-only' });
+      emit('task.lane', 'engine', { taskId: task.id, agent: laneCand.agent.name, reason: 'prompt prepared while the repository is in use' }, runId, task.id);
+      const fresh = getTask(task.id)!;
+      const pack = packFor(repo, fresh, laneCand, 16000);
+      const prompt = renderPrompt({
+        kind: 'implement', agent: laneCand.agent, role: laneCand.role, task: fresh, goal: r.goal, pack, adapterId: laneCand.provider?.adapterId,
+        extra: { handoff: envelopeText(handoffEnvelope(fresh, roleNameFor('implement', fresh))),
+          requirementsChanged: takeRequirementNote(fresh), inbox: '', handoffPath: handoffPath(fresh, true),
+          kbNotes: lessonNotes(r, fresh) },
+      });
+      dispatchWork(r, fresh, 'implement', laneCand, prompt, pack.hash, null, true);
+      continue;
+    }
     if (inFlight.length >= (direct ? 1 : r.limits.maxParallel) && !inFlight.some((t) => t.id === task.id)) break;
     const depsDone = task.dependsOn.every((d) => tasks.find((t) => t.id === d)?.status === 'done');
     if (!depsDone) continue;
@@ -1856,7 +2001,8 @@ export function assignSweep(runId: string): void {
       kind: 'implement', agent: candidate.agent, role: candidate.role, task: fresh, goal: r.goal, pack, adapterId: candidate.provider?.adapterId,
       // the target's inbox is attached at approval time when the prompt is reviewed
       extra: { handoff: envelopeText(handoffEnvelope(fresh, roleNameFor('implement', fresh))),
-        requirementsChanged: takeRequirementNote(fresh), inbox: reviewed ? '' : inboxText(candidate, runId, fresh.id), handoffPath: handoffPath(fresh, direct) },
+        requirementsChanged: takeRequirementNote(fresh), inbox: reviewed ? '' : inboxText(candidate, runId, fresh.id), handoffPath: handoffPath(fresh, direct),
+        kbNotes: lessonNotes(r, fresh) },
     });
     inFlight.push(fresh);
     dispatchWork(r, fresh, 'implement', candidate, prompt, pack.hash, wt.worktree, reviewed);

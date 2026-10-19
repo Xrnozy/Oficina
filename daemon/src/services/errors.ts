@@ -127,12 +127,96 @@ export function resolveError(errorId: string, commitSha: string | null, checkRun
   const r = getError(errorId);
   if (!r) return;
   const kbId = ulid();
-  run(`INSERT INTO error_kb (id, workspace_id, signature, error_text, root_cause, fix_summary, diff_excerpt, files, tags, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    kbId, workspaceId, r.signature, normalizeErrorText(r.evidence.logExcerpt ?? ''),
+  const repoId = q1('SELECT repo_id FROM runs WHERE id = ?', r.runId)?.repo_id as string | null;
+  run(`INSERT INTO error_kb (id, workspace_id, repo_id, signature, error_text, root_cause, fix_summary, diff_excerpt, files, tags, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    kbId, workspaceId, repoId, r.signature, normalizeErrorText(r.evidence.logExcerpt ?? ''),
     r.suspectedCause?.summary ?? '', summary, (r.evidence.logExcerpt ?? '').slice(0, 1500),
     JSON.stringify(r.affectedFiles.map((f) => f.path)), JSON.stringify([r.severity]), now());
   run(`UPDATE error_reports SET status = 'resolved', resolution = ?, updated_at = ? WHERE id = ?`,
     JSON.stringify({ commitSha, summary, verifiedByCheckRunId: checkRunId, resolvedAt: now(), kbEntryId: kbId }), now(), errorId);
   emit('error.resolved', 'engine', { errorId, kbEntryId: kbId }, r.runId, errorId);
+}
+
+// ---- per-repo lessons (spec 6.5) ------------------------------------------
+// The error_kb row *is* the lesson store — no parallel memory. A resolved
+// error teaches signature→fix; a reviewer flag seen repeatedly becomes an
+// "avoid" lesson. Injection is keyword/path matched, capped at 3 lessons /
+// ~300 tokens (1200 chars) of fix text — no embeddings.
+
+function lessonTokens(s: string): Set<string> {
+  return new Set(s.toLowerCase().replace(/[^a-z0-9\s./_-]/g, ' ').split(/\s+/).filter((w) => w.length > 2));
+}
+
+// Upsert by signature: a repeated flag bumps times_seen instead of duplicating.
+export function recordLesson(opts: {
+  workspaceId: string; repoId?: string | null; signature: string;
+  errorText: string; fixSummary: string; files?: string[]; tags?: string[];
+}): void {
+  const existing = q1('SELECT id, times_seen FROM error_kb WHERE signature = ? AND workspace_id IS ?', opts.signature, opts.workspaceId);
+  if (existing) {
+    run(`UPDATE error_kb SET times_seen = times_seen + 1, fix_summary = ?, files = ? WHERE id = ?`,
+      opts.fixSummary.slice(0, 800), JSON.stringify(opts.files ?? []), existing.id);
+    return;
+  }
+  run(`INSERT INTO error_kb (id, workspace_id, repo_id, signature, error_text, fix_summary, files, tags, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    ulid(), opts.workspaceId, opts.repoId ?? null, opts.signature,
+    normalizeErrorText(opts.errorText).slice(0, 500), opts.fixSummary.slice(0, 800),
+    JSON.stringify(opts.files ?? []), JSON.stringify(opts.tags ?? ['lesson']), now());
+}
+
+// A reviewer flag becomes a lesson keyed on its normalized text — the second
+// time a reviewer flags the same thing it counts as repeated.
+export function recordReviewerFlag(opts: { workspaceId: string; repoId?: string | null; flag: string; files?: string[] }): void {
+  const norm = normalizeErrorText(opts.flag).slice(0, 300);
+  if (norm.length < 12) return;
+  recordLesson({
+    workspaceId: opts.workspaceId, repoId: opts.repoId,
+    signature: `revflag:${sha256(norm).slice(0, 16)}`,
+    errorText: norm, fixSummary: `Avoid: ${opts.flag.slice(0, 300)}`,
+    files: opts.files, tags: ['reviewer-flag'],
+  });
+}
+
+export interface Lesson { signature: string; text: string; files: string[]; timesSeen: number }
+
+export function lessonsFor(opts: {
+  workspaceId: string; repoId?: string | null; files?: string[]; text?: string;
+  limit?: number; maxChars?: number;
+}): Lesson[] {
+  const limit = opts.limit ?? 3;
+  const maxChars = opts.maxChars ?? 1200; // ~300 tokens
+  const rows = q(`SELECT signature, error_text, fix_summary, files, tags, times_seen
+                  FROM error_kb WHERE workspace_id IN (?, '__global__')
+                    AND (repo_id IS NULL OR repo_id = ?)
+                  ORDER BY times_seen DESC, created_at DESC`,
+    opts.workspaceId, opts.repoId ?? '__none__');
+  const fileSet = (opts.files ?? []).map((f) => f.toLowerCase());
+  const terms = lessonTokens(opts.text ?? '');
+  const scored = rows.map((r) => {
+    const files = parseJson<string[]>(r.files as string, []);
+    const tags = parseJson<string[]>(r.tags as string, []);
+    let score = 0;
+    for (const f of files) {
+      const fl = f.toLowerCase();
+      if (fileSet.some((x) => x === fl || x.endsWith(fl) || fl.endsWith(x))) score += 4;
+    }
+    const content = lessonTokens(`${r.error_text ?? ''} ${tags.join(' ')}`);
+    for (const t of terms) if (content.has(t)) score += 1;
+    if (tags.includes('reviewer-flag')) score += 1;
+    score += Math.min(3, ((r.times_seen as number) ?? 1) - 1); // repeated lessons rank up
+    return { r, files, score };
+  }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score);
+  const out: Lesson[] = [];
+  let chars = 0;
+  for (const { r, files } of scored) {
+    const times = (r.times_seen as number) ?? 1;
+    const text = `${times > 1 ? `seen ×${times} — ` : ''}${String(r.fix_summary ?? r.error_text ?? '').slice(0, 350)}`;
+    if (!text.trim() || chars + text.length > maxChars) continue;
+    out.push({ signature: r.signature as string, text, files, timesSeen: times });
+    chars += text.length;
+    if (out.length >= limit) break;
+  }
+  return out;
 }

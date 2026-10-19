@@ -192,6 +192,10 @@ addColumn('skills', 'category', `TEXT DEFAULT 'role'`);   // 'general' (reusable
 addColumn('skills', 'updated_at', `TEXT`);
 addColumn('prompt_versions', 'dropped', `TEXT DEFAULT '[]'`);      // sections cut to fit the context budget
 addColumn('prompt_versions', 'budget_chars', `INTEGER`);           // the budget the prompt was fitted to
+addColumn('work_items', 'cache_key', `TEXT`);                      // (kind, prompt sha, pack hash, model) — result cache
+db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_cache ON work_items(cache_key, status)`);
+addColumn('error_kb', 'repo_id', `TEXT`);                          // per-repo lessons (spec 6.5)
+addColumn('runs', 'summary_md', `TEXT`);                           // model-free end-of-run summary (spec 6.6)
 
 export default db;
 
