@@ -469,10 +469,16 @@ export function resumeRun(runId: string): void {
 
 export function stopRun(runId: string, reason = 'OWNER'): void {
   setRunStatus(runId, 'stopped', { stopReason: reason });
+  const open = q(`SELECT id, agent_id FROM work_items WHERE run_id = ? AND status IN ('queued','running','waiting')`, runId);
+  // cancelled first, so a process that dies now (and the router's fallback logic) sees that this was a stop
+  for (const wi of open) run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
   killCliChildrenForRun(runId);
   for (const t of q('SELECT id FROM tasks WHERE run_id = ?', runId)) stopApp(t.id as string);
-  for (const wi of q(`SELECT id FROM work_items WHERE run_id = ? AND status IN ('queued','running','waiting')`, runId)) {
-    run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
+  // nothing of this run is working any more: free its agents and the CLI sessions they were holding
+  for (const wi of open) {
+    run('UPDATE cli_sessions SET busy_item = NULL WHERE busy_item = ?', wi.id);
+    const other = q1(`SELECT id FROM work_items WHERE agent_id = ? AND status IN ('queued','running') LIMIT 1`, wi.agent_id as string);
+    if (!other) setAgentStatus(wi.agent_id as string, 'idle');
   }
 }
 
@@ -886,6 +892,12 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
     if (live) clearInterval(live);
     // whatever the agent wrote before failing stays recorded and undoable
     if (agentCp) { try { endCheckpoint(agentCp.id, 'interrupted'); } catch { /* repo gone */ } agentCp = null; }
+    // stopped by the owner: that is not a failure to retry, and it leaves the agent free
+    if (getWorkItem(wi.id)?.status === 'cancelled' || getRun(wi.runId)?.status === 'stopped') {
+      run(`UPDATE work_items SET status = 'cancelled', finished_at = COALESCE(finished_at, ?) WHERE id = ?`, now(), wi.id);
+      setAgentStatus(candidate.agent.id, 'idle');
+      return;
+    }
     run(`UPDATE work_items SET status = 'failed', finished_at = ? WHERE id = ?`, now(), wi.id);
     emit('workitem.failed', 'engine', { kind: wi.kind, error: msg.slice(0, 400) }, wi.runId, wi.id);
     // Surface the reason in live output too — workitem.failed isn't rendered

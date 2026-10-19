@@ -115,6 +115,9 @@ export async function acquireSession(o: {
   /** this work has a session of its own (request intake): continued every time, never shared with the agent's other work */
   dedicated?: { key: string; label: string };
 }): Promise<Acquired> {
+  // a session still marked busy by a work item that is no longer running (killed, stopped, daemon lost it) is free again
+  run(`UPDATE cli_sessions SET busy_item = NULL WHERE busy_item IS NOT NULL AND owner_key IS NULL
+       AND busy_item IN (SELECT id FROM work_items WHERE status NOT IN ('running','queued','waiting'))`);
   const st = cliSessionSettings(o.agent.settings);
   if (!o.support) return { session: null, resumed: false, note: 'this CLI has no session support configured, so every work item starts fresh' };
   if (!o.stable) return { session: null, resumed: false, note: "this work item runs in its own worktree, which can't continue an earlier session" };
@@ -192,6 +195,11 @@ export function releaseSession(id: string, r: { externalId?: string | null; item
   if (!s) return;
   run(`UPDATE cli_sessions SET busy_item = NULL, last_item_id = ?, last_used_at = ?, uses = uses + ?, external_id = COALESCE(?, external_id), started = CASE WHEN ? THEN 1 ELSE started END WHERE id = ?`,
     r.itemId, now(), r.ok ? 1 : 0, r.externalId ?? null, r.started ? 1 : 0, id);
+}
+
+/** The CLI told us its id for this session while it was still running: remember it (and that the session exists) at once. */
+export function setSessionExternalId(id: string, externalId: string): void {
+  run('UPDATE cli_sessions SET external_id = ?, started = 1 WHERE id = ? AND external_id IS NULL', externalId, id);
 }
 
 /** A resumed session the CLI no longer knows: retire it (kept for the record) so it is not tried again. */

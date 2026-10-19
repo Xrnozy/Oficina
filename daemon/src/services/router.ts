@@ -317,7 +317,11 @@ export async function dispatchThroughAdapter(
     }, wi.runId, wi.id);
     pending = [];
   };
+  // a stopped run (or a cancelled item) must not go on to the next backend: the owner's Stop already killed the process,
+  // and a fallback started afterwards would be a fresh agent writing files for work nobody wants any more
+  const cancelled = () => q1('SELECT status FROM work_items WHERE id = ?', wi.id)?.status === 'cancelled' || q1('SELECT status FROM runs WHERE id = ?', wi.runId)?.status === 'stopped';
   for (const c of chain) {
+    if (cancelled()) throw new Error('cancelled: the run was stopped');
     const provider = c.provider;
     const label = backendLabel(c);
     if (!provider || c.blocked) {

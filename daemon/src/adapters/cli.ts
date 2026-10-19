@@ -3,7 +3,8 @@ import path from 'node:path';
 import { DATA_DIR } from '../db.ts';
 import { headSha } from '../services/git.ts';
 import { buildCliCommand, cliExecutable, cliPresetOf, cliSessionSupport, effectiveCliCommand, killProcessTree, prepareCliCommand, spawnShell, withSessionArgs, type CliSessionSupport } from './cli-resolve.ts';
-import { acquireSession, archiveSession, dropSession, listCliSessions, normalizeCwd, releaseSession, sessionIdFromOutput, type CliSessionRow } from '../services/cli-sessions.ts';
+import { getSession } from '../services/cli-sessions.ts';
+import { acquireSession, archiveSession, dropSession, listCliSessions, normalizeCwd, releaseSession, sessionIdFromOutput, setSessionExternalId, type CliSessionRow } from '../services/cli-sessions.ts';
 import { parseJsonFromText } from './llm.ts';
 import { CliStream, parseCliLine } from './cli-events.ts';
 import { AdapterError, type Adapter, type AdapterCtx } from './types.ts';
@@ -116,7 +117,7 @@ export const cliAdapter: Adapter = {
 
         let sessionInfo: { id: string; externalId: string | null; resumed: boolean } | undefined;
         if (sess) {
-          let ext: string | null = sess.externalId;
+          let ext: string | null = getSession(sess.id)?.externalId ?? sess.externalId;
           if (!acq.resumed && support) {
             if (support.idFrom === 'stream' || support.idFrom === 'pattern') ext = sessionIdFromOutput(outcome.output, support.pattern) ?? ext;
             else if (support.idFrom === 'list' && support.list) {
@@ -218,9 +219,16 @@ async function runCli(
       for (const from of ['stdout', 'stderr'] as const) if (streams[from].pending().trim()) emitLines(streams[from].flushLines(), from);
     }, 1000);
     if (stdin) { child.stdin!.write(ctx.prompt); child.stdin!.end(); }
+    // a CLI that reports its session id in its output: record it the moment it appears, so a run that is stopped or crashes
+    // part-way can still be reconnected to (the id used to be read only after the process exited)
+    let idSaved = !(o.session && !o.resumed && o.support && (o.support.idFrom === 'stream' || o.support.idFrom === 'pattern') && !o.session.externalId);
     const onData = (from: 'stdout' | 'stderr') => (d: Buffer) => {
       const s = String(d);
       out += s;
+      if (!idSaved) {
+        const found = sessionIdFromOutput(out, o.support!.pattern);
+        if (found) { idSaved = true; setSessionExternalId(o.session!.id, found); }
+      }
       lastData = Date.now();
       emitLines(streams[from].pushLines(s), from);
       ctx.emit('agent.heartbeat', {});
