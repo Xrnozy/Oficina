@@ -1,4 +1,4 @@
-# officeChain tray UI: the logo/icon, the right-click menu and the "Quick request" popup.
+# Oficina tray UI: the logo/icon, the right-click menu and the "Quick request" popup.
 # Dot-sourced by office-tray.ps1; kept free of side effects so it can be loaded and rendered on its own.
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
@@ -12,7 +12,7 @@ using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace OfficeChain {
+namespace Oficina {
     public class TrayPalette {
         public Color Back, Border, Fore, Muted, Hover, Sep, Danger;
     }
@@ -39,6 +39,7 @@ namespace OfficeChain {
             using (Pen p = new Pen(P.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
         }
         protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) { e.ArrowColor = P.Muted; base.OnRenderArrow(e); }
         // the base class greys the image of a disabled item; the header and status rows are disabled only so they cannot be clicked
         protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e) {
             if (e.Image == null) return;
@@ -82,18 +83,23 @@ namespace OfficeChain {
     }
 }
 '@
-if (-not ([System.Management.Automation.PSTypeName]'OfficeChain.TrayRenderer').Type) {
+if (-not ([System.Management.Automation.PSTypeName]'Oficina.TrayRenderer').Type) {
     Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition $csharp
 }
 
 # ---------------------------------------------------------------------------------------------
 # Theme: follow the Windows app theme
+$script:ThemeMode = 'auto'    # auto = follow the Windows app theme | light | dark
 function Get-TrayTheme {
     $light = $true
-    try {
-        $v = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop
-        $light = ($v -ne 0)
-    } catch { }
+    if ($script:ThemeMode -eq 'light') { $light = $true }
+    elseif ($script:ThemeMode -eq 'dark') { $light = $false }
+    else {
+        try {
+            $v = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop
+            $light = ($v -ne 0)
+        } catch { }
+    }
     $c = { param($r, $g, $b) [System.Drawing.Color]::FromArgb($r, $g, $b) }
     if ($light) {
         return @{ Dark = $false; Back = (& $c 255 255 255); Field = (& $c 247 247 247); Border = (& $c 224 224 224); Fore = (& $c 17 17 17); Muted = (& $c 120 120 120)
@@ -104,7 +110,7 @@ function Get-TrayTheme {
 }
 
 function New-TrayPalette($t) {
-    $p = New-Object OfficeChain.TrayPalette
+    $p = New-Object Oficina.TrayPalette
     $p.Back = $t.Back; $p.Border = $t.Border; $p.Fore = $t.Fore; $p.Muted = $t.Muted; $p.Hover = $t.Hover; $p.Sep = $t.Sep; $p.Danger = $t.Danger
     return $p
 }
@@ -194,8 +200,8 @@ function Get-ApiError($err) {
     try { if ($err.ErrorDetails -and $err.ErrorDetails.Message) { $msg = ($err.ErrorDetails.Message | ConvertFrom-Json).error } } catch { }
     if ($msg) { return [string]$msg }
     $text = [string]$err.Exception.Message
-    if ($text -match '(404)') { return "The daemon is older than this feature. Quit officeChain from the tray and start it again." }
-    if ($text -match 'Unable to connect|refused|timed out|actively refused') { return "officeChain isn't running yet. Wait a moment and try again." }
+    if ($text -match '(404)') { return "The daemon is older than this feature. Quit Oficina from the tray and start it again." }
+    if ($text -match 'Unable to connect|refused|timed out|actively refused') { return "Oficina isn't running yet. Wait a moment and try again." }
     return $text
 }
 
@@ -205,7 +211,7 @@ function Get-QueueCount {
 
 # ---------------------------------------------------------------------------------------------
 # Right-click menu
-function Add-TrayItem($menu, [string]$text, [string]$tag = '', [int]$glyph = 0, [string]$hint = '') {
+function New-TrayItem([string]$text, [string]$tag = '', [int]$glyph = 0, [string]$hint = '') {
     $it = New-Object System.Windows.Forms.ToolStripMenuItem
     $it.Text = $text
     $it.Tag = $tag
@@ -216,6 +222,10 @@ function Add-TrayItem($menu, [string]$text, [string]$tag = '', [int]$glyph = 0, 
     $it.ImageScaling = 'None'
     if ($glyph -gt 0) { $it.Name = "glyph:$glyph" }
     if ($hint) { $it.ShortcutKeyDisplayString = $hint }
+    return $it
+}
+function Add-TrayItem($menu, [string]$text, [string]$tag = '', [int]$glyph = 0, [string]$hint = '') {
+    $it = New-TrayItem $text $tag $glyph $hint
     [void]$menu.Items.Add($it)
     return $it
 }
@@ -233,7 +243,7 @@ function New-TrayMenu {
     $menu.ShowImageMargin = $true
     $menu.ShowCheckMargin = $false
     $menu.Padding = New-Object System.Windows.Forms.Padding 0, 6, 0, 6
-    $head = Add-TrayItem $menu 'officeChain' 'header'
+    $head = Add-TrayItem $menu 'Oficina' 'header'
     $head.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10.5)
     $head.Enabled = $false
     $head.Image = New-LogoBitmap 16 $false
@@ -243,17 +253,28 @@ function New-TrayMenu {
     $status.Size = New-Object System.Drawing.Size 262, 26
     Add-TraySeparator $menu
     $new = Add-TrayItem $menu 'New request...' 'accent' 0xE710 'click the icon'
-    $open = Add-TrayItem $menu 'Open officeChain' '' 0xE8A7
+    $open = Add-TrayItem $menu 'Open Oficina' '' 0xE8A7
     $queue = Add-TrayItem $menu 'Queue' '' 0xE8FD
     Add-TraySeparator $menu
-    $quit = Add-TrayItem $menu 'Quit officeChain' 'danger' 0xE7E8
-    return @{ Menu = $menu; Status = $status; New = $new; Open = $open; Queue = $queue; Quit = $quit }
+    $appear = Add-TrayItem $menu 'Appearance' '' 0xE790
+    $themeItems = @{}
+    foreach ($pair in @(@('auto', 'Match Windows'), @('light', 'Light'), @('dark', 'Dark'))) {
+        $child = New-TrayItem $pair[1] ("theme:" + $pair[0])
+        $child.Size = New-Object System.Drawing.Size 190, 34
+        [void]$appear.DropDownItems.Add($child)
+        $themeItems[$pair[0]] = $child
+    }
+    $appear.DropDown.ShowImageMargin = $true
+    $appear.DropDown.ShowCheckMargin = $false
+    $appear.DropDown.Padding = New-Object System.Windows.Forms.Padding 0, 6, 0, 6
+    $quit = Add-TrayItem $menu 'Quit Oficina' 'danger' 0xE7E8
+    return @{ Menu = $menu; Status = $status; New = $new; Open = $open; Queue = $queue; Quit = $quit; Appearance = $appear; ThemeAuto = $themeItems['auto']; ThemeLight = $themeItems['light']; ThemeDark = $themeItems['dark'] }
 }
 
 # Re-skin for the current Windows theme; run each time the menu opens so a theme switch is picked up.
 function Update-TrayMenuTheme($menu) {
     $t = Get-TrayTheme
-    $menu.Renderer = New-Object OfficeChain.TrayRenderer (New-TrayPalette $t)
+    $menu.Renderer = New-Object Oficina.TrayRenderer (New-TrayPalette $t)
     $menu.BackColor = $t.Back
     $menu.DropShadowEnabled = $true
     foreach ($it in $menu.Items) {
@@ -268,7 +289,19 @@ function Update-TrayMenuTheme($menu) {
             $it.Image = New-GlyphImage $code $col
         }
     }
-    try { [OfficeChain.Dwm]::Apply($menu.Handle, $t.Dark) } catch { }
+    foreach ($it in $menu.Items) {
+        if ($it -is [System.Windows.Forms.ToolStripMenuItem] -and $it.HasDropDownItems) {
+            $dd = $it.DropDown
+            $dd.Renderer = New-Object Oficina.TrayRenderer (New-TrayPalette $t)
+            $dd.BackColor = $t.Back
+            $dd.DropShadowEnabled = $true
+            foreach ($c in $it.DropDownItems) {
+                if ($c.Image) { $c.Image.Dispose(); $c.Image = $null }
+                if ($c.Tag -eq ("theme:" + $script:ThemeMode)) { $c.Image = New-GlyphImage 0xE73E $t.Fore }   # check mark
+            }
+        }
+    }
+    try { [Oficina.Dwm]::Apply($menu.Handle, $t.Dark) } catch { }
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -276,15 +309,40 @@ function Update-TrayMenuTheme($menu) {
 # Shared by the popup's event handlers. They run as closures, which get their own $script: scope, so state lives in
 # one hashtable that every closure captures by reference.
 $script:Quick = @{ Form = $null; HiddenAt = [DateTime]::MinValue; Draft = ''; LastOfficeId = $null }
-$script:SettingsFile = Join-Path $env:LOCALAPPDATA 'officeChain\tray.json'
+$script:SettingsFile = Join-Path $env:LOCALAPPDATA 'Oficina\tray.json'
+$script:OldSettingsFile = Join-Path $env:LOCALAPPDATA 'officeChain\tray.json'   # read once if the new file does not exist yet
 
-function Read-TraySettings { try { return Get-Content $script:SettingsFile -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return $null } }
-function Save-TraySettings([string]$officeId) {
+function Read-TraySettings {
+    foreach ($f in $script:SettingsFile, $script:OldSettingsFile) {
+        try { return Get-Content $f -Raw -ErrorAction Stop | ConvertFrom-Json } catch { }
+    }
+    return $null
+}
+function Update-TraySettings([hashtable]$patch) {
     try {
+        $cur = @{}
+        $old = Read-TraySettings
+        if ($old) { foreach ($p in $old.PSObject.Properties) { $cur[$p.Name] = $p.Value } }
+        foreach ($k in $patch.Keys) { $cur[$k] = $patch[$k] }
         $dir = Split-Path $script:SettingsFile
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-        (@{ lastOfficeId = $officeId } | ConvertTo-Json -Compress) | Set-Content -Path $script:SettingsFile -Encoding UTF8
+        ($cur | ConvertTo-Json -Compress) | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
+}
+function Save-TraySettings([string]$officeId) { Update-TraySettings @{ lastOfficeId = $officeId } }
+
+# Appearance of the menu and the popup, kept between sessions.
+function Initialize-TrayTheme {
+    $s = Read-TraySettings
+    if ($s -and (@('auto', 'light', 'dark') -contains [string]$s.theme)) { $script:ThemeMode = [string]$s.theme }
+}
+function Set-TrayThemeMode([string]$mode) {
+    $script:ThemeMode = $mode
+    Update-TraySettings @{ theme = $mode }
+    # the popup is built once with its colours; drop it so the next click builds it in the new theme (the draft survives)
+    $q = $script:Quick
+    if ($q.Form -and -not $q.Form.IsDisposed) { $q.Form.Dispose() }
+    $q.Form = $null
 }
 
 function Show-QuickRequest([scriptblock]$OnOpenApp, [scriptblock]$OnQueued) {
@@ -357,7 +415,7 @@ function Show-QuickRequest([scriptblock]$OnOpenApp, [scriptblock]$OnQueued) {
     }
     $add = & $mkBtn 'Add to queue' ($W - 18 - 140) 140 $true
     $cancel = & $mkBtn 'Cancel' ($W - 18 - 140 - 8 - 84) 84 $false
-    $openApp = & $mk 'Open officeChain' 18 349 150 18 (New-Object System.Drawing.Font('Segoe UI', 9)) $t.Muted
+    $openApp = & $mk 'Open Oficina' 18 349 150 18 (New-Object System.Drawing.Font('Segoe UI', 9)) $t.Muted
     $openApp.Cursor = [System.Windows.Forms.Cursors]::Hand
     $openApp.Add_Click({ $form.Hide(); if ($OnOpenApp) { & $OnOpenApp } }.GetNewClosure())
     $openApp.Add_MouseEnter({ $openApp.ForeColor = $t.Fore }.GetNewClosure()); $openApp.Add_MouseLeave({ $openApp.ForeColor = $t.Muted }.GetNewClosure())
@@ -372,7 +430,7 @@ function Show-QuickRequest([scriptblock]$OnOpenApp, [scriptblock]$OnQueued) {
     for ($i = 0; $i -lt $offices.Count; $i++) { if ($offices[$i].id -eq $want) { $idx = $i } }
     if ($offices.Count -gt 0) { $combo.SelectedIndex = $idx }
     $setSub = {
-        if ($offices.Count -eq 0) { $sub.Text = "officeChain isn't running yet - this will work in a moment."; return }
+        if ($offices.Count -eq 0) { $sub.Text = "Oficina isn't running yet - this will work in a moment."; return }
         if ($autos[$combo.SelectedIndex]) { $sub.Text = "This office starts queued requests by itself when it's idle, one at a time." }
         else { $sub.Text = "It waits in this office's queue. Nothing runs until you press Start on the dashboard." }
     }.GetNewClosure()
@@ -396,7 +454,7 @@ function Show-QuickRequest([scriptblock]$OnOpenApp, [scriptblock]$OnQueued) {
         $text = $tb.Text.Trim()
         $status.Tag = ''
         if (-not $text) { $status.ForeColor = $t.Danger; $status.Text = 'Type a request first.'; return }
-        if ($offices.Count -eq 0 -or $combo.SelectedIndex -lt 0) { $status.ForeColor = $t.Danger; $status.Text = "officeChain isn't running yet."; return }
+        if ($offices.Count -eq 0 -or $combo.SelectedIndex -lt 0) { $status.ForeColor = $t.Danger; $status.Text = "Oficina isn't running yet."; return }
         $office = $offices[$combo.SelectedIndex]
         $add.Enabled = $false
         try {
@@ -427,7 +485,7 @@ function Show-QuickRequest([scriptblock]$OnOpenApp, [scriptblock]$OnQueued) {
     }.GetNewClosure())
     $form.Region = New-Object System.Drawing.Region (Get-RoundPath 0 0 $form.Width $form.Height 12)
     $q.Form = $form
-    $form.Add_Shown({ try { [OfficeChain.Dwm]::Apply($form.Handle, $t.Dark) } catch { } }.GetNewClosure())
+    $form.Add_Shown({ try { [Oficina.Dwm]::Apply($form.Handle, $t.Dark) } catch { } }.GetNewClosure())
     $form.Show(); $form.Activate(); $tb.Focus()
 }
 

@@ -1,5 +1,5 @@
 @echo off
-rem officeChain tray launcher — puts an icon in the system tray; right-click it
+rem Oficina tray launcher — puts an icon in the system tray; right-click it
 rem to open the UI or quit the daemon. No console window is left behind.
 cd /d "%~dp0"
 

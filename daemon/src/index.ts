@@ -23,7 +23,7 @@ function acquireLock(): void {
       let alive = false;
       try { process.kill(pid, 0); alive = true; } catch (e: any) { alive = e?.code === 'EPERM'; }
       if (alive) {
-        console.error(`[office] another officeChain daemon (pid ${pid}) is already running on ${DATA_DIR} — exiting. Stop that one first.`);
+        console.error(`[office] another Oficina daemon (pid ${pid}) is already running on ${DATA_DIR} — exiting. Stop that one first.`);
         process.exit(1);
       }
     }

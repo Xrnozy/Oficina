@@ -1,4 +1,4 @@
-# Devin prompt sequence for officeChain
+# Devin prompt sequence for Oficina
 
 Paste one prompt at a time, in order. Wait for Devin to finish and report before the next one.
 Each prompt is self-contained and ends with a verification step, so a bad change is caught early.
@@ -8,7 +8,7 @@ Each prompt is self-contained and ends with a verification step, so a bad change
 ## Prompt 0 — Safety net and baseline (do first)
 
 ```
-You are improving the project in the current directory (officeChain: a TypeScript daemon in daemon/, React UI in ui/). Read README.md and daemon/src/engine/engine.ts, engine/prompts.ts, services/context.ts, services/messages.ts, services/router.ts, services/verify.ts before changing anything.
+You are improving the project in the current directory (Oficina: a TypeScript daemon in daemon/, React UI in ui/). Read README.md and daemon/src/engine/engine.ts, engine/prompts.ts, services/context.ts, services/messages.ts, services/router.ts, services/verify.ts before changing anything.
 
 Rules for this whole session:
 - Keep each change small and focused. After each change run `npm run typecheck -w daemon` and `npm test -w daemon`. Never leave either red.

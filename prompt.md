@@ -1,6 +1,6 @@
-# officeChain improvement plan (instructions for Devin)
+# Oficina improvement plan (instructions for Devin)
 
-You are improving this project (officeChain: TypeScript daemon in `daemon/`, React UI in `ui/`). Goals: better performance, a smoother workflow, better agent-to-agent communication, fewer wasted tokens, fewer manual interventions, and the missing reliability features.
+You are improving this project (Oficina: TypeScript daemon in `daemon/`, React UI in `ui/`). Goals: better performance, a smoother workflow, better agent-to-agent communication, fewer wasted tokens, fewer manual interventions, and the missing reliability features.
 
 ## Operating rules
 

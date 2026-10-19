@@ -1,7 +1,7 @@
-# officeChain tray agent - hosts a system tray icon, runs the daemon hidden,
+# Oficina tray agent - hosts a system tray icon, runs the daemon hidden,
 # and kills it on Quit. Requires Windows PowerShell (STA).
 #   left-click the icon  -> Quick request: type a prompt, it joins the office's queue
-#   right-click the icon -> menu (new request, open the app, queue, quit)
+#   right-click the icon -> menu (new request, open the app, queue, appearance light/dark, quit)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 # single instance: kill any other tray agent first - a hung one would hold
@@ -11,7 +11,7 @@ $me = $PID
 Get-CimInstance Win32_Process |
     Where-Object { $_.ProcessId -ne $me -and $_.CommandLine -match 'office-tray\.ps1' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-$script:mutex = New-Object System.Threading.Mutex($false, 'Local\officeChainTray')
+$script:mutex = New-Object System.Threading.Mutex($false, 'Local\OficinaTray')
 $script:mutex.WaitOne(0) | Out-Null
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -32,6 +32,7 @@ $appUrl = "http://localhost:$port"
 
 . (Join-Path $root 'office-tray-ui.ps1')
 $script:ApiPort = $port
+Initialize-TrayTheme
 
 # Balloon tips for the three things worth interrupting the owner for:
 # a Needs-you decision, a run finishing, a run stopping badly. Everything
@@ -48,7 +49,7 @@ function Update-Notifications {
         }
         foreach ($n in $items) {
             $script:lastSeq = [Math]::Max($script:lastSeq, $n.seq)
-            $ni.ShowBalloonTip(6000, "officeChain - $($n.title)", $n.body, 'Info')
+            $ni.ShowBalloonTip(6000, "Oficina - $($n.title)", $n.body, 'Info')
         }
     } catch { }
 }
@@ -93,13 +94,17 @@ function Stop-Daemon {
 $icon = New-TrayIcon
 $ni = New-Object System.Windows.Forms.NotifyIcon
 $ni.Icon = $icon
-$ni.Text = 'officeChain'
+$ni.Text = 'Oficina'
 $ni.Visible = $true
 
 # ---- right-click menu -------------------------------------------------------------------------
 $dot = [string][char]0xB7
 $parts = New-TrayMenu
 $menu = $parts.Menu; $miStatus = $parts.Status; $miNew = $parts.New; $miOpen = $parts.Open; $miQueue = $parts.Queue; $miQuit = $parts.Quit
+
+$parts.ThemeAuto.Add_Click({ Set-TrayThemeMode 'auto' })
+$parts.ThemeLight.Add_Click({ Set-TrayThemeMode 'light' })
+$parts.ThemeDark.Add_Click({ Set-TrayThemeMode 'dark' })
 
 $openQuick = { Show-QuickRequest { Start-Process $appUrl } { Update-QueueState } }
 $miNew.Add_Click({ & $openQuick })
@@ -124,28 +129,28 @@ function Update-QueueState {
     if (-not $up) {
         $miStatus.Text = 'Stopped'
         $miQueue.Text = 'Queue'
-        $ni.Text = 'officeChain (stopped)'
+        $ni.Text = 'Oficina (stopped)'
         return
     }
     if ($script:queueCount -gt 0) {
         $miStatus.Text = "Running  $dot  $($script:queueCount) queued"
         $miQueue.Text = "Queue  ($($script:queueCount) waiting)"
-        $ni.Text = "officeChain - $($script:queueCount) queued"
+        $ni.Text = "Oficina - $($script:queueCount) queued"
     } else {
         $miStatus.Text = "Running  $dot  queue is empty"
         $miQueue.Text = 'Queue'
-        $ni.Text = 'officeChain (running)'
+        $ni.Text = 'Oficina (running)'
     }
 }
 
 $already = Test-Daemon
 if ($already) {
     $miStatus.Text = 'Running'
-    $ni.Text = 'officeChain (running)'
-    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon already running - click the icon to queue a request.', 'Info')
+    $ni.Text = 'Oficina (running)'
+    $ni.ShowBalloonTip(2500, 'Oficina', 'Daemon already running - click the icon to queue a request.', 'Info')
 } else {
     Start-Daemon
-    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon starting...', 'Info')
+    $ni.ShowBalloonTip(2500, 'Oficina', 'Daemon starting...', 'Info')
 }
 
 # poll health once a second: update status line + open the browser when ready
@@ -163,7 +168,7 @@ $timer.Add_Tick({
     } elseif ($miStatus.Text -ne 'Stopped') {
         $miStatus.Text = 'Stopped'
         $miQueue.Text = 'Queue'
-        $ni.Text = 'officeChain (stopped)'
+        $ni.Text = 'Oficina (stopped)'
     }
 })
 $timer.Start()

@@ -178,7 +178,7 @@ export const devinAdapter: Adapter = {
 
     const devinMode = mapModelToDevinMode(ctx.model?.name);
     const label = {
-      title: `officeChain · ${ctx.workItem.kind}${ctx.task ? ` · ${ctx.task.title}` : ''}`.slice(0, 120),
+      title: `Oficina · ${ctx.workItem.kind}${ctx.task ? ` · ${ctx.task.title}` : ''}`.slice(0, 120),
       tags: ['officechain', ctx.workItem.kind, ...(ctx.task ? [ctx.task.id] : [])],
     };
     const session = await createDevinSession(base, apiKey, cfg, buildPrompt(ctx, pushBranch, producesCode), devinMode, label);

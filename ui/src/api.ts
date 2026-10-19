@@ -13,7 +13,7 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
   if (!res.ok) {
     const isJson = (res.headers.get('content-type') ?? '').includes('json');
     // the daemon's own errors are JSON; a plain-HTML 404 means it has no such route, i.e. it was started before this feature existed
-    if (res.status === 404 && !isJson) throw new Error('The daemon doesn\'t know this action yet: it is still running an older version. Restart officeChain (quit it from the tray icon or close its window, then start it again) and retry.');
+    if (res.status === 404 && !isJson) throw new Error('The daemon doesn\'t know this action yet: it is still running an older version. Restart Oficina (quit it from the tray icon or close its window, then start it again) and retry.');
     const b = isJson ? await res.json().catch(() => ({})) : {};
     throw new Error(b.error ?? b.message ?? `${res.status}`);
   }

@@ -1,12 +1,12 @@
 @echo off
-rem officeChain launcher — double-click to start the daemon and open the UI.
+rem Oficina launcher — double-click to start the daemon and open the UI.
 cd /d "%~dp0"
-title officeChain daemon
+title Oficina daemon
 
 rem Already running? Just open the UI.
 curl -s -o nul --max-time 2 http://localhost:4780/api/health
 if %errorlevel%==0 (
-  echo officeChain is already running on http://localhost:4780
+  echo Oficina is already running on http://localhost:4780
   start "" http://localhost:4780
   exit /b 0
 )

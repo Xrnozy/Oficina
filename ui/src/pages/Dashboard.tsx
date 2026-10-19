@@ -369,7 +369,7 @@ function QueuePanel({ office, items, reload, onStart }: { office: { id: string; 
   return (
     <Panel title={<>Queue{items.length > 0 && <span className="ml-2 chip !bg-info/10 !text-info !border-info/30">{items.length}</span>}</>}
       action={<span className="text-2xs text-fg-4 hidden sm:inline">add one from the tray icon, or with Queue for later on the New request form</span>} bodyClass="px-2 pb-3">
-      {items.length === 0 && <div className="px-2 pb-1"><Muted>Nothing waiting. Click the officeChain tray icon, type a request, and it lands here for {office.name}.</Muted></div>}
+      {items.length === 0 && <div className="px-2 pb-1"><Muted>Nothing waiting. Click the Oficina tray icon, type a request, and it lands here for {office.name}.</Muted></div>}
       <ul>
         {items.map((it) => (
           <li key={it.id} className="group flex items-start gap-3 px-2 py-2 rounded-lg hover:bg-raised transition-colors">

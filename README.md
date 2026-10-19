@@ -1,6 +1,6 @@
 <div align="center">
 
-# officeChain
+# Oficina
 
 **A local-first AI agent router — a deterministic workflow engine runs the build loop, AI agents do the work inside it.**
 
@@ -9,7 +9,7 @@
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
 ![SQLite](https://img.shields.io/badge/SQLite-node%3Asqlite-003B57?logo=sqlite&logoColor=white)
 
-<img src="docs/screenshots/dashboard.png" alt="officeChain dashboard showing a finished run with its Definition of Done, spend and agent roster" width="900">
+<img src="docs/screenshots/dashboard.png" alt="Oficina dashboard showing a finished run with its Definition of Done, spend and agent roster" width="900">
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## Overview
 
-Most agent tools let a model decide what happens next. officeChain inverts that: **the engine owns the loop, the agents own the judgement.** A goal is turned into a *Definition of Done* — a checklist of machine-checkable criteria — and the engine repeats plan → assign → build → verify → review → merge until every check passes or a limit stops it. Git and a local verification runner are the ground truth; "done" is measured, never self-reported by a model.
+Most agent tools let a model decide what happens next. Oficina inverts that: **the engine owns the loop, the agents own the judgement.** A goal is turned into a *Definition of Done* — a checklist of machine-checkable criteria — and the engine repeats plan → assign → build → verify → review → merge until every check passes or a limit stops it. Git and a local verification runner are the ground truth; "done" is measured, never self-reported by a model.
 
 Because the engine is deterministic and event-sourced, every agent — including the PM — is replaceable, runs are replayable, and loops are bounded instead of spinning forever.
 
@@ -91,6 +91,10 @@ Right-click gives a themed menu that follows the Windows light/dark setting and 
 
 <img src="docs/screenshots/tray-menu.png" alt="System tray right-click menu with status, new request, open, queue and quit" width="280">
 
+**Appearance** in that menu switches the tray between *Match Windows* (default), *Light* and *Dark*. The choice is remembered and applies to both the menu and the popup.
+
+<img src="docs/screenshots/tray-appearance.png" alt="Tray menu with the Appearance submenu open showing Match Windows, Light and Dark" width="460">
+
 The queue appears on the Dashboard. **Start…** opens the New request form with the queued text (so you still pick the repository, budget and workflow); the checkbox lets the office start the next one automatically when it has no run in progress.
 
 <img src="docs/screenshots/queue.png" alt="Dashboard queue panel listing three queued requests with Start and remove buttons and an auto-start checkbox" width="900">
@@ -152,7 +156,7 @@ The full design rationale is in [`spec/AI-Agent-Office-Spec.md`](spec/AI-Agent-O
 
 ```bash
 git clone <this-repository-url>
-cd officeChain
+cd Oficina
 
 npm install
 npm run build -w ui     # builds the React UI into ui/dist
@@ -170,7 +174,7 @@ Open <http://localhost:4780>. On first start the daemon seeds a **Demo Office** 
 ### Windows launchers
 
 - `start-office.bat` — starts the daemon in a console window and opens the UI (installs dependencies and builds the UI first if needed).
-- `start-office-tray.bat` — runs the daemon hidden with a system-tray icon. **Left-click** the icon to type a quick request into the queue; **right-click** for the menu (new request, open officeChain, queue, quit). Quit stops the daemon.
+- `start-office-tray.bat` — runs the daemon hidden with a system-tray icon. **Left-click** the icon to type a quick request into the queue; **right-click** for the menu (new request, open Oficina, queue, appearance, quit). Quit stops the daemon.
 
 ### Configuration
 
@@ -196,7 +200,7 @@ Command presets, placeholders and per-CLI details are in the [detailed guide](do
 ## Project structure
 
 ```text
-officeChain/
+Oficina/
 ├── daemon/                 TypeScript daemon (Express + WebSocket, SQLite)
 │   ├── src/engine/         fixed pipeline + workflow-graph executor, prompt builder
 │   ├── src/services/       router, workflow graphs, checkpoints, commits, verification, skills, usage…

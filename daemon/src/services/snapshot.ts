@@ -204,7 +204,7 @@ export async function liveChanges(repo: string, base: string): Promise<{ tree: s
 
 /** Pin a tree under refs/officechain/<name> so it survives garbage collection. */
 export function pinTree(repo: string, tree: string, name: string, message: string): string {
-  const env = { GIT_AUTHOR_NAME: 'officeChain', GIT_AUTHOR_EMAIL: 'officechain@local', GIT_COMMITTER_NAME: 'officeChain', GIT_COMMITTER_EMAIL: 'officechain@local' };
+  const env = { GIT_AUTHOR_NAME: 'Oficina', GIT_AUTHOR_EMAIL: 'officechain@local', GIT_COMMITTER_NAME: 'Oficina', GIT_COMMITTER_EMAIL: 'officechain@local' };
   const commit = run(repo, ['commit-tree', tree, '-m', message], { env }).trim();
   run(repo, ['update-ref', `refs/officechain/${name}`, commit]);
   return commit;

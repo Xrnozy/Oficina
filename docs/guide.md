@@ -1,6 +1,6 @@
-# officeChain — detailed guide
+# Oficina — detailed guide
 
-The in-depth reference for officeChain: how the workflow engine, routing, checkpoints and commits behave. For an overview, screenshots and setup, see the [main README](../README.md). Design background: [`spec/AI-Agent-Office-Spec.md`](../spec/AI-Agent-Office-Spec.md).
+The in-depth reference for Oficina: how the workflow engine, routing, checkpoints and commits behave. For an overview, screenshots and setup, see the [main README](../README.md). Design background: [`spec/AI-Agent-Office-Spec.md`](../spec/AI-Agent-Office-Spec.md).
 
 ## Quick start
 
@@ -20,7 +20,7 @@ npm run dev:ui          # optional: Vite dev server with HMR (proxying to :4780)
 ## Windows launchers
 
 - `start-office.bat` — double-click: starts the daemon in a console window and opens the UI.
-- `start-office-tray.bat` — double-click: runs the daemon hidden and puts an icon in the system tray. Right-click the tray icon → **Open officeChain** or **Quit officeChain** (Quit stops the daemon).
+- `start-office-tray.bat` — double-click: runs the daemon hidden and puts an icon in the system tray. Right-click the tray icon → **Open Oficina** or **Quit Oficina** (Quit stops the daemon).
 
 ## Adding a backend (Providers page)
 
@@ -108,7 +108,7 @@ Prompts typed somewhere quick wait in a **per-office queue** that the whole app 
 
 **Starting.** Nothing runs just because it was queued. **Start…** on the Dashboard opens the New request form with the text filled in, so the repository, budget and workflow are chosen as usual; sending it consumes the queue item. Alternatively tick *Start the next one automatically when <office> is idle*: the daemon then starts the oldest queued request whenever the office has no run in progress (draft, DoD review, running, paused…), one at a time, using the office's first repository and the budget shown next to the checkbox (default $50). It is off by default. An office with no repository keeps its queue and waits, and with *confirm plan* on, a started run waits at DoD review, so the office counts as busy until you act.
 
-**Tray.** The tray reads the daemon port from `daemon/office.yaml`, remembers the last office you queued into, keeps an unsent draft if you click away, and shows "<n> queued" in its status line and tooltip. The tray menu follows the Windows light/dark theme. The tray's code is in `office-tray.ps1` (the icon and daemon) and `office-tray-ui.ps1` (the menu and popup). Restart officeChain after updating so the daemon has the queue endpoints; an older daemon answers a quick request with a message saying so.
+**Tray.** The tray reads the daemon port from `daemon/office.yaml`, remembers the last office you queued into, keeps an unsent draft if you click away, and shows "<n> queued" in its status line and tooltip. The tray menu and popup follow the Windows light/dark theme by default; **Appearance** in the right-click menu switches them to Light or Dark and remembers the choice (stored in `%LOCALAPPDATA%Oficina	ray.json` with the last office you queued into). The tray's code is in `office-tray.ps1` (the icon and daemon) and `office-tray-ui.ps1` (the menu and popup). Restart Oficina after updating so the daemon has the queue endpoints; an older daemon answers a quick request with a message saying so.
 
 ## Working in your repository (direct mode)
 

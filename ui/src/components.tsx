@@ -350,7 +350,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         <div className="h-14 flex items-center gap-2.5 px-4 shrink-0">
           <Logo />
           <div className="leading-tight">
-            <div className="font-semibold text-[14px] text-fg tracking-[-0.01em]">officeChain</div>
+            <div className="font-semibold text-[14px] text-fg tracking-[-0.01em]">Oficina</div>
             <div className="text-2xs text-fg-4">agent router</div>
           </div>
         </div>
