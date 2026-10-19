@@ -137,7 +137,8 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     ids.add(n.id);
     if (n.type === 'agent' && !n.agentId && !n.role) err('agent node needs an agentId or a role', n.id);
     if (n.type === 'approval' && !n.agentId && !n.role) err('a Human approval node needs an agent connected to it (pick an agent or a role): it prepares the app and writes the report you review', n.id);
-    if (n.type !== 'agent' && n.type !== 'approval' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
+    if (n.type === 'start' && n.role) warn('the Request node analyses with one chosen agent, not a role: the role is ignored', n.id);
+    if (n.type !== 'agent' && n.type !== 'approval' && n.type !== 'start' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
     if (n.type === 'approval' && (n.role === 'pm' || n.role === 'prompt-creator')) err('the PM and the Prompt Creator orchestrate only — connect a QA, analyst, reviewer or developer agent to run and inspect the app', n.id);
     if (n.type === 'approval' && n.config?.approval?.url && !/^https?:\/\//i.test(n.config.approval.url)) err('the app URL must start with http:// or https://', n.id);
     if (n.type === 'approval' && n.config?.approval?.readyTimeoutSec != null && !(n.config.approval.readyTimeoutSec >= 3 && n.config.approval.readyTimeoutSec <= 300)) err('the app start timeout must be between 3 and 300 seconds', n.id);
@@ -313,13 +314,15 @@ export function ensureBuiltinWorkflow(wsId: string): void {
     wfId, wsId, 'Default pipeline', 'The standard office flow — read-only; clone to customise.', vId, now(), now());
 }
 
-export function listWorkflows(wsId: string): (WorkflowRow & { versionN: number | null; active: boolean })[] {
+export function listWorkflows(wsId: string): (WorkflowRow & { versionN: number | null; active: boolean; intakeAgentId: string | null })[] {
   ensureBuiltinWorkflow(wsId);
   const active = activeWorkflowId(wsId);
   return q('SELECT * FROM workflows WHERE workspace_id = ? ORDER BY builtin DESC, updated_at DESC', wsId).map((r) => {
     const w = rowToWorkflow(r);
     const v = w.latestVersionId ? q1('SELECT n FROM workflow_versions WHERE id = ?', w.latestVersionId) : null;
-    return { ...w, versionN: (v?.n as number) ?? null, active: w.id === active };
+    // the agent on the Request node: it analyses a request before the run starts
+    const start = w.latestVersionId ? getWorkflowVersion(w.latestVersionId)?.graph.nodes.find((n) => n.type === 'start') : undefined;
+    return { ...w, versionN: (v?.n as number) ?? null, active: w.id === active, intakeAgentId: start?.agentId ?? null };
   });
 }
 

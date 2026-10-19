@@ -183,6 +183,19 @@ export function capBlock(agent: Agent, taskId: string | null): string | undefine
 
 const PM_COMPATIBLE_ROLES = ['pm', 'docs', 'prompt-creator'];
 
+/** One specific agent as a candidate, through any role it holds in this office (the owner chose it; no role restriction applies). */
+export function candidateForAgent(workspaceId: string, agentId: string): Candidate | null {
+  const roles = q('SELECT DISTINCT role_id FROM memberships WHERE agent_id = ? AND workspace_id = ? AND active = 1', agentId, workspaceId);
+  let blocked: Candidate | null = null;
+  for (const m of roles) {
+    const name = q1('SELECT name FROM roles WHERE id = ?', m.role_id as string)?.name as string | undefined;
+    const c = name ? candidatesForRole(workspaceId, name).find((x) => x.agent.id === agentId) : undefined;
+    if (c && !c.blocked) return c;
+    if (c) blocked = c;
+  }
+  return blocked;
+}
+
 export function candidatesForRole(workspaceId: string, roleName: string): Candidate[] {
   const roleId = roleIdByName(roleName);
   if (!roleId) return [];
@@ -269,9 +282,11 @@ export async function dispatchThroughAdapter(
   candidate: Candidate,
   fallbacks: Candidate[],
   node?: { id: string; label: string; requiredTier?: 'fast' | 'standard' | 'strong' },
+  // work that has no run yet (request intake) names its office itself
+  workspaceOverride?: string,
 ): Promise<{ result: WorkItemResult; usedAgent: Agent; usedBackend: string }> {
   const wi = baseCtx.workItem;
-  const workspaceId = q1('SELECT workspace_id FROM runs WHERE id = ?', wi.runId)?.workspace_id as string;
+  const workspaceId = workspaceOverride ?? q1('SELECT workspace_id FROM runs WHERE id = ?', wi.runId)?.workspace_id as string;
   const allowed = workspaceAllowed(workspaceId);
   // Order: this agent's model options (routed per work item, or own model
   // first when routing is 'fixed') → other agents in the same role (their

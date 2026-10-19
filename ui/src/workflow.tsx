@@ -89,7 +89,7 @@ export interface RoutingView {
 
 export interface WorkflowRow {
   id: string; workspaceId: string; name: string; description: string;
-  builtin: boolean; latestVersionId: string | null; versionN?: number | null; active?: boolean;
+  builtin: boolean; latestVersionId: string | null; versionN?: number | null; active?: boolean; intakeAgentId?: string | null;
   createdAt: string; updatedAt: string;
 }
 

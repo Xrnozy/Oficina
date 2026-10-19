@@ -743,6 +743,19 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
           <textarea className="inp min-h-[64px] text-xs" value={cfg.instructions ?? ''} placeholder="Approve to continue" onChange={(e) => setCfg({ instructions: e.target.value || undefined })} />
         </Field>
       )}
+      {n.type === 'start' && (
+        <Field label="Analyse the request with">
+          <Select className="inp" value={n.agentId ?? ''} onChange={(e) => set({ agentId: e.target.value || undefined, role: undefined })}>
+            <option value="">no one — the request goes straight to the PM</option>
+            {wsAgents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select>
+          <div className="text-2xs text-fg-4 leading-4 mt-1.5">
+            {n.agentId
+              ? 'On New run this agent reads what you wrote and attached and turns it into features, technologies, issues and references. You review and refine the summary, then approve it to start the run. It works in a CLI session of its own, never one of its other work.'
+              : 'Pick any agent to check and structure each request with you before the run starts. It is only a suggestion on New run — you can still choose another agent or skip it.'}
+          </div>
+        </Field>
+      )}
       {(n.type === 'start' || n.type === 'end' || n.type === 'condition') && (
         <div className="text-2xs text-fg-4 leading-4">
           {n.type === 'condition' ? 'Branch logic lives on the outgoing edges — click an edge to set its condition. Exactly one must be else.' :

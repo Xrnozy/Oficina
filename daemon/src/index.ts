@@ -1,4 +1,5 @@
 import { clearBusySessions } from './services/cli-sessions.ts';
+import { recoverDrafts } from './services/intake.ts';
 import { startQueueLoop } from './services/queue.ts';
 import { startRepoWatcher } from './services/repo-watch.ts';
 import { relocateLegacy } from './services/attachments.ts';
@@ -49,6 +50,7 @@ startQueueLoop();
 startRepoWatcher();
 try { const n = relocateLegacy(); if (n) console.log(`[attachments] moved ${n} reference file(s) into their repository's documents/ folder`); } catch (e) { console.warn('[attachments] relocation skipped:', String(e).slice(0, 120)); }
 clearBusySessions();
+recoverDrafts();
 createServer(config.port, config.uiDir);
 
 // Providers declared in office.yaml are upserted so accounts/agents can point

@@ -54,8 +54,31 @@ export const scriptedAdapter: Adapter = {
   async sendMessage() { /* scripted agents ignore mid-session messages */ },
 };
 
+// Request intake: round N of script.intake.rounds (the last one repeats), else a plain breakdown of what the owner wrote.
+function intakeResult(ctx: AdapterCtx, script: Record<string, any>): WorkItemResult {
+  const rounds = (script.intake?.rounds ?? []) as Record<string, unknown>[];
+  const n = Math.max(1, ctx.workItem.attempt || 1);
+  const scripted = rounds.length ? rounds[Math.min(n, rounds.length) - 1] : null;
+  const request = block(ctx.prompt, 'REQUEST').trim();
+  const note = block(ctx.prompt, 'LATEST_OWNER_NOTE').trim();
+  const open = block(ctx.prompt, 'OPEN_ITEMS').split('\n').map((l) => l.split(' | ')).filter((p) => p.length >= 3);
+  const out = scripted ?? {
+    summary: `Scripted reading of: ${request.slice(0, 80)}`,
+    items: [
+      ...open.map((p) => ({ id: p[0], kind: p[1], text: p.slice(2).join(' | ') })),
+      ...(open.length ? [] : [{ kind: 'feature', text: request.split(/\n|\. /)[0].slice(0, 120) || 'The request' }, { kind: 'technology', text: 'Whatever the repository already uses' }]),
+      ...(note ? [{ kind: 'feature', text: `Also: ${note.slice(0, 120)}` }] : []),
+    ],
+    concerns: open.length ? [] : [{ type: 'unclear', text: 'Which screen should this appear on?' }],
+    ready: !!open.length,
+  };
+  ctx.emit('agent.output', { line: `[scripted] ${ctx.agent.name} analysed the request (round ${n})` });
+  return { summary: 'Scripted request analysis', raw: { json: out }, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, costSource: 'estimate' } };
+}
+
 async function scriptedResult(ctx: AdapterCtx, script: Record<string, any>, kind: string): Promise<WorkItemResult> {
   await delay(script.latencyMs ?? 400);
+  if (ctx.workItem.runId.startsWith('intake-')) return intakeResult(ctx, script);
   ctx.emit('agent.output', { line: `[scripted] ${ctx.agent.name} starting ${kind}` });
 
   switch (kind) {

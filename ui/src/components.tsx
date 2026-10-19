@@ -77,6 +77,11 @@ export function fmtTime(ts?: string | null): string {
   if (!ts) return '—';
   try { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); } catch { return ts; }
 }
+/** A run's goal can carry the reviewed request breakdown below the owner's own words: headings show only the first line. */
+export function goalTitle(goal: string | null | undefined): string {
+  return (goal ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+}
+
 export function fmtAgo(ts?: string | null): string {
   if (!ts) return '—';
   const s = Math.max(0, (Date.now() - Date.parse(ts)) / 1000);

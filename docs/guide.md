@@ -212,6 +212,24 @@ Columns: **On hold**, **Ready**, **In progress**, **In review**, **Done**, **Fai
 - **New task** (Tasks page or **+ → Create a task**) takes a title, background, **work items** and files. Each work item is a specific thing to do, with optional instructions and its own files; every item becomes an acceptance criterion the agents check and appears in every prompt for the task. *Put on hold* saves it without handing it to the agents.
 - A task you add during a run enters as *ready* and the next free, eligible agent takes it through the normal PM-reviewed prompt flow. The run isn't marked done while one is open.
 
+## Request intake
+
+The **Request** node (the start of every workflow) can name an agent that analyses and checks a request before any run exists. Pick it in the Workflow editor (select the Request node → *Analyse the request with*); **New run** preselects it, and you can choose another agent, or none, for a single request (*Analyse the request with* in the side panel; not used for one-shot runs).
+
+1. **Describe** — write what you need and attach files as usual, then press *Analyse request*. Files are saved first so the agent can open them.
+2. **Review** — the agent replies with a short summary, items grouped as Features, Technologies, Issues to fix, References and Constraints, and a *Worth checking* list of what is unclear, risky, missing or contradictory. Every item has three possible states:
+   - **kept** (tick it, edit its wording, or add your own) — fixed: no later pass changes, rewords, splits or repeats it;
+   - **open** — the agent's proposal nobody has judged yet; the only items a later pass may sharpen, replace or drop;
+   - **removed** — never suggested again, in the same words or an equivalent; it can be restored from the *Removed* list.
+3. **Iterate** — type more details (or press *Answer* next to a question) and *Update the summary*: the agent only adjusts the open items and adds what is new (marked *updated*). Edit the request text itself from the side panel. As many passes as you like.
+4. **Approve** — *Approve and start* creates the run. Its goal is your text followed by the reviewed breakdown (kept and open items, your extra details, and the items you ruled out marked *do not do these*), so the PM plans from exactly what you agreed. *Discard* drops the draft and the files uploaded for it.
+
+These rules are enforced by the engine, not left to the model: it restates your decisions in every prompt, and merges the reply itself — an agent that rewrites a kept item or revives a removed one is ignored for that item (the merge is `mergeItems` in `daemon/src/services/intake.ts`). The reply must be a JSON object; a malformed one is retried once, then the draft shows an error and you can try again or approve your request exactly as typed.
+
+**Its own CLI session.** Each draft gets a session of its own (listed under CLI sessions as *Request intake · agent · id*), continued on every pass, never lent to the agent's other work and not shared with other drafts — even for an agent set to a new session every time. It is retired when the request is approved or discarded. The session is a convenience only: every pass is self-contained. The agent reads the repository when one is chosen, and its prompt forbids changing anything. API-based agents work the same way without a session. Drafts are stored (`request_drafts`) and survive reloads; a draft left "analysing" by a restart is marked failed.
+
+API: `GET /api/intake/agents`, `POST /api/intake/drafts`, `GET|DELETE /api/intake/drafts/:id`, `POST /api/intake/drafts/:id/refine` (`edits`, `add`, `note`, `reanalyze`), `POST /api/intake/drafts/:id/approve`.
+
 ## Human approval
 
 A **Human approval** node (Workflow editor palette, or the *With human approval* template) puts you in the loop with the work actually running:

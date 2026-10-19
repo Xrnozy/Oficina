@@ -1,7 +1,7 @@
 import { useOfficeApprovals } from '../office';
 import React, { useState } from 'react';
 import { post, useQuery } from '../api';
-import { Avatar, Drawer, Empty, PageHeader, Skeleton, StatusChip, Tag, act, fmtAgo, toast } from '../components';
+import { Avatar, Drawer, Empty, PageHeader, Skeleton, StatusChip, Tag, act, fmtAgo, goalTitle, toast } from '../components';
 import { Check, Inbox, ShieldQuestion, UserCheck, X } from 'lucide-react';
 import { HumanReview } from '../humanReview';
 
@@ -86,7 +86,7 @@ export default function Approvals() {
             return (
               <div key={g.runId ?? 'none'} className="panel overflow-hidden">
                 <div className="flex items-center gap-3 px-4 h-10 border-b border-line bg-cream text-xs text-fg-2">
-                  <span className="font-medium text-fg truncate">{r ? r.goal : 'No run'}</span>
+                  <span className="font-medium text-fg truncate">{r ? goalTitle(r.goal) : 'No run'}</span>
                   <span className="num text-fg-3 shrink-0">{g.items.length} item{g.items.length > 1 ? 's' : ''}</span>
                   {low > 0 && <button className="btn btn-sm ml-auto shrink-0" onClick={() => approveAllLow(g.runId)}><Check size={12} /> Approve {low} low-risk</button>}
                 </div>

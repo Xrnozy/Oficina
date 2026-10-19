@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, updateSession } from '../services/cli-sessions.ts';
 import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
 import { appInfo, appLog } from '../services/app-launcher.ts';
+import { approvable, discardDraft, getDraft, intakeAgents, intakeSessions, listDrafts, markApproved, reviseDraft, startDraft } from '../services/intake.ts';
 import { addAttachment, fileOf, getAttachment, listAttachments, removeAttachment, replaceAttachment, MAX_FILE_BYTES } from '../services/attachments.ts';
 import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -625,6 +626,61 @@ export function createServer(port: number, uiDir: string): http.Server {
       if (/workflow not found/.test(String(e))) return err(res, 400, 'workflow not found or has no saved version');
       err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`);
     }
+  });
+
+  // ---------- request intake: an agent turns the request into a summary the owner reviews before the run starts ----------
+  const bad = (res: Response, f: { error: string; status: number }) => err(res, f.status, f.error);
+  const isFail = (x: unknown): x is { error: string; status: number } => !!x && typeof (x as { status?: unknown }).status === 'number';
+  app.get('/api/intake/agents', (req, res) => {
+    if (!req.query.workspaceId) return err(res, 400, 'workspaceId required');
+    ok(res, intakeAgents(String(req.query.workspaceId)));
+  });
+  app.get('/api/intake/drafts', (req, res) => {
+    if (!req.query.workspaceId) return err(res, 400, 'workspaceId required');
+    ok(res, listDrafts(String(req.query.workspaceId)));
+  });
+  app.get('/api/intake/drafts/:id', (req, res) => {
+    const d = getDraft(req.params.id);
+    if (!d) return err(res, 404, 'draft not found');
+    ok(res, { ...d, sessions: intakeSessions(d.id) });
+  });
+  app.post('/api/intake/drafts', (req, res) => {
+    const b = req.body ?? {};
+    if (!b.workspaceId) return err(res, 400, 'workspaceId required');
+    const d = startDraft({ workspaceId: String(b.workspaceId), repoId: b.repoId ? String(b.repoId) : null, agentId: String(b.agentId ?? ''), request: b.request, attachmentIds: b.attachmentIds });
+    if (isFail(d)) return bad(res, d);
+    ok(res, d);
+  });
+  app.post('/api/intake/drafts/:id/refine', (req, res) => {
+    const d = reviseDraft(req.params.id, req.body ?? {});
+    if (isFail(d)) return bad(res, d);
+    ok(res, d);
+  });
+  app.post('/api/intake/drafts/:id/approve', (req, res) => {
+    try {
+      const a = approvable(req.params.id);
+      if (isFail(a)) return bad(res, a);
+      const { budgetUsd, repoId, oneShot, limits, workflowId } = req.body ?? {};
+      const cleanLimits: Record<string, number> = {};
+      for (const k of ['maxParallel', 'maxReadOnly', 'maxCycles', 'maxWallclockMin', 'sameErrorAttempts', 'noProgressCycles', 'maxTaskMinutes']) {
+        const v = (limits as Record<string, unknown> | undefined)?.[k];
+        if (v != null) { const n = Number(v); if (!Number.isFinite(n) || n < 0) return err(res, 400, `limits.${k} must be a non-negative number`); cleanLimits[k] = n; }
+      }
+      const created = createRun({ workspaceId: a.draft.workspaceId, goal: a.goal, budgetUsd, repoId: repoId ? String(repoId) : (a.draft.repoId ?? undefined), oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined,
+        // files are the office's references unless the owner said they are for this run only
+        attachmentIds: req.body?.thisRunOnly ? a.draft.attachmentIds : undefined });
+      markApproved(a.draft.id, created.id);
+      if (req.body?.queueId) markStarted(String(req.body.queueId), created.id);
+      ok(res, created);
+    } catch (e) {
+      if (/workflow not found/.test(String(e))) return err(res, 400, 'workflow not found or has no saved version');
+      err(res, 500, String(e));
+    }
+  });
+  app.delete('/api/intake/drafts/:id', (req, res) => {
+    const r = discardDraft(req.params.id);
+    if (isFail(r)) return bad(res, r);
+    ok(res, r);
   });
 
   // ---------- reference files and task attachments ----------

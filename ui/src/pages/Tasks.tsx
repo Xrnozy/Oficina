@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { del, post, useQuery } from '../api';
-import { Avatar, Dot, Empty, Modal, PageHeader, Skeleton, TONE_BG, act, fmtUsd, toast, useCurrentRun, type Tone } from '../components';
+import { Avatar, Dot, Empty, Modal, PageHeader, Skeleton, TONE_BG, act, fmtUsd, goalTitle, toast, useCurrentRun, type Tone } from '../components';
 import { useOffice } from '../office';
 import { NewTaskModal, uploadFiles, useFileDrop, type Attachment } from '../attachments';
 import { ListChecks, ListPlus, Lock, Paperclip, Pause, Play, Trash2, UploadCloud } from 'lucide-react';
@@ -57,7 +57,7 @@ export default function Tasks() {
 
   return (
     <div>
-      <PageHeader title="Tasks" sub={<>{tasks.length} task{tasks.length === 1 ? '' : 's'} in <span className="text-fg-2">{run.goal}</span></>}>
+      <PageHeader title="Tasks" sub={<>{tasks.length} task{tasks.length === 1 ? '' : 's'} in <span className="text-fg-2">{goalTitle(run.goal)}</span></>}>
         <button className="btn btn-primary" disabled={!canAdd} title={canAdd ? 'Add work for the agents in this run' : 'This run has finished — start a new one to add work'} onClick={() => setCreating([])}><ListPlus size={14} /> New task</button>
       </PageHeader>
 

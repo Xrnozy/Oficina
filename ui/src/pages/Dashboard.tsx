@@ -4,9 +4,10 @@ import { useOffice, useOfficeAgents, useOfficeApprovals, useOfficeQueue } from '
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { del, post, put, useQuery } from '../api';
+import { IntakeReview, Steps, useIntakeAgents } from '../intake';
 import {
   Avatar, Meter, Muted, ObsBadge, PageHeader, Panel, ProgressBar, RunControls, Segmented, SevChip, Skeleton, Stat, StatusChip,
-  Tag, act, fmtAgo, fmtIn, fmtNum, fmtUsd, pct, useCurrentRun,
+  Tag, act, fmtAgo, fmtIn, fmtNum, fmtUsd, goalTitle, pct, useCurrentRun,
 } from '../components';
 import { ArrowRight, CheckCircle2, Circle, ListPlus, Paperclip, Plus, Sparkles, X, XCircle, Zap } from 'lucide-react';
 import { DropZone, ReferencesPanel, fmtSize, precheck, uploadFiles, useFileDrop, type Attachment } from '../attachments';
@@ -279,6 +280,12 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
   const [files, setFiles] = useState<File[]>([]);
   const [thisRunOnly, setThisRunOnly] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Request step: an agent analyses the request into a summary the owner reviews before the run starts
+  const { data: intakeAgents } = useIntakeAgents(office?.id);
+  const { data: workflowList } = useQuery<any[]>(office ? `/workflows?workspaceId=${office.id}` : null, [office?.id]);
+  const [analyst, setAnalyst] = useState<string | null>(null);        // null: not chosen by hand — follow the workflow's Request node
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftFiles, setDraftFiles] = useState<Attachment[]>([]);
   const nav = useNavigate();
   const budgetNum = Number(budget);
   const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === office?.id);
@@ -290,26 +297,81 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
   const confirmPlan = !!office?.settings?.confirmPlan;
   const existing = (refs ?? []).filter((r) => !r.runId).length;
   const { over, props: drop } = useFileDrop((f) => setFiles((cur) => [...cur, ...f]));
+  const workflowAgent = (() => {
+    const w = workflowList?.find((x) => (workflowId ? (x.builtin ? 'builtin' : x.id) === workflowId : x.active && !x.builtin));
+    return (w?.intakeAgentId as string | undefined) ?? '';
+  })();
+  const pickable = (intakeAgents ?? []).filter((a) => a.available);
+  const analystId = analyst ?? (pickable.some((a) => a.id === workflowAgent) ? workflowAgent : '');
+  const analysing = !!analystId && !oneShot;
+  const resolveRepo = async () => {
+    let repoId = repoChoice || wsRepos[0]?.id;
+    if (custom) {
+      const repo = await act(post('/repos', { workspaceId: office!.id, path: repoPath.trim() }), 'Repo registered');
+      repoId = repo?.id;
+    }
+    return repoId as string | undefined;
+  };
+  const afterStart = (r: any) => {
+    setFiles([]); setDraftId(null); onCancel?.();
+    if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
+  };
+  if (draftId) {
+    const repoPathShown = custom ? repoPath : wsRepos.find((r: any) => r.id === (repoChoice || wsRepos[0]?.id))?.path ?? '';
+    const runSettings = (
+      <>
+        <div className="text-xs text-fg-3 space-y-1.5">
+          <div className="flex justify-between gap-2"><span>Repository</span><span className="mono truncate text-fg-2" title={repoPathShown}>{repoPathShown.split(/[\\/]/).filter(Boolean).pop()}</span></div>
+          <div className="flex justify-between gap-2"><span>Budget</span><span className="num text-fg-2">${budgetNum || 0}</span></div>
+        </div>
+        {draftFiles.length > 0 && (
+          <label className="flex items-start gap-2 text-xs text-fg-3 cursor-pointer"><input type="checkbox" className="mt-0.5" checked={thisRunOnly} onChange={(e) => setThisRunOnly(e.target.checked)} /> Use the files for this run only <span className="text-fg-4">(otherwise they stay as the office's references)</span></label>
+        )}
+      </>
+    );
+    return (
+      <div className="panel overflow-hidden animate-rise">
+        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-line flex-wrap">
+          <span className="w-7 h-7 rounded-lg bg-raised border border-line grid place-items-center"><Sparkles size={14} /></span>
+          <h2 className="text-[15px] font-semibold leading-tight">Review your request{office && <span className="ml-2 text-xs font-normal text-fg-3">in {office.name}</span>}</h2>
+          <div className="ml-auto"><Steps at={2} /></div>
+        </div>
+        <IntakeReview draftId={draftId} files={draftFiles} busy={busy} aside={runSettings} approveLabel={confirmPlan ? 'Approve and draft the plan' : 'Approve and start'}
+          onDiscard={() => { for (const a of draftFiles) void del(`/attachments/${a.id}`).catch(() => undefined); setDraftId(null); setDraftFiles([]); }}
+          onApprove={async () => {
+            setBusy(true);
+            const repoId = await resolveRepo();
+            if (!repoId) { setBusy(false); return; }
+            const r = await act(post(`/intake/drafts/${draftId}/approve`, { budgetUsd: budgetNum, repoId, workflowId: workflowId || undefined, thisRunOnly, queueId: prefill?.queueId }),
+              confirmPlan ? 'Approved — review the PM\'s plan' : 'Approved — sent to the PM');
+            setBusy(false);
+            if (r?.id) afterStart(r);
+          }} />
+      </div>
+    );
+  }
   return (
     <form {...drop} className={`panel overflow-hidden animate-rise transition-shadow ${over ? 'ring-2 ring-fg/30' : ''}`} onSubmit={async (e) => {
       e.preventDefault();
       if (invalid) return;
       setBusy(true);
-      let repoId = repoChoice || wsRepos[0]?.id;
-      if (custom) {
-        const repo = await act(post('/repos', { workspaceId: office!.id, path: repoPath.trim() }), 'Repo registered');
-        repoId = repo?.id;
-        if (!repoId) { setBusy(false); return; }
-      }
-      // reference files first, so the PM's very first prompt already lists them
+      const repoId = await resolveRepo();
+      if (!repoId) { setBusy(false); return; }
+      // reference files first, so the PM's very first prompt (or the analyst) already lists them
       const sendable = files.filter((f) => !precheck(f));
       const stored = sendable.length ? await uploadFiles(sendable, { workspaceId: office!.id, scope: 'project' }, { quiet: true }) : [];
+      if (analysing) {
+        const dr = await act(post('/intake/drafts', { workspaceId: office!.id, repoId, agentId: analystId, request: goal.trim(), attachmentIds: stored.map((a) => a.id) }));
+        setBusy(false);
+        if (dr?.id) { setDraftFiles(stored); setDraftId(dr.id); setFiles([]); }
+        else for (const a of stored) void del(`/attachments/${a.id}`).catch(() => undefined);
+        return;
+      }
       const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined, queueId: prefill?.queueId,
         attachmentIds: thisRunOnly ? stored.map((a) => a.id) : undefined }),
         oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
       setBusy(false);
-      if (r?.id) { setFiles([]); onCancel?.(); }
-      if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
+      if (r?.id) afterStart(r);
     }}>
       <div className="flex items-center gap-3 px-5 py-3.5 border-b border-line flex-wrap">
         <span className="w-7 h-7 rounded-lg bg-raised border border-line grid place-items-center"><Sparkles size={14} /></span>
@@ -317,6 +379,7 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
           <h2 className="text-[15px] font-semibold leading-tight">New run{office && <span className="ml-2 text-xs font-normal text-fg-3">in {office.name}</span>}</h2>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <Steps at={1} />
           <Segmented value={mode} options={['guided', 'one-shot'] as const} onChange={setMode} />
           {onCancel && <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={onCancel} aria-label="Cancel"><X size={15} /></button>}
         </div>
@@ -383,6 +446,16 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
             <WorkflowSelect wsId={office?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
           </label>
           <label className="block">
+            <span className="field-label">Analyse the request with</span>
+            <Select className="input input-sm w-full" value={oneShot ? '' : analystId} disabled={oneShot} onChange={(e) => setAnalyst(e.target.value)} aria-label="Agent that analyses the request">
+              <option value="">No one — send straight to the PM</option>
+              {pickable.map((a) => <option key={a.id} value={a.id}>{a.name}{a.id === workflowAgent ? ' · set on the workflow' : ''}</option>)}
+            </Select>
+            <span className="block text-2xs text-fg-4 mt-1 leading-4">
+              {oneShot ? 'Not used for one-shot runs.' : analystId ? 'It turns your request and files into features, technologies, issues and references. You review them before anything starts.' : 'Pick an agent to check and structure your request with you first. The Request node of a workflow can preselect one.'}
+            </span>
+          </label>
+          <label className="block">
             <span className="field-label whitespace-nowrap">Budget (USD)</span>
             <input className="input input-sm w-full num" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} aria-invalid={!(budgetNum > 0)} />
             {!(budgetNum > 0) && <span className="block text-2xs text-bad mt-1">Budget must be a positive number.</span>}
@@ -402,7 +475,7 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
                 if (r) { setGoal(''); onQueued?.(); }
               }}><ListPlus size={13} /> Queue for later</button>
           )}
-          <button className="btn btn-primary" disabled={invalid || busy}>{busy ? 'Starting…' : oneShot ? <><Zap size={13} /> Run once</> : <>{confirmPlan ? 'Draft plan' : 'Send to PM'} <ArrowRight size={14} /></>}</button>
+          <button className="btn btn-primary" disabled={invalid || busy}>{busy ? (analysing ? 'Analysing…' : 'Starting…') : oneShot ? <><Zap size={13} /> Run once</> : analysing ? <>Analyse request <ArrowRight size={14} /></> : <>{confirmPlan ? 'Draft plan' : 'Send to PM'} <ArrowRight size={14} /></>}</button>
         </div>
       </div>
     </form>
@@ -477,7 +550,13 @@ function RunCard({ run, detail, live }: { run: any; detail: any; live: boolean }
             {run.stopReason && run.status !== 'done' && <Tag tone="bad" mono>{run.stopReason}</Tag>}
             <span className="text-xs text-fg-3 mono">run {run.id.slice(-8)} · started {fmtAgo(run.startedAt)}{run.workflow ? ` · ${run.workflow.name} v${run.workflow.n}` : ''}</span>
           </div>
-          <h2 className="text-base font-semibold tracking-[-0.01em] leading-snug">{run.goal}</h2>
+          <h2 className="text-base font-semibold tracking-[-0.01em] leading-snug">{goalTitle(run.goal)}</h2>
+          {run.goal.trim() !== goalTitle(run.goal) && (
+            <details className="mt-1.5 text-sm text-fg-2 max-w-3xl">
+              <summary className="cursor-pointer select-none text-xs text-fg-3 hover:text-fg">Full request and reviewed breakdown</summary>
+              <div className="mt-1.5 whitespace-pre-wrap leading-6">{run.goal.trim()}</div>
+            </details>
+          )}
         </div>
         {run.status === 'dod-review'
           ? <Link to={`/dod/${run.id}`} className="btn btn-accent">Review DoD to start <ArrowRight size={14} /></Link>

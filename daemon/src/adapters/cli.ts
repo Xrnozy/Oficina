@@ -55,7 +55,9 @@ export const cliAdapter: Adapter = {
     const kind = ctx.workItem.kind;
     const fileWork = ['implement', 'fix', 'test', 'doc'].includes(kind);
     // (acceptance is the PM judging reports — it never needs the code either)
-    const orchestration = ['plan', 'prompt', 'prompt-review', 'accept', 'diagnose'].includes(kind);
+    // (request intake runs before a run exists: it reads the repository when there is one, otherwise it gets the desk)
+    const intakeKey = ctx.workItem.runId.startsWith('intake-') ? ctx.workItem.runId : null;
+    const orchestration = ['plan', 'prompt', 'prompt-review', 'accept', 'diagnose'].includes(kind) || (!!intakeKey && !ctx.repo);
     const desk = orchestration ? path.join(DATA_DIR, 'desks', ctx.agent.id.replace(/[^\w-]+/g, '_')) : null;
     if (desk) fs.mkdirSync(desk, { recursive: true });
     const cwd = desk ?? ctx.worktree ?? (fileWork ? null : ctx.repo?.path);
@@ -82,7 +84,8 @@ export const cliAdapter: Adapter = {
     try {
       let forceNew = false;
       for (let attempt = 0; ; attempt++) {
-        const acq = await acquireSession({ agent: ctx.agent, account: ctx.account, preset, cwd, itemId: ctx.workItem.id, support, stable, forceNew });
+        const acq = await acquireSession({ agent: ctx.agent, account: ctx.account, preset, cwd, itemId: ctx.workItem.id, support, stable, forceNew,
+          dedicated: intakeKey ? { key: intakeKey, label: `Request intake · ${ctx.agent.name} · ${intakeKey.slice(7, 13)}` } : undefined });
         const sess = acq.session;
         if (support) ctx.emit('agent.activity', { kind: 'status', text: `CLI session: ${acq.note}` });
 

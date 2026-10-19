@@ -20,6 +20,7 @@ export interface CliSessionRow {
   id: string; accountId: string | null; preset: string; agentId: string | null; label: string; cwd: string;
   externalId: string | null; started: boolean; status: 'active' | 'archived'; busyItem: string | null;
   uses: number; createdAt: string; lastUsedAt: string | null; lastItemId: string | null; note: string;
+  ownerKey: string | null;            // set: this session belongs to one thing (a request draft) and is never lent out
 }
 
 const toRow = (r: Record<string, unknown>): CliSessionRow => ({
@@ -28,6 +29,7 @@ const toRow = (r: Record<string, unknown>): CliSessionRow => ({
   started: !!r.started, status: (r.status as 'active' | 'archived') ?? 'active', busyItem: (r.busy_item as string | null) ?? null,
   uses: (r.uses as number) ?? 0, createdAt: r.created_at as string, lastUsedAt: (r.last_used_at as string | null) ?? null,
   lastItemId: (r.last_item_id as string | null) ?? null, note: (r.note as string) ?? '',
+  ownerKey: (r.owner_key as string | null) ?? null,
 });
 
 /** Directories compare equal regardless of case (Windows) and separators. */
@@ -50,13 +52,13 @@ export function listSessions(f: { accountId?: string; agentId?: string; includeA
   return rows.map((r) => ({ ...toRow(r), agentName: r.agent_id ? ((q1('SELECT name FROM agents WHERE id = ?', r.agent_id as string)?.name as string) ?? null) : null }));
 }
 
-export function createSession(o: { accountId: string | null; preset: string; agentId?: string | null; cwd: string; label?: string; externalId?: string | null; started?: boolean; note?: string }): CliSessionRow {
+export function createSession(o: { accountId: string | null; preset: string; agentId?: string | null; cwd: string; label?: string; externalId?: string | null; started?: boolean; note?: string; ownerKey?: string | null }): CliSessionRow {
   const id = ulid();
   const agentName = o.agentId ? (q1('SELECT name FROM agents WHERE id = ?', o.agentId)?.name as string | undefined) : undefined;
   const n = (q1('SELECT COUNT(*) c FROM cli_sessions WHERE agent_id IS ? AND preset = ?', o.agentId ?? null, o.preset)?.c as number) + 1;
   const label = (o.label ?? '').trim() || `${agentName ?? 'Shared'} · ${o.preset} #${n}`;
-  run(`INSERT INTO cli_sessions (id, account_id, preset, agent_id, label, cwd, external_id, started, status, uses, created_at, note)
-       VALUES (?,?,?,?,?,?,?,?, 'active', 0, ?, ?)`, id, o.accountId, o.preset, o.agentId ?? null, label, path.resolve(o.cwd), o.externalId ?? null, o.started ? 1 : 0, now(), o.note ?? '');
+  run(`INSERT INTO cli_sessions (id, account_id, preset, agent_id, label, cwd, external_id, started, status, uses, created_at, note, owner_key)
+       VALUES (?,?,?,?,?,?,?,?, 'active', 0, ?, ?, ?)`, id, o.accountId, o.preset, o.agentId ?? null, label, path.resolve(o.cwd), o.externalId ?? null, o.started ? 1 : 0, now(), o.note ?? '', o.ownerKey ?? null);
   emit('cli.session.created', 'owner', { sessionId: id, agentId: o.agentId ?? null, preset: o.preset, label });
   return getSession(id)!;
 }
@@ -110,11 +112,13 @@ function claim(row: CliSessionRow, itemId: string): CliSessionRow {
 export async function acquireSession(o: {
   agent: Agent; account: Account | null; preset: string; cwd: string; itemId: string;
   support: CliSessionSupport | null; stable: boolean; forceNew?: boolean;
+  /** this work has a session of its own (request intake): continued every time, never shared with the agent's other work */
+  dedicated?: { key: string; label: string };
 }): Promise<Acquired> {
   const st = cliSessionSettings(o.agent.settings);
   if (!o.support) return { session: null, resumed: false, note: 'this CLI has no session support configured, so every work item starts fresh' };
   if (!o.stable) return { session: null, resumed: false, note: "this work item runs in its own worktree, which can't continue an earlier session" };
-  if (st.mode === 'new' && !o.forceNew) return { session: null, resumed: false, note: 'this agent is set to start a new session each time' };
+  if (st.mode === 'new' && !o.forceNew && !o.dedicated) return { session: null, resumed: false, note: 'this agent is set to start a new session each time' };
 
   const cwdKey = normalizeCwd(o.cwd);
   const accountId = o.account?.id ?? null;
@@ -131,6 +135,19 @@ export async function acquireSession(o: {
     return { session: claimed, resumed: claimed.started && !!claimed.externalId, note: why };
   };
 
+  if (o.dedicated) {
+    const own = { ownerKey: o.dedicated.key, label: o.dedicated.label };
+    if (o.forceNew) return fresh('the previous session could not be continued', own);
+    const wait = Date.now() + MAX_WAIT_MS;
+    for (;;) {
+      const row = q1("SELECT * FROM cli_sessions WHERE owner_key = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1", o.dedicated.key);
+      const cur = row ? toRow(row) : null;
+      if (!cur || !usable(cur)) return fresh('first analysis of this request, so it got a session of its own', own);
+      if (!cur.busyItem) return use(cur, `continuing this request's own session (${cur.uses} earlier analys${cur.uses === 1 ? 'is' : 'es'})`);
+      if (Date.now() > wait) return fresh('this request\'s session stayed busy, so an additional one was started', own);
+      await sleep(500);
+    }
+  }
   if (o.forceNew) return fresh('the previous session could not be continued');
 
   if (st.mode === 'pinned') {
@@ -150,7 +167,7 @@ export async function acquireSession(o: {
   // reuse: this agent's own sessions first, then unassigned ones (imported, or released from another agent)
   const deadline = Date.now() + MAX_WAIT_MS;
   for (;;) {
-    const rows = q('SELECT * FROM cli_sessions WHERE (agent_id = ? OR agent_id IS NULL) ORDER BY (agent_id IS NULL), COALESCE(last_used_at, created_at) DESC', o.agent.id)
+    const rows = q('SELECT * FROM cli_sessions WHERE (agent_id = ? OR agent_id IS NULL) AND owner_key IS NULL ORDER BY (agent_id IS NULL), COALESCE(last_used_at, created_at) DESC', o.agent.id)
       .map(toRow).filter(usable);
     const eligible = rows.filter(fits);
     const free = eligible.find((r) => !r.busyItem);

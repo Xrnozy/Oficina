@@ -210,6 +210,15 @@ CREATE TABLE IF NOT EXISTS cli_sessions (
   busy_item TEXT, uses INTEGER DEFAULT 0, created_at TEXT, last_used_at TEXT, last_item_id TEXT, note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cli_sessions_agent ON cli_sessions(agent_id, status);
+-- Request intake: an agent turns the owner's request into a structured summary the owner reviews and refines before a run exists.
+-- items = [{id, kind, text, state: proposed|accepted|removed, ...}]; accepted and removed items are the owner's decisions.
+CREATE TABLE IF NOT EXISTS request_drafts (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, repo_id TEXT, agent_id TEXT NOT NULL, request TEXT NOT NULL,
+  notes TEXT DEFAULT '[]', summary TEXT DEFAULT '', items TEXT DEFAULT '[]', concerns TEXT DEFAULT '[]', ready INTEGER DEFAULT 0,
+  attachment_ids TEXT DEFAULT '[]', status TEXT NOT NULL, round INTEGER DEFAULT 0, error TEXT DEFAULT '',
+  cost_usd REAL DEFAULT 0, run_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_request_drafts ON request_drafts(workspace_id, status, updated_at);
 -- Reference files and task attachments (the files live under DATA_DIR/attachments, never in a repository).
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, run_id TEXT, scope TEXT NOT NULL, agent_id TEXT, task_id TEXT,
@@ -224,6 +233,7 @@ function addColumn(table: string, column: string, decl: string): void {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
   if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
+addColumn('cli_sessions', 'owner_key', `TEXT`);          // a session that belongs to one thing (a request draft) and is never lent to an agent's other work
 addColumn('skill_versions', 'content', `TEXT`);          // SKILL.md text the agents receive
 addColumn('skill_versions', 'source_dir', `TEXT`);       // where it was imported from
 addColumn('skills', 'category', `TEXT DEFAULT 'role'`);   // 'general' (reusable) | 'role' (role-specific)
