@@ -170,6 +170,7 @@ export interface Run {
   stopReason: string | null;
   progressScore: number;
   spentUsd: number;
+  workflowVersionId?: string | null;   // custom-graph version the run follows (null = built-in flow)
 }
 
 export interface Cycle {

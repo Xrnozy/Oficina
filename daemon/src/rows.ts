@@ -16,6 +16,7 @@ export function rowToRun(r: Record<string, unknown>): Run {
     planVersion: r.plan_version as number, startedAt: r.started_at as string | null,
     checkpointId: r.checkpoint_id as string | null, stopReason: r.stop_reason as string | null,
     progressScore: r.progress_score as number, spentUsd: r.spent_usd as number,
+    workflowVersionId: (r.workflow_version_id as string | null) ?? null,
   };
 }
 

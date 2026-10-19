@@ -179,6 +179,17 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   PRIMARY KEY (message_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS provider_tombstones (id TEXT PRIMARY KEY, removed_at TEXT);
+CREATE TABLE IF NOT EXISTS workflows (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+  description TEXT DEFAULT '', builtin INTEGER DEFAULT 0,
+  latest_version_id TEXT, created_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflows_ws ON workflows(workspace_id);
+CREATE TABLE IF NOT EXISTS workflow_versions (
+  id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, n INTEGER NOT NULL,
+  graph TEXT NOT NULL, note TEXT DEFAULT '', created_by TEXT DEFAULT 'owner', created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wfver ON workflow_versions(workflow_id, n);
 `);
 
 // Columns added after the first release — added in place, data kept.
@@ -196,6 +207,9 @@ addColumn('work_items', 'cache_key', `TEXT`);                      // (kind, pro
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_cache ON work_items(cache_key, status)`);
 addColumn('error_kb', 'repo_id', `TEXT`);                          // per-repo lessons (spec 6.5)
 addColumn('runs', 'summary_md', `TEXT`);                           // model-free end-of-run summary (spec 6.6)
+addColumn('runs', 'workflow_version_id', `TEXT`);                  // the graph version a run follows
+addColumn('work_items', 'workflow_node_id', `TEXT`);               // graph node that produced this item
+addColumn('work_items', 'workflow_edge_id', `TEXT`);               // …and the edge that led to it
 
 // Stage 7 indexes: the hot predicates that had only run_id indexes before
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_task ON work_items(task_id, status)`);

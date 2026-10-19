@@ -28,6 +28,10 @@ import type { AgentModelSettings, DodItem } from '../types.ts';
 import { modelSettings, settingsSupport, validateModelSettings } from '../services/models.ts';
 import { messagesForRun, unreadCountFor } from '../services/messages.ts';
 import { projectDoc } from '../services/projectDoc.ts';
+import {
+  cloneWorkflow, createWorkflow, deleteWorkflow, getWorkflow, listWorkflows,
+  rowToVersion, saveWorkflowVersion, setActiveWorkflow, validateWorkflow, validationSummary,
+} from '../services/workflow.ts';
 import { CATALOG_ADAPTERS, fetchCatalog, fetchProviderCatalog, syncProviderModels } from '../services/provider-catalog.ts';
 import { DEFAULT_BASE_URL } from '../services/api-catalog.ts';
 import { CLI_PRESETS, detectInstalledClis } from '../adapters/cli-resolve.ts';
@@ -373,6 +377,65 @@ export function createServer(port: number, uiDir: string): http.Server {
     const content = readBlob(`blob:${req.params.ref}`);
     if (content == null) return err(res, 404, 'blob not found');
     res.type('text/plain').send(content);
+  });
+
+  // ---------- workflows ----------
+  app.get('/api/workflows', (req, res) => {
+    const wsId = String(req.query.workspaceId ?? '');
+    if (!wsId) return err(res, 400, 'workspaceId required');
+    ok(res, listWorkflows(wsId));
+  });
+  app.post('/api/workflows/validate', (req, res) => {
+    const issues = validateWorkflow(req.body?.graph, req.body?.workspaceId);
+    ok(res, validationSummary(issues));
+  });
+  app.get('/api/workflows/:id', (req, res) => {
+    const w = getWorkflow(req.params.id);
+    if (!w) return err(res, 404, 'not found');
+    ok(res, { ...w, issues: w.graph ? validationSummary(validateWorkflow(w.graph, w.workflow.workspaceId)) : null });
+  });
+  app.get('/api/workflows/:id/versions/:n', (req, res) => {
+    const v = q1('SELECT * FROM workflow_versions WHERE workflow_id = ? AND n = ?', req.params.id, Number(req.params.n));
+    if (!v) return err(res, 404, 'version not found');
+    ok(res, { version: rowToVersion(v), graph: parseJson(v.graph as string, { nodes: [], edges: [] }) });
+  });
+  app.post('/api/workflows', (req, res) => {
+    const { workspaceId, name, description, graph } = req.body ?? {};
+    if (!workspaceId || !name) return err(res, 400, 'workspaceId and name required');
+    const r = createWorkflow(workspaceId, name, description ?? '', graph);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, { id: r.workflowId });
+  });
+  app.put('/api/workflows/:id', (req, res) => {
+    const { graph, note } = req.body ?? {};
+    if (!graph) return err(res, 400, 'graph required');
+    const r = saveWorkflowVersion(req.params.id, graph, note ?? '', 'owner');
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
+  });
+  app.post('/api/workflows/:id/clone', (req, res) => {
+    const r = cloneWorkflow(req.params.id, req.body?.name);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, { id: r.workflowId });
+  });
+  app.delete('/api/workflows/:id', (req, res) => {
+    const r = deleteWorkflow(req.params.id);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
+  });
+  app.post('/api/workflows/:id/activate', (req, res) => {
+    const w = getWorkflow(req.params.id);
+    if (!w) return err(res, 404, 'not found');
+    const r = setActiveWorkflow(w.workflow.workspaceId, req.params.id);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
+  });
+  app.post('/api/workflows/:id/deactivate', (req, res) => {
+    const w = getWorkflow(req.params.id);
+    if (!w) return err(res, 404, 'not found');
+    const r = setActiveWorkflow(w.workflow.workspaceId, null);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
   });
 
   // ---------- commands ----------
