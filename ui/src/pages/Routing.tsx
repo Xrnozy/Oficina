@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { put, useQuery } from '../api';
+import { post, put, useQuery } from '../api';
 import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, useCurrentRun, type Tone } from '../components';
 import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, Mail, Pencil, Plus, X } from 'lucide-react';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
@@ -9,9 +9,6 @@ import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } fr
 // on, and how the router picks between them. Every hand-off is automatic.
 // The Flow strip and the step panels both render the ACTIVE workflow graph —
 // the same source of truth the Workflow editor draws and the engine walks.
-
-const EXTRA_ROLES = ['docs', 'analyst', 'reviewer', 'prompt-creator'];
-const ROLE_LABEL: Record<string, string> = { pm: 'PM', developer: 'Developer', qa: 'Tester (review & validate)', docs: 'Docs', analyst: 'Analyst', reviewer: 'Reviewer', 'prompt-creator': 'Prompt Creator' };
 
 const STRATEGIES = ['smart', 'fixed'] as const;
 const STRATEGY_HELP: Record<string, string> = {
@@ -139,6 +136,58 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
   );
 }
 
+// One agent node's routing panel: the node's model-tier override and prompt
+// budget (node.config — the same fields the Workflow inspector edits), then
+// the ordered model options of every agent the node can dispatch to.
+function NodeRouting({ step, rv, agents, providers, onSaved }: { step: RoutingStep; rv: RoutingView; agents: any[]; providers: any; onSaved: () => void }) {
+  const editable = rv.custom;
+  const [tier, setTier] = useState(step.modelTier ?? '');
+  const [budget, setBudget] = useState(step.budgetChars != null ? String(step.budgetChars) : '');
+  useEffect(() => { setTier(step.modelTier ?? ''); setBudget(step.budgetChars != null ? String(step.budgetChars) : ''); }, [step.nodeId, step.modelTier, step.budgetChars]);
+  const dirty = tier !== (step.modelTier ?? '') || budget !== (step.budgetChars != null ? String(step.budgetChars) : '');
+  const save = async () => {
+    const r = await act(put(`/workflows/${rv.workflow.id}/nodes/${step.nodeId}`, {
+      modelTier: tier || null,
+      budgetChars: budget ? Number(budget) : null,
+    }), `${step.label}: routing saved — a new workflow version`);
+    if (r) onSaved();
+  };
+  const full = (id: string) => agents.find((a) => a.id === id);
+  return (
+    <div className="space-y-3">
+      <div className="flex items-end gap-3 flex-wrap rounded-lg border border-line/70 bg-raised/40 px-3 py-2">
+        <label className="text-xs text-fg-3">model tier override
+          <select className="input input-sm block mt-0.5" value={tier} disabled={!editable} onChange={(e) => setTier(e.target.value)}
+            title={editable ? 'Force the tier the router requires for this step' : 'The default pipeline is read-only — clone it in Workflow'}>
+            <option value="">auto — by kind &amp; difficulty</option>
+            <option value="fast">fast</option>
+            <option value="standard">standard</option>
+            <option value="strong">strong</option>
+          </select>
+        </label>
+        <label className="text-xs text-fg-3">token budget
+          <input className="input input-sm block mt-0.5 w-28" type="number" min={0} value={budget} disabled={!editable} placeholder="auto"
+            onChange={(e) => setBudget(e.target.value)} title="Prompt + context-pack budget in chars (~4 chars per token)" />
+        </label>
+        {dirty && editable && <button className="btn btn-sm btn-primary" onClick={save}>Save</button>}
+        {dirty && editable && <button className="btn btn-sm btn-ghost" onClick={() => { setTier(step.modelTier ?? ''); setBudget(step.budgetChars != null ? String(step.budgetChars) : ''); }}>Reset</button>}
+        {!editable && <Muted>read-only — clone the workflow in Workflow to tune per-step</Muted>}
+        {step.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>! {w}</Tag>)}
+      </div>
+      {step.agents.map((a) => {
+        const fa = full(a.id);
+        return fa ? <AgentModels key={a.id} agent={fa} providers={providers} onSaved={onSaved} /> : null;
+      })}
+      {!step.agents.length && (
+        <Muted>
+          {step.agentId ? 'The pinned agent is gone — pick another in ' : step.role ? `No agent holds the "${step.role}" role — ` : 'This node names no agent or role — '}
+          <Link to={step.agentId || step.role ? `/workflow?node=${step.nodeId}` : '/office'} className="underline">{step.agentId || step.role ? 'the editor' : 'assign one'}</Link>.
+        </Muted>
+      )}
+    </div>
+  );
+}
+
 // One step on the flow strip — a workflow node. Click opens it in the editor.
 function StepCard({ s }: { s: RoutingStep }) {
   return (
@@ -251,8 +300,6 @@ export default function Routing() {
   const commitMode: (typeof COMMIT_MODES)[number] = s.commitMode === 'auto' ? 'auto' : s.commitMode === 'manual' ? 'manual' : 'approve';
   const approvalMode: (typeof APPROVAL_MODES)[number] = s.approvalMode === 'ask-when-risky' ? 'ask-when-risky' : s.approvalMode === 'auto' ? 'auto' : 'always-ask';
   const setting = (patch: Record<string, unknown>, msg: string) => ws && act(put(`/workspaces/${ws.id}/settings`, patch), msg).then(reloadWs);
-  const holders = (role: string) => (agents ?? []).filter((a) => (a.memberships ?? []).some((m: any) => m.role === role && m.active && m.workspace_id === ws?.id));
-  const roles = ['pm', 'prompt-creator', 'developer', 'qa', ...EXTRA_ROLES.filter((r) => r !== 'prompt-creator' && holders(r).length)];
   const reload = () => { reloadAgents(); reloadProviders(); };
 
   return (
@@ -290,14 +337,42 @@ export default function Routing() {
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-5 items-start [&>*]:min-w-0">
         <div className="space-y-5">
-          {roles.map((role) => (
-            <Panel key={role} title={ROLE_LABEL[role] ?? role}>
-              <div className="space-y-3">
-                {holders(role).map((a) => <AgentModels key={a.id} agent={a} providers={providers} onSaved={reload} />)}
-                {!holders(role).length && <Muted>No agent holds this role — <Link to="/office" className="underline">assign one</Link>.</Muted>}
-              </div>
+          {(rv?.agentNodes ?? []).map((step) => (
+            <Panel key={step.nodeId}
+              title={
+                <span className="flex items-center gap-2 flex-wrap">
+                  <Link to={`/workflow?node=${step.nodeId}`} className="hover:underline">{step.label}</Link>
+                  {step.purpose && <Tag tone="idle">{PURPOSE_LABEL[step.purpose] ?? step.purpose}</Tag>}
+                  {step.scope === 'run' && <Tag tone="idle">once per run</Tag>}
+                  {step.disabled && <Tag tone="idle">bypassed</Tag>}
+                </span>
+              }>
+              <NodeRouting step={step} rv={rv!} agents={agents ?? []} providers={providers} onSaved={() => { reloadRv(); reload(); }} />
             </Panel>
           ))}
+          {rv && rv.notInWorkflow.length > 0 && (
+            <details className="panel">
+              <summary className="px-4 py-3 text-[13px] font-medium text-fg-3 cursor-pointer select-none">
+                Not in the workflow ({rv.notInWorkflow.length})
+              </summary>
+              <div className="px-4 pb-4 space-y-1.5">
+                {rv.notInWorkflow.map((a) => (
+                  <div key={a.id} className="flex items-center gap-2 text-xs rounded-lg border border-line px-3 py-2">
+                    <Avatar agent={{ name: a.name, avatar: a.avatar ?? undefined }} size="sm" />
+                    <span className="font-medium text-fg">{a.name}</span>
+                    <span className="text-fg-4">{a.roles.join(', ')}</span>
+                    <button
+                      className="btn btn-ghost btn-xs ml-auto"
+                      disabled={!rv.custom}
+                      title={rv.custom ? 'Pin this agent on a new node before Done' : 'Clone the workflow in Workflow to customise the default pipeline'}
+                      onClick={() => void act(post(`/workflows/${rv.workflow.id}/add-node`, { agentId: a.id }), `${a.name} added to the workflow`).then((r) => r && reloadRv())}
+                    ><Plus size={11} /> Add to workflow</button>
+                  </div>
+                ))}
+                {!rv.custom && <Muted>These agents are off the canvas — the default pipeline is read-only; clone it in Workflow to customise.</Muted>}
+              </div>
+            </details>
+          )}
         </div>
 
         <div className="space-y-5">
