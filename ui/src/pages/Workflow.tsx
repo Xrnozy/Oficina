@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import { downloadJson, fileSlug, readJsonFile, useOffice } from '../office';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -363,12 +364,12 @@ function ConditionBuilder({ value, onChange }: { value: WfCondition | undefined;
           {i > 0 && (
             <button className="chip !h-5 shrink-0" onClick={() => setLeaves(leaves, joiner === 'and' ? 'or' : 'and')} title="Toggle and/or">{joiner}</button>
           )}
-          <select className="inp !h-6 !text-2xs flex-1 min-w-0" value={l.field ?? 'step.status'} onChange={(e) => update(i, { field: e.target.value })}>
+          <Select className="inp !h-6 !text-2xs flex-1 min-w-0" value={l.field ?? 'step.status'} onChange={(e) => update(i, { field: e.target.value })}>
             {COND_FIELDS.map((f) => <option key={f.field} value={f.field}>{f.label}</option>)}
-          </select>
-          <select className="inp !h-6 !text-2xs w-[74px] shrink-0" value={l.op ?? 'eq'} onChange={(e) => update(i, { op: e.target.value as WfCondition['op'] })}>
+          </Select>
+          <Select className="inp !h-6 !text-2xs w-[74px] shrink-0" value={l.op ?? 'eq'} onChange={(e) => update(i, { op: e.target.value as WfCondition['op'] })}>
             {COND_OPS.map((o) => <option key={o.op} value={o.op}>{o.label}</option>)}
-          </select>
+          </Select>
           {!['truthy', 'falsy'].includes(l.op ?? 'eq') && (
             <input className="inp !h-6 !text-2xs w-[86px] shrink-0" value={String(l.value ?? '')} placeholder="value"
               onChange={(e) => update(i, { value: /^\d+$/.test(e.target.value) ? Number(e.target.value) : e.target.value })} />
@@ -385,7 +386,7 @@ function ConditionBuilder({ value, onChange }: { value: WfCondition | undefined;
 // ---------------------------------------------------------------------------
 // inspectors (right panel)
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <div className="mb-3"><span className="field-label">{label}</span>{children}</div>;
+  return <div className="mb-3 min-w-0"><span className="field-label truncate" title={label}>{label}</span>{children}</div>;
 }
 
 // ---------------------------------------------------------------------------
@@ -585,39 +586,39 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
         <>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Role">
-              <select className="inp" value={n.role ?? ''} onChange={(e) => set({ role: e.target.value || undefined, agentId: undefined })}>
+              <Select className="inp" value={n.role ?? ''} onChange={(e) => set({ role: e.target.value || undefined, agentId: undefined })}>
                 <option value="">— pick —</option>
                 {roles.map((r) => <option key={r.id} value={r.name}>{roleLabel(r.name)}</option>)}
-              </select>
+              </Select>
             </Field>
-            <Field label="Pinned agent (optional)">
-              <select className="inp" value={n.agentId ?? ''} onChange={(e) => set({ agentId: e.target.value || undefined })}>
+            <Field label="Pinned agent">
+              <Select className="inp" value={n.agentId ?? ''} onChange={(e) => set({ agentId: e.target.value || undefined })}>
                 <option value="">any in role</option>
                 {wsAgents.filter((a) => !n.role || (a.memberships ?? []).some((m) => m.role === n.role && m.workspace_id === wsId)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
+              </Select>
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Purpose">
-              <select className="inp" value={cfg.purpose ?? 'custom'} onChange={(e) => setCfg({ purpose: e.target.value })}>
+              <Select className="inp" value={cfg.purpose ?? 'custom'} onChange={(e) => setCfg({ purpose: e.target.value })}>
                 {PURPOSES.map((p) => <option key={p} value={p}>{PURPOSE_LABEL[p] ?? p}</option>)}
-              </select>
+              </Select>
             </Field>
             <Field label="Scope">
-              <select className="inp" value={cfg.scope ?? 'task'} onChange={(e) => setCfg({ scope: e.target.value as 'task' | 'run' })}>
+              <Select className="inp" value={cfg.scope ?? 'task'} onChange={(e) => setCfg({ scope: e.target.value as 'task' | 'run' })}>
                 <option value="task">per task</option>
                 <option value="run">once per run</option>
-              </select>
+              </Select>
             </Field>
           </div>
           <Field label="Instructions (added to the prompt)">
             <textarea className="inp min-h-[64px] text-xs" value={cfg.instructions ?? ''} placeholder="e.g. only touch files under src/" onChange={(e) => setCfg({ instructions: e.target.value || undefined })} />
           </Field>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-x-2">
             <Field label="Model tier">
-              <select className="inp" value={cfg.modelTier ?? ''} onChange={(e) => setCfg({ modelTier: (e.target.value || undefined) as 'fast' | 'standard' | 'strong' | undefined })}>
+              <Select className="inp" value={cfg.modelTier ?? ''} onChange={(e) => setCfg({ modelTier: (e.target.value || undefined) as 'fast' | 'standard' | 'strong' | undefined })}>
                 <option value="">auto</option><option value="fast">fast</option><option value="standard">standard</option><option value="strong">strong</option>
-              </select>
+              </Select>
             </Field>
             <Field label="Budget (chars)"><input className="inp" type="number" min={0} value={cfg.budgetChars ?? ''} placeholder="auto" onChange={(e) => setCfg({ budgetChars: e.target.value ? Number(e.target.value) : undefined })} /></Field>
             <Field label="Timeout (min)"><input className="inp" type="number" min={0} value={cfg.timeoutMin ?? ''} placeholder="auto" onChange={(e) => setCfg({ timeoutMin: e.target.value ? Number(e.target.value) : undefined })} /></Field>
@@ -627,14 +628,14 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
             <span>Bypassed — the engine passes through this step without dispatching<span className="block text-fg-4 mt-0.5">The step stays on the canvas, greyed on Routing, and still counts for structure (merge arrivals, edges).</span></span>
           </label>
           <Field label="Inputs — what the prompt carries">
-            <select className="inp" value={inputsMode} onChange={(e) => {
+            <Select className="inp" value={inputsMode} onChange={(e) => {
               const v = e.target.value;
               setCfg({ inputs: v === 'named' ? [] : (v as 'envelope' | 'full') });
             }}>
               <option value="envelope">hand-off envelope (default)</option>
               <option value="full">full previous output</option>
               <option value="named">outputs of specific earlier nodes</option>
-            </select>
+            </Select>
           </Field>
           {inputsMode === 'named' && (
             <Field label="Include outputs of">
@@ -666,10 +667,10 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
       )}
       {n.type === 'merge' && (
         <Field label="Wait for">
-          <select className="inp" value={cfg.mergeMode ?? 'all'} onChange={(e) => setCfg({ mergeMode: e.target.value as 'all' | 'any' })}>
+          <Select className="inp" value={cfg.mergeMode ?? 'all'} onChange={(e) => setCfg({ mergeMode: e.target.value as 'all' | 'any' })}>
             <option value="all">all incoming branches</option>
             <option value="any">the first branch to arrive</option>
-          </select>
+          </Select>
         </Field>
       )}
       {n.type === 'human' && (
@@ -701,9 +702,9 @@ function EdgeInspector({ edge, fromNode, onChange, onDelete }: { edge: Edge; fro
         <button className="btn btn-ghost btn-xs ml-auto" onClick={onDelete}><Trash2 size={11} /> Delete</button>
       </div>
       <Field label="Kind">
-        <select className="inp" value={e.kind} onChange={(ev) => set({ kind: ev.target.value as WfEdgeKind })}>
+        <Select className="inp" value={e.kind} onChange={(ev) => set({ kind: ev.target.value as WfEdgeKind })}>
           {EDGE_KINDS.map((k) => <option key={k.kind} value={k.kind}>{k.kind} — {k.hint}</option>)}
-        </select>
+        </Select>
       </Field>
       <Field label="Label"><input className="inp" value={e.label ?? ''} placeholder="shown on the edge" onChange={(ev) => set({ label: ev.target.value || undefined })} /></Field>
       {fromCondition && (
@@ -777,8 +778,9 @@ function WorkflowEditor() {
   const { data: templates } = useQuery<WfTemplate[]>('/workflows/templates');
 
   const { screenToFlowPosition, fitView } = useReactFlow();
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [rightOpen, setRightOpen] = useState(true);
+  const [leftOpen, setLeftOpen] = useState(() => window.innerWidth >= 1100);
+  const [rightOpen, setRightOpen] = useState(() => window.innerWidth >= 1400);
+  const [legendOpen, setLegendOpen] = useState(() => window.innerWidth >= 1500);
   const [hintOpen, setHintOpen] = useState(() => { try { return localStorage.getItem('wf-hint-dismissed') !== '1'; } catch { return true; } });
   // the canvas changes size when a side panel opens or closes: refit so the graph uses the room
   useEffect(() => { const t = setTimeout(() => fitView({ padding: 0.14, maxZoom: 1, duration: 200 }), 60); return () => clearTimeout(t); }, [leftOpen, rightOpen, fitView]);
@@ -1333,11 +1335,11 @@ function WorkflowEditor() {
       <div className="h-12 shrink-0 border-b border-line bg-surface px-3 flex items-center gap-2 overflow-x-auto">
         <button className="btn btn-ghost btn-xs" onClick={() => setLeftOpen((o) => !o)} title={leftOpen ? 'Hide the agent list' : 'Show the agent list'} aria-pressed={leftOpen}><PanelLeft size={15} /></button>
         <GitBranch size={15} className="text-fg-3 shrink-0" />
-        <select className="input input-sm !w-auto max-w-[260px] font-medium" value={wfId ?? ''} onChange={(e) => setWfId(e.target.value)} aria-label="Workflow">
+        <Select className="input input-sm !w-auto min-w-[11rem] max-w-[190px] 2xl:max-w-[340px] font-medium" value={wfId ?? ''} onChange={(e) => setWfId(e.target.value)} aria-label="Workflow">
           {(wflist ?? []).map((w) => <option key={w.id} value={w.id}>{w.builtin ? 'Standard pipeline (read-only)' : w.name}{w.active ? '  ● active' : ''}</option>)}
           {!wflist?.length && <option value="">No workflows yet</option>}
-        </select>
-        <button className="btn btn-sm shrink-0" onClick={createNew}><FilePlus2 size={14} /> New</button>
+        </Select>
+        <button className="btn btn-sm shrink-0" onClick={createNew}><FilePlus2 size={14} /><span className="hidden 2xl:inline">New</span></button>
         {detail && (
           <div className="hidden md:flex items-center gap-1.5 shrink-0">
             {detail.versions.length > 0 && <span className="chip">v{detail.versions[detail.versions.length - 1]?.n ?? '?'}</span>}
@@ -1355,20 +1357,20 @@ function WorkflowEditor() {
               <button className="btn btn-xs" onClick={deleteSelection} disabled={!selNodes.length && !selEdges.length} title="Delete the selection (Del)"><Scissors size={13} /></button>
             </>
           )}
-          <button className="btn btn-xs" onClick={tidyUp} title={readOnly ? 'Rearrange the steps left to right (only changes your view)' : 'Tidy the layout, left to right'}><ArrowLeftRight size={13} /> Tidy up</button>
-          <button className="btn btn-xs" onClick={() => fitView({ padding: 0.14, maxZoom: 1, duration: 250 })} title="Zoom to show the whole flow"><Maximize2 size={13} /> Fit</button>
-          <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run: walk through the flow with pretend results. No model calls."><FlaskConical size={13} /> Dry run</button>
-          {detail && <button className="btn btn-xs" onClick={() => setShowVersions(true)} title="Saved versions and who changed what"><HistoryIcon size={13} /> History</button>}
-          {detail && <button className="btn btn-xs" onClick={() => void exportFlow()} title="Download this workflow as a file that works in any office"><Download size={13} /> Export</button>}
+          <button className="btn btn-xs" onClick={tidyUp} title={readOnly ? 'Rearrange the steps left to right (only changes your view)' : 'Tidy the layout, left to right'}><ArrowLeftRight size={13} /><span className="hidden 2xl:inline">Tidy up</span></button>
+          <button className="btn btn-xs" onClick={() => fitView({ padding: 0.14, maxZoom: 1, duration: 250 })} title="Zoom to show the whole flow"><Maximize2 size={13} /><span className="hidden 2xl:inline">Fit</span></button>
+          <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run: walk through the flow with pretend results. No model calls."><FlaskConical size={13} /><span className="hidden 2xl:inline">Dry run</span></button>
+          {detail && <button className="btn btn-xs" onClick={() => setShowVersions(true)} title="Saved versions and who changed what"><HistoryIcon size={13} /><span className="hidden 2xl:inline">History</span></button>}
+          {detail && <button className="btn btn-xs" onClick={() => void exportFlow()} title="Download this workflow as a file that works in any office"><Download size={13} /><span className="hidden 2xl:inline">Export</span></button>}
           <label className="btn btn-xs cursor-pointer" title="Add a workflow from a file to this office">
-            <Upload size={13} /> Import
+            <Upload size={13} /><span className="hidden 2xl:inline">Import</span>
             <input type="file" accept=".json,application/json" className="hidden" onChange={(e) => { void importFlow(e.target.files?.[0]); e.target.value = ''; }} />
           </label>
           <span className="w-px h-5 bg-line mx-1" />
           {detail && builtin && <button className="btn btn-accent btn-xs" onClick={cloneWf}><Copy size={13} /> Clone to edit</button>}
           {detail && !builtin && (
             <>
-              <button className="btn btn-xs" onClick={cloneWf} title="Make a copy"><Copy size={13} /> Clone</button>
+              <button className="btn btn-xs" onClick={cloneWf} title="Make a copy"><Copy size={13} /><span className="hidden 2xl:inline">Clone</span></button>
               <button className="btn btn-primary btn-xs" onClick={() => void save()} disabled={hasErrors || !dirty} title={hasErrors ? 'Fix the problems first' : 'Save as a new version (Ctrl+S)'}><Save size={13} /> Save</button>
               {detail.workflow.active
                 ? <button className="btn btn-danger btn-xs" onClick={() => void setActive(false)}><Ban size={13} /> Deactivate</button>
@@ -1470,13 +1472,15 @@ function WorkflowEditor() {
             )}
             <Panel position="top-right" className="!m-3 flex flex-col items-end gap-1.5">
               {wfRuns.length > 0 && (
-                <select className="input input-sm !w-auto" value={liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Show where a run actually went on this workflow">
+                <Select className="input input-sm !w-auto" value={liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Show where a run actually went on this workflow">
                   {wfRuns.map((r) => <option key={r.id} value={r.id}>{r.id === run?.id ? '● ' : ''}run {r.id.slice(0, 8)} · {r.status}</option>)}
-                </select>
+                </Select>
               )}
               <div className="card px-2.5 py-2 text-2xs text-fg-3 space-y-1">
-                <div className="font-medium text-fg-2">Lines</div>
-                {EDGE_KINDS.map((k) => (
+                <button className="flex w-full items-center justify-between gap-3 font-medium text-fg-2" onClick={() => setLegendOpen((o) => !o)} aria-expanded={legendOpen} title="Show or hide what each line colour means">
+                  Lines <span className="text-fg-4 font-normal">{legendOpen ? 'hide' : 'show'}</span>
+                </button>
+                {legendOpen && EDGE_KINDS.map((k) => (
                   <div key={k.kind} className="flex items-center gap-2">
                     <svg width="26" height="6" aria-hidden><line x1="0" y1="3" x2="26" y2="3" stroke={EDGE_STYLE[k.kind].stroke} strokeWidth="2" strokeDasharray={EDGE_STYLE[k.kind].dash} /></svg>
                     <span>{EDGE_SHORT[k.kind]}</span>
@@ -1649,12 +1653,12 @@ function WorkflowEditor() {
             {nodes.filter((n) => n.data.wf.type === 'agent').map((n) => (
               <div key={n.id} className="flex items-center gap-2 text-xs">
                 <span className="truncate flex-1">{n.data.wf.label}</span>
-                <select className="inp !h-6 !text-2xs !w-32" value={simOutcomes[n.id] ?? 'success'}
+                <Select className="inp !h-6 !text-2xs !w-32" value={simOutcomes[n.id] ?? 'success'}
                   onChange={(e) => setSimOutcomes((o) => ({ ...o, [n.id]: e.target.value }))}>
                   <option value="success">succeeds</option>
                   <option value="failure">fails</option>
                   <option value="reject">rejects</option>
-                </select>
+                </Select>
               </div>
             ))}
           </div>

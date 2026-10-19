@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useEffect, useState } from 'react';
 import { del, get, post, put, useQuery } from '../api';
 import { Empty, Meter, Modal, PageHeader, Panel, Skeleton, Tag, act, fmtIn, fmtNum, fmtUsd, type Tone } from '../components';
@@ -83,14 +84,14 @@ function ModelPicker({ value, onChange, required, catalog, hint }: { value: stri
   const isCustom = custom || (value !== '' && !catalog.loading && !uids.includes(value));
   return (
     <span className="block space-y-2">
-      <select className="input w-full" disabled={catalog.loading} value={isCustom ? '__custom' : value} onChange={(e) => {
+      <Select className="input w-full" disabled={catalog.loading} value={isCustom ? '__custom' : value} onChange={(e) => {
         if (e.target.value === '__custom') { setCustom(true); onChange(''); }
         else { setCustom(false); onChange(e.target.value); }
       }}>
         <option value="">{catalog.loading ? 'loading models from provider…' : required ? (uids.length ? 'pick a model' : '— no models listed —') : 'provider default'}</option>
         {uids.map((m) => <option key={m} value={m}>{labelOf(m) === m ? m : `${labelOf(m)} (${m})`}</option>)}
         <option value="__custom">custom…</option>
-      </select>
+      </Select>
       {isCustom && <input className="input w-full font-mono" autoFocus placeholder="exact model name" value={value} onChange={(e) => onChange(e.target.value)} />}
       {catalog.error
         ? <span className="text-xs text-warn block">Couldn't list models: {catalog.error}</span>
@@ -328,9 +329,9 @@ export default function Providers() {
               <label className="block"><span className="field-label">$ / 1M output</span><input className="input w-full num" type="number" step="0.01" min={0} value={addModel.priceOut} onChange={(e) => setAddModel({ ...addModel, priceOut: +e.target.value })} /></label>
             </div>
             <label className="block"><span className="field-label">Strength</span>
-              <select className="input w-full" value={addModel.strengthTier} onChange={(e) => setAddModel({ ...addModel, strengthTier: e.target.value })}>
+              <Select className="input w-full" value={addModel.strengthTier} onChange={(e) => setAddModel({ ...addModel, strengthTier: e.target.value })}>
                 <option value="fast">fast — cheap, simple tasks</option><option value="standard">standard</option><option value="strong">strong — hard tasks</option>
-              </select>
+              </Select>
             </label>
             <p className="text-xs text-fg-4">Prices let the Office compute cost per call; leave 0 if unknown (costs then show as estimates).</p>
           </div>
@@ -351,14 +352,14 @@ export default function Providers() {
         </>}>
           <div className="space-y-3.5">
             <label className="block"><span className="field-label">Kind</span>
-              <select className="input w-full" value={form.kind} onChange={(e) => {
+              <Select className="input w-full" value={form.kind} onChange={(e) => {
                 const kind = e.target.value; setFormErr('');
                 if (kind !== 'cli') { setForm({ ...form, kind, id: kind === 'devin' ? 'devin' : form.id, timeoutSec: kind === 'devin' ? 3600 : form.timeoutSec }); return; }
                 const pick = installed[0];
                 setForm({ ...form, kind, model: '', ...(pick ? { preset: pick.id, id: PRESET_IDS[pick.id] ?? `${pick.id}-cli`, command: pick.command } : { command: '' }) });
               }}>
                 {Object.keys(KIND_HELP).map((k) => <option key={k} value={k}>{k}</option>)}
-              </select>
+              </Select>
               <span className="text-xs text-fg-4 mt-1 block">{KIND_HELP[form.kind]}</span>
             </label>
             {form.kind === 'cli' && (

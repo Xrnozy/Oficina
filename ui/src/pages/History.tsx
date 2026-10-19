@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { get, post, useEvents, useFetch, useQuery } from '../api';
@@ -23,9 +24,9 @@ function useRepo() {
   const [repoId, setRepoId] = useState<string>('');
   useEffect(() => { if (!repoId && repos?.length) setRepoId(run?.repoId ?? repos[0].id); }, [repos, run?.repoId]); // eslint-disable-line react-hooks/exhaustive-deps
   const picker = (
-    <select className="input input-sm max-w-[22rem]" value={repoId} onChange={(e) => setRepoId(e.target.value)} aria-label="Repository">
+    <Select className="input input-sm max-w-[22rem]" value={repoId} onChange={(e) => setRepoId(e.target.value)} aria-label="Repository">
       {(repos ?? []).map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
-    </select>
+    </Select>
   );
   return { repoId, picker };
 }
@@ -137,7 +138,7 @@ function CompareModal({ a, b, onClose }: { a: string; b: string; onClose: () => 
   const [as, setAs] = useState<'before' | 'after'>('after');
   const [bs, setBs] = useState<'before' | 'after'>('after');
   const { data, error } = useFetch<any>(`/checkpoints/compare?a=${a}&as=${as}&b=${b}&bs=${bs}`, [a, b, as, bs]);
-  const side = (v: string, set: (s: any) => void) => <select className="input input-sm" value={v} onChange={(e) => set(e.target.value)}><option value="before">before</option><option value="after">after</option></select>;
+  const side = (v: string, set: (s: any) => void) => <Select className="input input-sm" value={v} onChange={(e) => set(e.target.value)}><option value="before">before</option><option value="after">after</option></Select>;
   return (
     <Modal width="max-w-4xl" title="Compare checkpoints" onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
       <div className="flex items-center gap-2 text-xs mb-3 flex-wrap">First {side(as, setAs)} <GitCompare size={13} /> second {side(bs, setBs)}</div>
@@ -182,9 +183,9 @@ export function Checkpoints() {
         <Panel title={<>History <span className="text-fg-4 font-normal num">· {rows.length}</span></>} bodyClass="pb-3"
           action={pick.length === 2 ? <button className="btn btn-sm" onClick={() => setComparing(true)}><GitCompare size={13} /> Compare</button> : <span className="text-2xs text-fg-4">tick two to compare</span>}>
           <div className="px-4 pb-3 flex flex-wrap gap-2">
-            <select className="input input-sm" value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Type"><option value="">all types</option><option value="general">General</option><option value="agent">Agent</option><option value="manual">Manual</option></select>
-            <select className="input input-sm" value={task} onChange={(e) => setTask(e.target.value)} aria-label="Task"><option value="">all tasks</option>{tasks.map(([id, t]) => <option key={id} value={id}>{t ?? id}</option>)}</select>
-            <select className="input input-sm" value={agentId} onChange={(e) => setAgentId(e.target.value)} aria-label="Agent"><option value="">all agents</option>{(agents ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select>
+            <Select className="input input-sm" value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Type"><option value="">all types</option><option value="general">General</option><option value="agent">Agent</option><option value="manual">Manual</option></Select>
+            <Select className="input input-sm" value={task} onChange={(e) => setTask(e.target.value)} aria-label="Task"><option value="">all tasks</option>{tasks.map(([id, t]) => <option key={id} value={id}>{t ?? id}</option>)}</Select>
+            <Select className="input input-sm" value={agentId} onChange={(e) => setAgentId(e.target.value)} aria-label="Agent"><option value="">all agents</option>{(agents ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</Select>
             <input className="input input-sm w-40" placeholder="file path…" value={file} onChange={(e) => setFile(e.target.value)} />
             <input className="input input-sm" type="date" value={since} onChange={(e) => setSince(e.target.value)} aria-label="Since" />
           </div>
@@ -344,10 +345,10 @@ export function RepoTimeline() {
       </PageHeader>
       <Panel title="Timeline" bodyClass="pb-3" action={<div className="flex items-center gap-2">
         {pick.length === 2 && <button className="btn btn-sm" onClick={() => setCompare(true)}><GitCompare size={13} /> Compare</button>}
-        <select className="input input-sm" value={type} onChange={(e) => setType(e.target.value)} aria-label="Type">
+        <Select className="input input-sm" value={type} onChange={(e) => setType(e.target.value)} aria-label="Type">
           <option value="">everything</option><option value="commit">commits</option><option value="checkpoint">checkpoints</option>
           <option value="undo">undo</option><option value="redo">redo</option><option value="task">tasks</option><option value="event">reviews & events</option>
-        </select>
+        </Select>
       </div>}>
         {!shown.length && <div className="px-4"><Muted>Nothing recorded for this repository yet.</Muted></div>}
         {days.map(([day, list]) => (

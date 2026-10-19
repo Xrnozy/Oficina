@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { post, put, useEvents, useQuery } from '../api';
@@ -82,9 +83,9 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
         <Avatar agent={agent} size="sm" />
         <span className="font-medium text-sm text-fg">{agent.name}</span>
         <label className="ml-auto flex items-center gap-1.5 text-xs text-fg-3">reasoning
-          <select className="input input-sm" value={effort} onChange={(e) => setEffort(e.target.value)} aria-label="Reasoning effort">
+          <Select className="input input-sm" value={effort} onChange={(e) => setEffort(e.target.value)} aria-label="Reasoning effort">
             {EFFORTS.map((e) => <option key={e} value={e}>{e === 'auto' ? 'auto (by task)' : e}</option>)}
-          </select>
+          </Select>
         </label>
       </div>
       <ol className="space-y-1">
@@ -98,9 +99,9 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
               <span className="num text-fg-4 w-4">{i + 1}</span>
               <span className="min-w-0 flex-1 truncate">{prov?.name ?? o.accountId} <span className="text-fg-4">/</span> <span className="mono">{m ? modelLabel(m) : 'provider default'}</span></span>
               {m ? (
-                <select className="input input-sm" value={m.strength_tier} onChange={(e) => setTier(m.id, e.target.value)} aria-label="Model tier" title="What this model is strong enough for">
+                <Select className="input input-sm" value={m.strength_tier} onChange={(e) => setTier(m.id, e.target.value)} aria-label="Model tier" title="What this model is strong enough for">
                   {TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
+                </Select>
               ) : <Tag>standard</Tag>}
               <Tag tone={plan ? 'ok' : 'idle'} title={plan ? 'No per-call cost (plan / subscription)' : 'Metered: input / output per 1M tokens'}>
                 {plan ? 'plan' : m && (m.price_in || m.price_out) ? `$${m.price_in}/$${m.price_out}` : 'metered'}
@@ -115,14 +116,14 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
       </ol>
       {adding ? (
         <div className="flex items-center gap-2 flex-wrap">
-          <select className="input input-sm" value={adding.accountId} onChange={(e) => setAdding({ accountId: e.target.value, modelId: null })} aria-label="Backend">
+          <Select className="input input-sm" value={adding.accountId} onChange={(e) => setAdding({ accountId: e.target.value, modelId: null })} aria-label="Backend">
             <option value="">backend…</option>
             {accounts.filter((a) => a.enabled).map((a) => <option key={a.id} value={a.id}>{providers.providers.find((p: any) => p.id === a.provider_id)?.name ?? a.label}</option>)}
-          </select>
-          <select className="input input-sm flex-1 min-w-[10rem]" value={adding.modelId ?? ''} disabled={!adding.accountId} onChange={(e) => setAdding({ ...adding, modelId: e.target.value || null })} aria-label="Model">
+          </Select>
+          <Select className="input input-sm flex-1 min-w-[10rem]" value={adding.modelId ?? ''} disabled={!adding.accountId} onChange={(e) => setAdding({ ...adding, modelId: e.target.value || null })} aria-label="Model">
             <option value="">provider default</option>
             {models.filter((m) => m.provider_id === accounts.find((a) => a.id === adding.accountId)?.provider_id).map((m) => <option key={m.id} value={m.id}>{modelLabel(m)} · {m.strength_tier}</option>)}
-          </select>
+          </Select>
           <button className="btn btn-sm btn-primary" disabled={!adding.accountId} onClick={() => { setOpts((o) => [...o, adding]); setAdding(null); }}>Add</button>
           <button className="btn btn-sm btn-ghost" onClick={() => setAdding(null)}>Cancel</button>
         </div>
@@ -159,13 +160,13 @@ function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: Routing
     <div className="space-y-3">
       <div className="flex items-end gap-3 flex-wrap rounded-lg border border-line/70 bg-raised/40 px-3 py-2">
         <label className="text-xs text-fg-3">model tier override
-          <select className="input input-sm block mt-0.5" value={tier} disabled={!editable} onChange={(e) => setTier(e.target.value)}
+          <Select className="input input-sm block mt-0.5" value={tier} disabled={!editable} onChange={(e) => setTier(e.target.value)}
             title={editable ? 'Force the tier the router requires for this step' : 'The default pipeline is read-only — clone it in Workflow'}>
             <option value="">auto — by kind &amp; difficulty</option>
             <option value="fast">fast</option>
             <option value="standard">standard</option>
             <option value="strong">strong</option>
-          </select>
+          </Select>
         </label>
         <label className="text-xs text-fg-3">token budget
           <input className="input input-sm block mt-0.5 w-28" type="number" min={0} value={budget} disabled={!editable} placeholder="auto"
@@ -379,10 +380,10 @@ export default function Routing() {
       <Panel title="Flow"
         action={
           <div className="flex items-center gap-2">
-            <select className="input input-sm !w-auto max-w-[240px]" value={knownView ? viewId : ''} onChange={(e) => pickView(e.target.value)} aria-label="Workflow to show">
+            <Select className="input input-sm !w-auto max-w-[240px]" value={knownView ? viewId : ''} onChange={(e) => pickView(e.target.value)} aria-label="Workflow to show">
               <option value="">Active workflow{(wfList ?? []).find((w) => w.active) ? ` · ${(wfList ?? []).find((w) => w.active)!.builtin ? 'Standard pipeline' : (wfList ?? []).find((w) => w.active)!.name}` : ''}</option>
               {(wfList ?? []).map((w) => <option key={w.id} value={w.id}>{w.builtin ? 'Standard pipeline' : w.name}{w.active ? ' (active)' : ''}</option>)}
-            </select>
+            </Select>
             {rv && <Tag tone={rv.custom ? 'info' : 'idle'} title={rv.workflow.builtin ? 'the read-only standard pipeline' : 'a custom workflow'}>{rv.workflow.name} · v{rv.workflow.versionN ?? '—'}</Tag>}
             {rv && !rv.workflow.active && !rv.workflow.builtin && !rv.preview && (
               <button className="btn btn-xs" onClick={async () => { const r = await act(post(`/workflows/${rv.workflow.id}/activate`), 'Now the default for new runs'); if (r) { pickView(''); reloadRv(); } }}>Make active</button>

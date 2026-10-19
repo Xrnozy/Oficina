@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { post, useQuery } from '../api';
@@ -40,9 +41,9 @@ export default function Team() {
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.5fr_1fr] gap-5 items-start [&>*]:min-w-0">
         <Panel title={<>Team conversation <span className="text-fg-4 font-normal num">· {msgs?.length ?? 0}</span></>} bodyClass="pb-2"
-          action={<select className="input input-sm" value={who} onChange={(e) => setWho(e.target.value)} aria-label="Filter by agent">
+          action={<Select className="input input-sm" value={who} onChange={(e) => setWho(e.target.value)} aria-label="Filter by agent">
             <option value="">everyone</option>{(agents ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>}>
+          </Select>}>
           <div className="px-4 pb-2 flex flex-wrap gap-1">
             {KINDS.map((k) => <button key={k} onClick={() => setKind(k)} className={`chip cursor-pointer ${kind === k ? '!bg-fg !text-canvas !border-fg' : ''}`}>{k}</button>)}
           </div>
@@ -75,9 +76,9 @@ export default function Team() {
             const r = await act(post(`/agents/${to}/message`, { text: text.trim() }), 'Queued for the agent\'s next prompt');
             if (r) setText('');
           }}>
-            <select className="input input-sm w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Recipient">
+            <Select className="input input-sm w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Recipient">
               <option value="">Message…</option>{(agents ?? []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            </Select>
             <input className="input input-sm flex-1 min-w-[12rem]" placeholder="Guidance, a correction, an answer…" value={text} onChange={(e) => setText(e.target.value)} />
             <button className="btn btn-sm btn-primary" disabled={!to || !text.trim()}><Send size={12} /> Send</button>
           </form>

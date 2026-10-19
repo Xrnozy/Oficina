@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useState } from 'react';
 import { del, get, post, put, useQuery } from '../api';
 import { Avatar, Dot, Empty, Modal, PageHeader, Segmented, Skeleton, Tag, act, roleLabel, toast, toneOf } from '../components';
@@ -257,9 +258,9 @@ function NewOfficeDialog({ offices, defaultFrom, onClose, onCreated }: { offices
           <span className="field-label">Start from</span>
           <Segmented value={from ? 'copy' : 'blank'} options={['blank', 'copy'] as const} onChange={(v) => setFrom(v === 'copy' ? defaultFrom : '')} />
           {from && (
-            <select className="input w-full mt-2" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Office to copy">
+            <Select className="input w-full mt-2" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Office to copy">
               {offices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-            </select>
+            </Select>
           )}
           <p className="text-xs text-fg-4 mt-2 flex items-start gap-1.5">
             {from ? <Copy size={12} className="mt-0.5 shrink-0" /> : <Building2 size={12} className="mt-0.5 shrink-0" />}

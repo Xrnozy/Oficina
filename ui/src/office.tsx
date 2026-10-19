@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useMemo, useState } from
 import { Link } from 'react-router-dom';
 import { Building2 } from 'lucide-react';
 import { useQuery } from './api';
+import { Select } from './Select';
 
 // The current office. An office is a workspace: its own agents, roles' desks, workflows and runs.
 // Every page that shows agents, flows or runs follows this choice, which is remembered per browser.
@@ -63,14 +64,13 @@ export function OfficeSwitcher() {
   if (!offices || !office) return null;
   return (
     <div className="px-2.5 pb-1">
-      <label className="flex items-center gap-2 h-9 pl-2.5 pr-1 rounded-lg border border-line bg-surface hover:border-line-strong transition-colors">
+      <div className="flex items-center gap-2 h-9 pl-2.5 pr-2 rounded-lg border border-line bg-surface hover:border-line-strong transition-colors focus-within:border-fg/60">
         <Building2 size={14} strokeWidth={1.75} className="text-fg-3 shrink-0" />
-        <span className="sr-only">Office</span>
-        <select value={office.id} onChange={(e) => setOfficeId(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-[13px] font-medium text-fg outline-none cursor-pointer truncate">
+        <Select aria-label="Office" value={office.id} onChange={(e) => setOfficeId(e.target.value)}
+          className="flex-1 min-w-0 h-full bg-transparent text-[13px] font-medium text-fg outline-none">
           {offices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-        </select>
-      </label>
+        </Select>
+      </div>
       <Link to="/office" className="block px-1 pt-1 text-2xs text-fg-4 hover:text-fg">Manage offices →</Link>
     </div>
   );

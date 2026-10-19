@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useState } from 'react';
 import { del, post, put, useQuery } from '../api';
 import { Empty, Modal, Muted, PageHeader, Panel, StatusChip, Tag, act, fmtAgo, roleLabel } from '../components';
@@ -30,7 +31,7 @@ function SkillEditor({ initial, onClose, onSaved }: { initial: Draft; onClose: (
         <div className="grid grid-cols-[1fr_10rem] gap-3">
           <label className="block"><span className="field-label">Name</span><input className="input w-full" value={d.name} onChange={set('name')} /></label>
           <label className="block"><span className="field-label">Category</span>
-            <select className="input w-full" value={d.category} onChange={set('category')}><option value="general">General (any role)</option><option value="role">Role-specific</option></select>
+            <Select className="input w-full" value={d.category} onChange={set('category')}><option value="general">General (any role)</option><option value="role">Role-specific</option></Select>
           </label>
         </div>
         <label className="block"><span className="field-label">Purpose</span><input className="input w-full" value={d.purpose} onChange={set('purpose')} placeholder="What this skill achieves" /></label>
@@ -65,11 +66,11 @@ function AttachModal({ skill, roles, agents, onClose, onSaved }: { skill: any; r
       }}>Attach</button>
     </>}>
       <label className="block"><span className="field-label">To</span>
-        <select className="input w-full" value={target} onChange={(e) => setTarget(e.target.value)}>
+        <Select className="input w-full" value={target} onChange={(e) => setTarget(e.target.value)}>
           <option value="">choose…</option>
           <optgroup label="Roles (every agent holding it)">{roles.map((r) => <option key={r.id} value={`roleId:${r.id}`}>{roleLabel(r.name)}</option>)}</optgroup>
           <optgroup label="One agent">{agents.map((a) => <option key={a.id} value={`agentId:${a.id}`}>{a.name}</option>)}</optgroup>
-        </select>
+        </Select>
       </label>
       <label className="flex items-center gap-2 text-sm mt-3"><input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} /> Pin this exact version (otherwise it follows your edits)</label>
     </Modal>

@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import { useOffice, useOfficeAgents } from '../office';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -209,9 +210,9 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
         if (await act(post(`/agents/${recipient}/message`, { text: msg.trim() }), 'Delivered with the agent\'s next prompt')) setMsg('');
       }}>
         {!agent && (
-          <select className="input input-sm w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Recipient">
+          <Select className="input input-sm w-40" value={to} onChange={(e) => setTo(e.target.value)} aria-label="Recipient">
             <option value="">Message…</option>{members.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          </Select>
         )}
         <input className="input input-sm flex-1" aria-label="Message" placeholder={agent ? `Instruct ${agent.name} — delivered with its next prompt` : 'Pick an agent, then type an instruction'} value={msg} onChange={(e) => setMsg(e.target.value)} />
         <button className="btn btn-sm btn-icon !w-7" disabled={!msg.trim() || !recipient} aria-label="Send"><Send size={12} /></button>

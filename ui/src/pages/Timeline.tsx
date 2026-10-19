@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useEffect, useMemo, useState } from 'react';
 import { get, useQuery, type OfficeEvent } from '../api';
 import { Empty, PageHeader, StatusChip, Tag, fmtTime } from '../components';
@@ -91,15 +92,15 @@ export default function Timeline() {
   return (
     <div>
       <PageHeader title="Timeline & replay" sub="Every event in the run's hash-chained log. Scrub or play to see the task board as it was at any point — replay never re-executes anything.">
-        <select className="input max-w-[280px]" value={run?.id ?? ''} onChange={(e) => { setRunId(e.target.value); setSel(null); setReplaySeq(null); setPlaying(false); }} aria-label="Run">
+        <Select className="input max-w-[280px]" value={run?.id ?? ''} onChange={(e) => { setRunId(e.target.value); setSel(null); setReplaySeq(null); setPlaying(false); }} aria-label="Run">
           {(runs ?? []).map((r) => <option key={r.id} value={r.id}>{r.goal.length > 44 ? `${r.goal.slice(0, 44)}…` : r.goal}</option>)}
-        </select>
+        </Select>
       </PageHeader>
 
       {!events.length && <Empty icon={Clock} title="No events yet" text="Events appear here as soon as the run starts doing work." />}
 
       {events.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 mb-5 rounded-2xl border border-line bg-surface divide-x divide-line overflow-hidden">
+        <div className="grid grid-cols-2 sm:grid-cols-4 mb-5 rounded-2xl border border-line bg-surface [&>*+*]:border-l [&>*+*]:border-line overflow-hidden">
           {[
             { k: 'Run', v: run ? <StatusChip value={run.status} /> : '—' },
             { k: 'Events', v: events.length.toLocaleString() },

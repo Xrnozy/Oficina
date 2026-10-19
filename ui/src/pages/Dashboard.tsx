@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import { WorkflowSelect } from '../workflowPicker';
 import { useOffice, useOfficeAgents, useOfficeApprovals } from '../office';
 import React, { useEffect, useState } from 'react';
@@ -170,7 +171,7 @@ function DigestPanel() {
   const quiet = !d.tasksDone.length && !d.tasksBlocked.length && !d.needsYou.length && !d.tokens?.calls;
   return (
     <Panel title="Since your last visit" action={<span className="text-2xs text-fg-4">{quiet ? 'nothing new · ' : ''}{fmtAgo(since)}</span>}>
-      <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-line -mx-1 [&>*]:px-4 [&>*:first-child]:pl-1">
+      <div className="grid grid-cols-2 sm:grid-cols-4 [&>*+*]:border-l [&>*+*]:border-line [&>*]:px-4 [&>*:first-child]:pl-1">
         {[
           { k: 'Tasks done', v: d.tasksDone.length, h: undefined as string | undefined },
           { k: 'Blocked / failed', v: d.tasksBlocked.length, h: d.tasksBlocked.length ? 'see below' : undefined },
@@ -318,10 +319,10 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-4 items-start mt-4">
         <label className="block">
           <span className="field-label">Repository</span>
-          <select className="input w-full font-mono" value={repoChoice || wsRepos[0]?.id || '__custom__'} onChange={(e) => setRepoChoice(e.target.value)}>
+          <Select className="input w-full font-mono" value={repoChoice || wsRepos[0]?.id || '__custom__'} onChange={(e) => setRepoChoice(e.target.value)}>
             {wsRepos.map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
             <option value="__custom__">A different folder on this machine…</option>
-          </select>
+          </Select>
         </label>
         <label className="block">
           <span className="field-label">Workflow</span>

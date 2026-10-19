@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import { agentInOffice, useOffice } from '../office';
 import React, { useState } from 'react';
 import { get, post, put, useQuery } from '../api';
@@ -120,17 +121,17 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
           <h3 className="eyebrow">Provider & model</h3>
           <div className="grid grid-cols-2 gap-3">
             <label className="block"><span className="field-label">Backend</span>
-              <select className="input w-full" value={accountId ?? ''} onChange={(e) => { const v = e.target.value || null; setAccountId(v); setModelId(modelsFor(v)[0]?.id ?? null); }}>
+              <Select className="input w-full" value={accountId ?? ''} onChange={(e) => { const v = e.target.value || null; setAccountId(v); setModelId(modelsFor(v)[0]?.id ?? null); }}>
                 <option value="">— none —</option>
                 {accounts.map((a) => <option key={a.id} value={a.id}>{a.label ?? a.id}</option>)}
-              </select>
+              </Select>
             </label>
             {field('modelSelect', 'Model',
-              <select className="input w-full" disabled={off('modelSelect')} value={modelId ?? ''} onChange={(e) => setModelId(e.target.value || null)}>
+              <Select className="input w-full" disabled={off('modelSelect')} value={modelId ?? ''} onChange={(e) => setModelId(e.target.value || null)}>
                 <option value="">provider default</option>
                 {modelsFor(accountId).map((x) => <option key={x.id} value={x.id}>{modelLabel(x)}</option>)}
                 {remoteCatalog.filter((m) => !modelsFor(accountId).some((x) => x.name === m.uid)).map((m) => <option key={m.uid} value={`new:${m.uid}`}>{m.name}</option>)}
-              </select>)}
+              </Select>)}
           </div>
           {catalogLoading && <p className="text-xs text-fg-4">Loading models from {prov?.name ?? 'the provider'}…</p>}
           {catalogError && <p className="text-xs text-warn">Couldn't list models from {prov?.name ?? 'the provider'}: {catalogError}. Registered models are still shown.</p>}
@@ -155,14 +156,14 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
           {fallbacks.map((f, i) => (
             <div key={i} className="flex items-center gap-1.5">
               <span className="text-2xs text-fg-4 num w-4">{i + 1}.</span>
-              <select className="input input-sm flex-1 min-w-0" value={f.accountId} onChange={(e) => setFallbacks((all) => all.map((x, j) => j === i ? { accountId: e.target.value, modelId: modelsFor(e.target.value)[0]?.id ?? null } : x))}>
+              <Select className="input input-sm flex-1 min-w-0" value={f.accountId} onChange={(e) => setFallbacks((all) => all.map((x, j) => j === i ? { accountId: e.target.value, modelId: modelsFor(e.target.value)[0]?.id ?? null } : x))}>
                 <option value="">backend…</option>
                 {accounts.map((a) => <option key={a.id} value={a.id}>{a.label ?? a.id}</option>)}
-              </select>
-              <select className="input input-sm flex-1 min-w-0" value={f.modelId ?? ''} onChange={(e) => setFallbacks((all) => all.map((x, j) => j === i ? { ...x, modelId: e.target.value || null } : x))}>
+              </Select>
+              <Select className="input input-sm flex-1 min-w-0" value={f.modelId ?? ''} onChange={(e) => setFallbacks((all) => all.map((x, j) => j === i ? { ...x, modelId: e.target.value || null } : x))}>
                 <option value="">provider default</option>
                 {modelsFor(f.accountId).map((x) => <option key={x.id} value={x.id}>{modelLabel(x)}</option>)}
-              </select>
+              </Select>
               <button className="btn btn-ghost btn-icon btn-sm" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up"><ArrowUp size={12} /></button>
               <button className="btn btn-ghost btn-icon btn-sm" disabled={i === fallbacks.length - 1} onClick={() => move(i, 1)} aria-label="Move down"><ArrowDown size={12} /></button>
               <button className="btn btn-ghost btn-icon btn-sm hover:!text-bad" onClick={() => setFallbacks((all) => all.filter((_, j) => j !== i))} aria-label="Remove fallback"><X size={12} /></button>
@@ -287,21 +288,21 @@ export default function Agents() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="block"><span className="field-label">Workspace</span>
-                <select className="input w-full" value={form.workspace} onChange={(e) => setForm({ ...form, workspace: e.target.value })}>
+                <Select className="input w-full" value={form.workspace} onChange={(e) => setForm({ ...form, workspace: e.target.value })}>
                   <option value="">None yet</option>
                   {(workspaces ?? []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </select>
+                </Select>
               </label>
               <label className="block"><span className="field-label">Role</span>
-                <select className="input w-full" disabled={!form.workspace} value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+                <Select className="input w-full" disabled={!form.workspace} value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
                   {(roles ?? []).map((r) => <option key={r.id} value={r.id}>{roleLabel(r.name)}</option>)}
-                </select>
+                </Select>
               </label>
             </div>
             <label className="block"><span className="field-label">Observability</span>
-              <select className="input w-full" value={form.observability} onChange={(e) => setForm({ ...form, observability: e.target.value })}>
+              <Select className="input w-full" value={form.observability} onChange={(e) => setForm({ ...form, observability: e.target.value })}>
                 {OBS_OPTIONS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
-              </select>
+              </Select>
             </label>
             <p className="text-xs text-fg-4">The new agent starts on the first enabled backend. Change it from the agent's card.</p>
           </div>

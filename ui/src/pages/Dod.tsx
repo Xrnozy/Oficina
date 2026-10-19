@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { post, put, useQuery } from '../api';
@@ -92,9 +93,9 @@ export default function DodEditor() {
                   <input aria-label="Item text" placeholder="Describe a measurable outcome…" className="flex-1 bg-transparent text-sm text-fg outline-none border-b border-transparent hover:border-line focus:border-accent/60 pb-0.5 transition-colors" value={item.text} onChange={(e) => update(i, { text: e.target.value })} />
                 </div>
                 <div className="flex items-center gap-2 flex-wrap pl-9">
-                  <select aria-label="Kind" className="input input-sm !h-6 text-2xs" value={item.kind} onChange={(e) => update(i, { kind: e.target.value })}>
+                  <Select aria-label="Kind" className="input input-sm !h-6 text-2xs" value={item.kind} onChange={(e) => update(i, { kind: e.target.value })}>
                     {['feature', 'quality', 'review', 'docs'].map((k) => <option key={k}>{k}</option>)}
-                  </select>
+                  </Select>
                   {item.checks.map((c, ci) => (
                     <span key={ci} className="chip font-mono text-info bg-info/[0.08] border-info/20">{c}
                       <button className="opacity-60 hover:opacity-100" aria-label={`Remove check ${c}`} onClick={() => update(i, { checks: item.checks.filter((_, j) => j !== ci) })}>×</button>

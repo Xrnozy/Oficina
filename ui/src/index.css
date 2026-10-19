@@ -114,6 +114,16 @@
   textarea.input { @apply h-auto py-2 leading-relaxed; }
   select.input { @apply pr-7 appearance-none bg-no-repeat; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath stroke='%23606060' stroke-width='1.4' d='m1 1 4 4 4-4'/%3E%3C/svg%3E"); background-position: right 9px center; }
   .input-sm { @apply h-7 text-xs rounded-md; }
+  /* the dropdown trigger (see Select.tsx) is a button that wears the input look */
+  .sel-trigger { @apply inline-flex items-center gap-2 text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed; }
+  .input.sel-trigger { @apply pr-2.5; }
+  /* inspector fields in the Workflow editor */
+  .inp {
+    @apply block w-full min-w-0 h-8 bg-canvas border border-line rounded-lg px-2.5 text-sm text-fg placeholder:text-fg-4
+      hover:border-line-strong focus:outline-none focus:border-fg/60 focus:ring-2 focus:ring-fg/10 transition-colors disabled:opacity-50;
+  }
+  .inp.sel-trigger { @apply flex pr-2; }
+  textarea.inp { @apply h-auto py-2 leading-relaxed resize-y; }
 
   .field-label { @apply font-mono text-2xs uppercase tracking-[0.05em] text-fg-3 mb-1.5; display: block; }
   .row { @apply flex items-center gap-3 px-4 py-2.5 hover:bg-raised transition-colors; }

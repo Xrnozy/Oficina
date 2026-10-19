@@ -1,3 +1,4 @@
+import { Select } from '../Select';
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '../api';
@@ -32,10 +33,10 @@ export default function Errors() {
             );
           })}
         </div>
-        <select className="input input-sm" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
+        <Select className="input input-sm" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
           <option value="">Any status</option>
           {STATUSES.map((s) => <option key={s}>{s}</option>)}
-        </select>
+        </Select>
         <span className="text-xs text-fg-4 ml-auto num">{list.length} of {all.length}</span>
       </div>
 
