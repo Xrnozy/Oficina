@@ -29,8 +29,8 @@ import { modelSettings, settingsSupport, validateModelSettings } from '../servic
 import { messagesForRun, unreadCountFor } from '../services/messages.ts';
 import { projectDoc } from '../services/projectDoc.ts';
 import {
-  cloneWorkflow, createWorkflow, deleteWorkflow, estimateWorkflowCalls, getWorkflow, listWorkflows,
-  rowToVersion, saveWorkflowVersion, setActiveWorkflow, validateWorkflow, validationSummary,
+  addNodeForAgent, cloneWorkflow, createWorkflow, deleteWorkflow, estimateWorkflowCalls, getWorkflow, listWorkflows,
+  patchNodeRouting, routingView, rowToVersion, saveWorkflowVersion, setActiveWorkflow, validateWorkflow, validationSummary,
   workflowAudit, workflowRefsFor, workflowTemplates,
 } from '../services/workflow.ts';
 import { CATALOG_ADAPTERS, fetchCatalog, fetchProviderCatalog, syncProviderModels } from '../services/provider-catalog.ts';
@@ -398,6 +398,28 @@ export function createServer(port: number, uiDir: string): http.Server {
   });
   app.get('/api/workflows/refs', (req, res) => {
     ok(res, workflowRefsFor({ agentId: req.query.agentId as string | undefined, roleName: req.query.roleName as string | undefined }));
+  });
+  // The Routing page's view of the active workflow: ordered steps, branches,
+  // loops and message lines with the agents and per-node model config on each.
+  app.get('/api/workflows/active/routing', (req, res) => {
+    const wsId = String(req.query.workspaceId ?? '');
+    if (!wsId) return err(res, 400, 'workspaceId required');
+    ok(res, routingView(wsId));
+  });
+  // Per-node model tier / prompt budget / bypass — written as a new version
+  // so the Workflow inspector and this page always edit the same field.
+  app.put('/api/workflows/:id/nodes/:nodeId', (req, res) => {
+    const { modelTier, budgetChars, disabled } = req.body ?? {};
+    const r = patchNodeRouting(req.params.id, req.params.nodeId, { modelTier, budgetChars, disabled });
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
+  });
+  app.post('/api/workflows/:id/add-node', (req, res) => {
+    const agentId = String(req.body?.agentId ?? '');
+    if (!agentId) return err(res, 400, 'agentId required');
+    const r = addNodeForAgent(req.params.id, agentId);
+    if ('error' in r) return err(res, 422, r.error);
+    ok(res, r);
   });
 
   // Nodes an agent touches in each workspace's effective workflow: pinned

@@ -24,6 +24,7 @@ export interface WfNodeConfig {
   inheritSkills?: boolean;
   skillsOnly?: boolean;
   skills?: { skillId: string; name: string; versionId?: string }[];
+  disabled?: boolean;
 }
 
 export interface WfNode {
@@ -56,6 +57,29 @@ export interface WfAuditRow { ts: string; type: string; actor: string; payload: 
 export interface WfIssue { level: 'error' | 'warning'; nodeId?: string; edgeId?: string; message: string; }
 
 export interface WfValidation { ok: boolean; errors: string[]; warnings: string[]; issues: WfIssue[]; }
+
+// ---------- routing view (Routing page renders this — the same graph) ----------
+
+export interface RoutingEdgeRef { edgeId: string; toNodeId: string; toLabel: string; label: string | null; kind: WfEdgeKind; maxLoops: number | null; }
+export interface RoutingStep {
+  nodeId: string; type: WfNodeType; label: string;
+  purpose: string | null; scope: 'task' | 'run';
+  role: string | null; agentId: string | null;
+  agents: { id: string; name: string; avatar: string | null; status: string }[];
+  modelTier: 'fast' | 'standard' | 'strong' | null; budgetChars: number | null;
+  disabled: boolean; warnings: string[];
+  loops: RoutingEdgeRef[]; exits: RoutingEdgeRef[]; messages: RoutingEdgeRef[];
+}
+export type RoutingRow =
+  | { kind: 'step'; step: RoutingStep }
+  | { kind: 'back'; toNodeId: string; toLabel: string }
+  | { kind: 'branches'; viaNodeId: string; lanes: { edgeId: string; label: string; isElse: boolean; rows: RoutingRow[] }[] };
+export interface RoutingView {
+  workflow: { id: string; name: string; versionN: number | null; builtin: boolean };
+  custom: boolean; issues: WfIssue[]; fallback: boolean;
+  rows: RoutingRow[]; agentNodes: RoutingStep[];
+  notInWorkflow: { id: string; name: string; avatar: string | null; status: string; roles: string[] }[];
+}
 
 export interface WorkflowRow {
   id: string; workspaceId: string; name: string; description: string;

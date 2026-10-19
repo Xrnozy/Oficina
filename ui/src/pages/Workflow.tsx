@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import ReactFlow, {
   Background, BackgroundVariant, BaseEdge, Connection, ConnectionMode, Controls, Edge,
   EdgeLabelRenderer, EdgeProps, Handle, MarkerType, MiniMap, Node, NodeProps, Panel,
@@ -755,6 +755,18 @@ function WorkflowEditor() {
 
   // auto-select first workflow
   useEffect(() => { if (!wfId && wflist?.length) setWfId(wflist.find((w) => w.active)?.id ?? wflist[0].id); }, [wflist, wfId]);
+
+  // deep link: /workflow?node=<id> (from Routing's step cards) selects the
+  // node — switching to the active workflow first when another is open
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const wanted = searchParams.get('node');
+    if (!wanted || !detail || !wflist) return;
+    if (nodes.some((n) => n.id === wanted)) { setSelNodes([wanted]); setSelEdges([]); setSearchParams({}, { replace: true }); return; }
+    const activeWf = wflist.find((w) => w.active);
+    if (activeWf && activeWf.id !== wfId) setWfId(activeWf.id);
+    else setSearchParams({}, { replace: true });
+  }, [searchParams, detail, nodes, wflist, wfId, setSearchParams]);
 
   // ---- live validation (debounced) ----
   useEffect(() => {

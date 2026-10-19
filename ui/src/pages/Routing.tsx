@@ -2,18 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { put, useQuery } from '../api';
 import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, useCurrentRun, type Tone } from '../components';
-import { ArrowDown, ArrowRight, ArrowUp, Plus, X } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, Mail, Pencil, Plus, X } from 'lucide-react';
+import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
 // Routing: who does each step of the flow, which models each step may run
 // on, and how the router picks between them. Every hand-off is automatic.
+// The Flow strip and the step panels both render the ACTIVE workflow graph —
+// the same source of truth the Workflow editor draws and the engine walks.
 
-const FLOW: { role: string; step: string; does: string }[] = [
-  { role: 'pm', step: 'PM', does: 'turns the request into tasks and acceptance criteria' },
-  { role: 'prompt-creator', step: 'Prompt Creator', does: 'drafts the implementation prompt; the PM reviews it until approved' },
-  { role: 'developer', step: 'Developer', does: 'edits your repository, self-checks, writes change notes' },
-  { role: 'qa', step: 'Reviewer / tester', does: 'checks the work against the approved prompt and criteria' },
-  { role: 'pm', step: 'PM', does: 'accepts — or the Prompt Creator drafts a correction' },
-];
 const EXTRA_ROLES = ['docs', 'analyst', 'reviewer', 'prompt-creator'];
 const ROLE_LABEL: Record<string, string> = { pm: 'PM', developer: 'Developer', qa: 'Tester (review & validate)', docs: 'Docs', analyst: 'Analyst', reviewer: 'Reviewer', 'prompt-creator': 'Prompt Creator' };
 
@@ -143,6 +139,103 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
   );
 }
 
+// One step on the flow strip — a workflow node. Click opens it in the editor.
+function StepCard({ s }: { s: RoutingStep }) {
+  return (
+    <Link
+      to={`/workflow?node=${s.nodeId}`}
+      className={`rounded-xl border px-3 py-2 text-xs min-w-[10rem] max-w-[15rem] block hover:border-line-strong transition-colors ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
+      title={`${s.label}${s.warnings.length ? ` — ${s.warnings.join('; ')}` : ''}`}
+    >
+      <div className="font-medium text-fg text-sm flex items-center gap-1.5 flex-wrap">
+        {s.label}
+        {s.disabled && <Tag tone="idle">bypassed</Tag>}
+        {s.type === 'merge' && <Tag tone="idle">merge</Tag>}
+        {s.type === 'human' && <Tag tone="warn">approval</Tag>}
+      </div>
+      <div className="text-fg-3 mt-0.5">
+        {s.type === 'start' && 'the request enters here'}
+        {s.type === 'end' && 'task completes here'}
+        {s.type === 'condition' && 'branches on a check'}
+        {s.type === 'merge' && 'waits for its branches'}
+        {s.type === 'human' && 'pauses for you'}
+        {s.type === 'agent' && (PURPOSE_LABEL[s.purpose ?? ''] ?? s.purpose ?? 'step')}
+        {s.scope === 'run' && ' · once per run'}
+      </div>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {s.type === 'agent' && (
+          s.agentId
+            ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="bad">agent deleted</Tag>)
+            : s.role
+              ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="warn">any {s.role} — none assigned</Tag>)
+              : <Tag tone="warn">no agent or role</Tag>
+        )}
+        {s.modelTier && <Tag tone={TIER_TONE[s.modelTier]}>{s.modelTier}</Tag>}
+        {s.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>!</Tag>)}
+      </div>
+      {(s.loops.length > 0 || s.exits.length > 0 || s.messages.length > 0) && (
+        <div className="mt-1.5 space-y-0.5 border-t border-line/60 pt-1">
+          {s.loops.map((e) => (
+            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-fg-3">
+              <CornerUpLeft size={10} className="shrink-0" /> {e.label ?? 'back'} → {e.toLabel}{e.maxLoops ? ` ×${e.maxLoops}` : ''}
+            </div>
+          ))}
+          {s.exits.map((e) => (
+            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-fg-3">
+              <ArrowRight size={10} className="shrink-0" /> {e.label ?? e.kind} → {e.toLabel}
+            </div>
+          ))}
+          {s.messages.map((e) => (
+            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-info">
+              <Mail size={10} className="shrink-0" /> {e.label ?? 'message'} → {e.toLabel}
+            </div>
+          ))}
+        </div>
+      )}
+    </Link>
+  );
+}
+
+function FlowRows({ rows }: { rows: RoutingRow[] }) {
+  return (
+    <ol className="flex flex-wrap items-stretch gap-2">
+      {rows.map((r, i) => <FlowRowView key={i} row={r} arrow={i > 0} />)}
+    </ol>
+  );
+}
+
+function FlowRowView({ row, arrow = true }: { row: RoutingRow; arrow?: boolean }) {
+  if (row.kind === 'step') {
+    return (
+      <>
+        {arrow && <li className="self-center text-fg-4"><ArrowRight size={14} /></li>}
+        <li><StepCard s={row.step} /></li>
+      </>
+    );
+  }
+  if (row.kind === 'back') {
+    return (
+      <li className="self-center flex items-center gap-1 text-2xs text-fg-3 rounded-lg border border-dashed border-line px-2 py-1">
+        <CornerUpLeft size={11} /> back to {row.toLabel}
+      </li>
+    );
+  }
+  // a fan-out: each lane is a stacked row labeled by its condition
+  return (
+    <li className="w-full mt-1 space-y-1.5">
+      {row.lanes.map((l) => (
+        <div key={l.edgeId} className="flex items-start gap-2">
+          <Tag tone={l.isElse ? 'idle' : 'info'}>{l.label}</Tag>
+          <ArrowRight size={12} className="mt-1 text-fg-4 shrink-0" />
+          <ol className="flex flex-wrap items-stretch gap-2 min-w-0">
+            {l.rows.map((r, i) => <FlowRowView key={i} row={r} arrow={i > 0} />)}
+          </ol>
+        </div>
+      ))}
+    </li>
+  );
+}
+
 export default function Routing() {
   const { run } = useCurrentRun();
   const { data: workspaces, reload: reloadWs } = useQuery<any[]>('/workspaces');
@@ -150,6 +243,7 @@ export default function Routing() {
   const { data: providers, reload: reloadProviders } = useQuery<any>('/providers');
   const { data: decisions } = useQuery<any[]>('/routing/decisions');
   const ws = workspaces?.find((w) => w.id === run?.workspaceId) ?? workspaces?.[0];
+  const { data: rv, reload: reloadRv } = useQuery<RoutingView>(ws?.id ? `/workflows/active/routing?workspaceId=${ws.id}` : null, [ws?.id]);
   const s = ws?.settings ?? {};
   const strategy: (typeof STRATEGIES)[number] = s.routing === 'fixed' ? 'fixed' : 'smart';
   const prompts: (typeof PROMPTS)[number] = s.promptReview === 'off' ? 'off' : s.promptReview === 'all' ? 'all' : s.promptReview === 'handoffs' || s.promptReview === 'implement' ? 'handoffs' : 'pipeline';
@@ -165,26 +259,33 @@ export default function Routing() {
     <div className="space-y-5">
       <PageHeader title="Routing" sub="Send a request to the PM; every hand-off after that is automatic. Pick which models each role may use — the router chooses between them per task by what the work needs, what's available and what it costs." />
 
-      <Panel title="Flow">
-        <ol className="flex flex-wrap items-stretch gap-2">
-          <li className="rounded-xl border border-line px-3 py-2 text-xs min-w-[8rem]"><div className="font-medium text-fg text-sm">You</div><div className="text-fg-3">send a request (and can step in anywhere)</div></li>
-          {FLOW.map((f, i) => {
-            const who = holders(f.role);
-            return (
-              <React.Fragment key={i}>
-                <li className="self-center text-fg-4"><ArrowRight size={14} /></li>
-                <li className="rounded-xl border border-line px-3 py-2 text-xs min-w-[10rem] max-w-[15rem]">
-                  <div className="font-medium text-fg text-sm">{f.step}</div>
-                  <div className="text-fg-3">{f.does}</div>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {who.length ? who.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Link to="/office" className="text-warn hover:underline">assign an agent</Link>}
-                  </div>
-                </li>
-              </React.Fragment>
-            );
-          })}
-        </ol>
-        <p className="text-xs text-fg-3 mt-3">Build/test checks run after the developer; failures go to the PM and Prompt Creator as a correction (in pipeline mode). Loops are bounded (3 attempts), then you decide. The PM is called only when a decision is needed — planning, prompt approval, acceptance. You can message any agent, edit requirements, change models, or pause at any time; every change can be undone from Checkpoints.</p>
+      <Panel title="Flow"
+        action={
+          <div className="flex items-center gap-2">
+            {rv && <Tag tone={rv.custom ? 'info' : 'idle'} title={rv.workflow.builtin ? 'the read-only built-in pipeline' : 'a custom workflow is active'}>{rv.workflow.name} · v{rv.workflow.versionN ?? '—'}</Tag>}
+            <Link to="/workflow" className="btn btn-ghost btn-xs"><Pencil size={11} /> Edit in Workflow</Link>
+          </div>
+        }>
+        {!rv?.custom && <p className="text-xs text-fg-3 mb-3">Default pipeline. <Link to="/workflow" className="underline">Clone it in Workflow</Link> to customize.</p>}
+        {rv?.fallback && (
+          <div className="rounded-lg border border-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad mb-3">
+            The active workflow has problems — showing the default pipeline below.
+            <ul className="mt-1 space-y-0.5">
+              {rv.issues.filter((i) => i.level === 'error').map((i, k) => (
+                <li key={k}>· {i.nodeId ? <Link className="underline" to={`/workflow?node=${i.nodeId}`}>{i.nodeId}</Link> : 'graph'}: {i.message}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <FlowRows rows={rv?.rows ?? []} />
+        {rv?.issues?.some((i) => i.level === 'warning') && (
+          <ul className="mt-3 space-y-0.5">
+            {rv.issues.filter((i) => i.level === 'warning').map((i, k) => (
+              <li key={k} className="text-2xs text-warn">! {i.nodeId ? <Link className="underline" to={`/workflow?node=${i.nodeId}`}>{i.nodeId}</Link> : 'graph'}: {i.message}</li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-fg-3 mt-3">Every step is a node on the active workflow — click one to open it in the editor. Loops are bounded, then you decide. You can message any agent, edit requirements, change models, or pause at any time; every change can be undone from Checkpoints.</p>
       </Panel>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-5 items-start [&>*]:min-w-0">

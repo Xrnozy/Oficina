@@ -29,6 +29,7 @@ export interface NodeConfig {
   writable?: boolean;                // writer (default true for code kinds) vs read-only
   inputs?: 'envelope' | 'full' | string[]; // what the prompt carries: handoff envelope, full previous output, or listed node outputs
   mergeMode?: 'all' | 'any';         // merge node wait policy
+  disabled?: boolean;                // bypassed: the engine passes through without dispatching
   inheritSkills?: boolean;           // 3b: also send agent/role skills (default true)
   skillsOnly?: boolean;              // 3b: send only node-attached skills
   skills?: { skillId: string; name: string; versionId?: string }[]; // 3b: skill refs attached to this node — stored in the version itself, so a run resolves the skills the version had when it was saved
@@ -123,6 +124,7 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     ids.add(n.id);
     if (n.type === 'agent' && !n.agentId && !n.role) err('agent node needs an agentId or a role', n.id);
     if (n.type !== 'agent' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
+    if (n.config?.disabled) warn(`node "${n.label}" is bypassed — the engine will pass through it without dispatching`, n.id);
   }
   const eids = new Set<string>();
   const out = new Map<string, WfEdge[]>();
@@ -531,4 +533,283 @@ export function workflowRefsFor(opts: { agentId?: string; roleName?: string }): 
 export function workflowAudit(workflowId: string, limit = 20): { ts: string; type: string; actor: string; payload: Record<string, unknown> }[] {
   return q(`SELECT ts, type, actor, payload FROM events WHERE entity_id = ? ORDER BY seq DESC LIMIT ?`, workflowId, limit)
     .map((e) => ({ ts: e.ts as string, type: e.type as string, actor: e.actor as string, payload: parseJson(e.payload as string, {}) }));
+}
+
+// ---------- routing view ---------------------------------------------------
+// The Routing page renders exactly what the active workflow graph says — the
+// same graph the engine walks, flattened into ordered rows: steps in flow
+// order, fan-outs as labeled lanes, back-edges as loop chips, message edges as
+// envelope links. Editing a node here writes the graph (a new version), so
+// Routing and the Workflow inspector can never disagree.
+
+export interface RoutingEdgeRef { edgeId: string; toNodeId: string; toLabel: string; label: string | null; kind: EdgeKind; maxLoops: number | null }
+export interface RoutingStep {
+  nodeId: string; type: NodeType; label: string;
+  purpose: string | null; scope: 'task' | 'run';
+  role: string | null; agentId: string | null;
+  agents: { id: string; name: string; avatar: string | null; status: string }[];
+  modelTier: 'fast' | 'standard' | 'strong' | null; budgetChars: number | null;
+  disabled: boolean; warnings: string[];
+  loops: RoutingEdgeRef[];     // edges back to an already-rendered step (retry loops, rejoins)
+  exits: RoutingEdgeRef[];     // edges into a sibling lane's territory (cross-references)
+  messages: RoutingEdgeRef[];  // message edges leaving this step
+}
+export type RoutingRow =
+  | { kind: 'step'; step: RoutingStep }
+  | { kind: 'back'; toNodeId: string; toLabel: string }
+  | { kind: 'branches'; viaNodeId: string; lanes: { edgeId: string; label: string; isElse: boolean; rows: RoutingRow[] }[] };
+
+export interface RoutingView {
+  workflow: { id: string; name: string; versionN: number | null; builtin: boolean };
+  custom: boolean;          // a non-builtin workflow is active
+  issues: WfIssue[];
+  fallback: boolean;        // the active graph has errors — rows show the default pipeline
+  rows: RoutingRow[];       // the flow strip
+  agentNodes: RoutingStep[];// the ACTIVE graph's agent nodes, flow order — the model panels
+  notInWorkflow: { id: string; name: string; avatar: string | null; status: string; roles: string[] }[];
+}
+
+const COND_FIELD_LABEL: Record<string, string> = {
+  'step.status': 'step status', 'step.verdict': 'reviewer verdict', 'checks': 'checks', 'files': 'files changed',
+  'attempts': 'attempts', 'task.type': 'task type', 'task.difficulty': 'task difficulty', 'task.paths': 'task paths',
+};
+const COND_OP_LABEL: Record<string, string> = { eq: '=', ne: '≠', lt: '<', le: '≤', gt: '>', ge: '≥', contains: 'contains', matches: 'matches', truthy: 'is set', falsy: 'is empty' };
+
+export function wfCondText(c: WfCondition | undefined): string {
+  if (!c) return '';
+  if (c.and?.length) return c.and.map(wfCondText).join(' and ');
+  if (c.or?.length) return c.or.map(wfCondText).join(' or ');
+  if (c.not) return `not (${wfCondText(c.not)})`;
+  const f = COND_FIELD_LABEL[c.field ?? ''] ?? c.field ?? '?';
+  if (c.op === 'truthy') return `${f} is set`;
+  if (c.op === 'falsy') return `${f} is empty`;
+  return `${f} ${COND_OP_LABEL[c.op ?? 'eq'] ?? c.op ?? '='} ${String(c.value ?? '?')}`;
+}
+
+const EDGE_KIND_HINT: Record<EdgeKind, string> = { next: 'then', 'on-success': 'on success', 'on-failure': 'on failure', 'on-reject': 'on reject', message: 'message' };
+
+// Flatten the flow rows into the ordered list of agent steps (panels).
+export function flattenAgentSteps(rows: RoutingRow[]): RoutingStep[] {
+  const out: RoutingStep[] = [];
+  const walk = (rs: RoutingRow[]) => {
+    for (const r of rs) {
+      if (r.kind === 'step' && r.step.type === 'agent') out.push(r.step);
+      if (r.kind === 'branches') for (const l of r.lanes) walk(l.rows);
+    }
+  };
+  walk(rows);
+  return out;
+}
+
+// Rendered graph → rows. `stop` nodes are lane heads reserved by sibling
+// lanes (plus the block's join) — an edge into one is a cross-reference, not
+// a path this lane follows. A lane ends where it rejoins a rendered node.
+export function flowRowsFor(g: WfGraph, decorate?: (n: WfNode) => Pick<RoutingStep, 'agents' | 'warnings'>): { rows: RoutingRow[]; rendered: Set<string> } {
+  const byId = new Map(g.nodes.map((n) => [n.id, n]));
+  const flowOut = (id: string) => g.edges.filter((e) => e.from === id && e.kind !== 'message');
+  const rendered = new Set<string>();
+  const rows: RoutingRow[] = [];
+
+  const laneLabel = (e: WfEdge) => e.else ? 'otherwise' : e.label ?? (e.condition ? `if ${wfCondText(e.condition)}` : EDGE_KIND_HINT[e.kind]);
+
+  // The merge point all lanes of a fan-out reach: the shallowest unrendered
+  // node in every lane's lane-local reachable set (lanes don't cross into
+  // rendered nodes, stop nodes or sibling heads — reachability mirrors that).
+  const joinFor = (edges: WfEdge[], stop: Set<string>): string | null => {
+    const heads = new Set(edges.map((e) => e.to));
+    const reach = (from: string): Map<string, number> => {
+      const d = new Map<string, number>([[from, 0]]);
+      const stack = [from];
+      while (stack.length) {
+        const id = stack.pop()!;
+        for (const e of flowOut(id)) {
+          if (d.has(e.to) || rendered.has(e.to) || stop.has(e.to)) continue;
+          if (heads.has(e.to) && e.to !== from) continue;
+          d.set(e.to, d.get(id)! + 1);
+          stack.push(e.to);
+        }
+      }
+      return d;
+    };
+    const maps = edges.map((e) => reach(e.to));
+    let best: string | null = null; let score = Infinity;
+    for (const id of maps[0]?.keys() ?? []) {
+      if (rendered.has(id) || stop.has(id) || heads.has(id)) continue;
+      if (!maps.every((m) => m.has(id))) continue;
+      const s = Math.max(...maps.map((m) => m.get(id)!));
+      if (s < score) { score = s; best = id; }
+    }
+    return best;
+  };
+
+  const stepFor = (n: WfNode, stop: Set<string>): RoutingStep => {
+    const ref = (e: WfEdge): RoutingEdgeRef => ({
+      edgeId: e.id, toNodeId: e.to, toLabel: byId.get(e.to)?.label ?? e.to, kind: e.kind,
+      label: e.label ?? (e.condition ? `if ${wfCondText(e.condition)}` : null),
+      maxLoops: e.maxLoops ?? (LOOP_KINDS.includes(e.kind) ? DEFAULT_MAX_LOOPS : null),
+    });
+    const loops: RoutingEdgeRef[] = []; const exits: RoutingEdgeRef[] = []; const messages: RoutingEdgeRef[] = [];
+    for (const e of g.edges.filter((x) => x.from === n.id)) {
+      if (e.kind === 'message') messages.push(ref(e));
+      else if (rendered.has(e.to)) loops.push(ref(e));
+      else if (stop.has(e.to)) exits.push(ref(e));
+    }
+    const deco = decorate?.(n) ?? { agents: [], warnings: [] };
+    return {
+      nodeId: n.id, type: n.type, label: n.label,
+      purpose: n.config?.purpose ?? null, scope: n.config?.scope ?? 'task',
+      role: n.role ?? null, agentId: n.agentId ?? null, agents: deco.agents,
+      modelTier: n.config?.modelTier ?? null, budgetChars: n.config?.budgetChars ?? null,
+      disabled: !!n.config?.disabled, warnings: deco.warnings, loops, exits, messages,
+    };
+  };
+
+  const walk = (firstId: string, stop: Set<string>, out: RoutingRow[]): void => {
+    let cur: string | null = firstId;
+    while (cur && !rendered.has(cur) && !stop.has(cur)) {
+      const n = byId.get(cur);
+      if (!n) return;
+      rendered.add(cur);
+      out.push({ kind: 'step', step: stepFor(n, stop) });
+      const uniq = [...new Map(flowOut(n.id).filter((e) => !rendered.has(e.to) && !stop.has(e.to)).map((e) => [e.to, e] as const)).values()];
+      if (!uniq.length) return;
+      if (uniq.length === 1) { cur = uniq[0].to; continue; }
+      const join = joinFor(uniq, stop);
+      const heads = new Set(uniq.map((e) => e.to));
+      const lanes = uniq.map((e) => {
+        const laneRows: RoutingRow[] = [];
+        walk(e.to, new Set([...stop, ...heads, ...(join ? [join] : [])].filter((id) => id !== e.to)), laneRows);
+        if (!laneRows.length) laneRows.push({ kind: 'back', toNodeId: e.to, toLabel: byId.get(e.to)?.label ?? e.to });
+        return { edgeId: e.id, label: laneLabel(e), isElse: !!e.else, rows: laneRows };
+      });
+      out.push({ kind: 'branches', viaNodeId: n.id, lanes });
+      cur = join;
+    }
+    // the lane ran into an earlier step — show the rejoin arrow
+    if (cur && rendered.has(cur)) out.push({ kind: 'back', toNodeId: cur, toLabel: byId.get(cur)?.label ?? cur });
+  };
+
+  const start = g.nodes.find((n) => n.type === 'start');
+  if (start) walk(start.id, new Set(), rows);
+  return { rows, rendered };
+}
+
+// The effective workflow for a workspace: the active custom one, else the
+// built-in default pipeline. Routing follows the saved version only — a
+// Workflow draft is localStorage until it is saved.
+export function routingView(wsId: string): RoutingView {
+  ensureBuiltinWorkflow(wsId);
+  const activeId = activeWorkflowId(wsId);
+  const active = activeId ? getWorkflow(activeId) : null;
+  const shown = active ?? getWorkflow(BUILTIN_ID(wsId))!;
+  const graph = shown?.graph ?? defaultWorkflowGraph();
+  const wf = shown!.workflow;
+  const versionN = wf.latestVersionId ? ((q1('SELECT n FROM workflow_versions WHERE id = ?', wf.latestVersionId)?.n as number) ?? null) : null;
+  const custom = !!active && !wf.builtin;
+
+  const membersByAgent = new Map<string, { id: string; name: string; avatar: string | null; status: string; roles: string[] }>();
+  for (const m of q(`SELECT a.id, a.name, a.avatar, a.status, r.name AS rname FROM memberships m
+                    JOIN agents a ON a.id = m.agent_id JOIN roles r ON r.id = m.role_id
+                    WHERE m.workspace_id = ? AND m.active = 1`, wsId)) {
+    const a = membersByAgent.get(m.id as string) ?? { id: m.id as string, name: m.name as string, avatar: m.avatar as string | null, status: m.status as string, roles: [] };
+    a.roles.push(m.rname as string);
+    membersByAgent.set(m.id as string, a);
+  }
+
+  const decorate = (n: WfNode): Pick<RoutingStep, 'agents' | 'warnings'> => {
+    const warnings: string[] = [];
+    let agents: RoutingStep['agents'] = [];
+    if (n.type !== 'agent') return { agents, warnings };
+    if (n.agentId) {
+      const a = q1('SELECT id, name, avatar, status FROM agents WHERE id = ?', n.agentId);
+      if (!a) warnings.push('the pinned agent was deleted');
+      else {
+        agents = [{ id: a.id as string, name: a.name as string, avatar: a.avatar as string | null, status: a.status as string }];
+        if (!membersByAgent.has(a.id as string)) warnings.push(`${a.name} is not an active member of this workspace`);
+      }
+    } else if (n.role) {
+      agents = [...membersByAgent.values()].filter((x) => x.roles.includes(n.role!)).map(({ id, name, avatar, status }) => ({ id, name, avatar, status }));
+      if (!agents.length) warnings.push(`no agent holds the "${n.role}" role`);
+    }
+    return { agents, warnings };
+  };
+
+  const issues = validateWorkflow(graph, wsId);
+  const broken = issues.some((i) => i.level === 'error');
+  // the flow strip falls back to the default pipeline when the active graph
+  // can't run; the model panels below still track the active graph itself so
+  // the broken nodes stay editable
+  const display = flowRowsFor(broken ? (getWorkflow(BUILTIN_ID(wsId))!.graph ?? defaultWorkflowGraph()) : graph, decorate);
+  const live = flowRowsFor(graph, decorate);
+
+  const agentNodes = flattenAgentSteps(live.rows);
+  // nodes nothing can reach stay visible — the warning names the problem
+  for (const n of graph.nodes) {
+    if (n.type === 'agent' && !live.rendered.has(n.id)) {
+      const s = decorate(n);
+      agentNodes.push({
+        nodeId: n.id, type: 'agent', label: n.label, purpose: n.config?.purpose ?? null, scope: n.config?.scope ?? 'task',
+        role: n.role ?? null, agentId: n.agentId ?? null, agents: s.agents,
+        modelTier: n.config?.modelTier ?? null, budgetChars: n.config?.budgetChars ?? null, disabled: !!n.config?.disabled,
+        warnings: [...s.warnings, 'not reachable from start'], loops: [], exits: [], messages: [],
+      });
+    }
+  }
+  const inWorkflow = (agentId: string, roles: string[]) =>
+    agentNodes.some((n) => n.agentId === agentId || (n.role && roles.includes(n.role)));
+  return {
+    workflow: { id: wf.id, name: wf.name, versionN, builtin: wf.builtin },
+    custom, issues, fallback: broken,
+    rows: display.rows,
+    agentNodes,
+    notInWorkflow: [...membersByAgent.values()].filter((a) => !inWorkflow(a.id, a.roles)),
+  };
+}
+
+// Routing writes node routing config the same place the inspector does —
+// node.config inside a new immutable version.
+export function patchNodeRouting(workflowId: string, nodeId: string, patch: { modelTier?: 'fast' | 'standard' | 'strong' | null; budgetChars?: number | null; disabled?: boolean | null }): { ok: true } | { error: string } {
+  const w = getWorkflow(workflowId);
+  if (!w?.graph) return { error: 'not found' };
+  if (w.workflow.builtin) return { error: 'the built-in workflow is read-only — clone it to edit' };
+  const node = w.graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return { error: 'node not found' };
+  const cfg: NodeConfig = { ...(node.config ?? {}) };
+  if ('modelTier' in patch) { if (patch.modelTier) cfg.modelTier = patch.modelTier; else delete cfg.modelTier; }
+  if ('budgetChars' in patch) { if (patch.budgetChars) cfg.budgetChars = patch.budgetChars; else delete cfg.budgetChars; }
+  if ('disabled' in patch) { if (patch.disabled) cfg.disabled = true; else delete cfg.disabled; }
+  const graph: WfGraph = { ...w.graph, nodes: w.graph.nodes.map((n) => (n.id === nodeId ? { ...n, config: cfg } : n)) };
+  const r = saveWorkflowVersion(workflowId, graph, `routing: ${node.label}`, 'owner');
+  return 'error' in r ? r : { ok: true };
+}
+
+// "Add to workflow" from Routing: pin the agent on a node spliced onto the
+// last flow edge into `end` (or after the last reachable agent node when no
+// such edge exists — validation names anything still unreachable).
+export function addNodeForAgent(workflowId: string, agentId: string): { ok: true; nodeId: string } | { error: string } {
+  const w = getWorkflow(workflowId);
+  if (!w?.graph) return { error: 'not found' };
+  if (w.workflow.builtin) return { error: 'the built-in workflow is read-only — clone it to edit' };
+  const a = q1('SELECT id, name FROM agents WHERE id = ?', agentId);
+  if (!a) return { error: 'agent not found' };
+  const role = q1(`SELECT r.name FROM memberships m JOIN roles r ON r.id = m.role_id WHERE m.agent_id = ? AND m.workspace_id = ? AND m.active = 1`, agentId, w.workflow.workspaceId)?.name as string | undefined;
+  const g: WfGraph = JSON.parse(JSON.stringify(w.graph));
+  const id = `n-${ulid().toLowerCase().slice(-10)}`;
+  const ends = g.nodes.filter((n) => n.type === 'end');
+  const intoEnd = g.edges.filter((e) => e.kind !== 'message' && ends.some((x) => x.id === e.to));
+  const host = intoEnd[intoEnd.length - 1];
+  const from = host ? g.nodes.find((n) => n.id === host.from) : [...g.nodes].reverse().find((n) => n.type === 'agent');
+  const to = host ? ends.find((n) => n.id === host.to)! : ends[0];
+  if (!from || !to) return { error: 'no step to attach to — place the node in Workflow' };
+  const node: WfNode = {
+    id, type: 'agent', label: a.name as string, agentId, role,
+    config: { purpose: 'custom' },
+    position: { x: Math.round(((from.position?.x ?? 0) + (to.position?.x ?? 400)) / 2), y: Math.round(((from.position?.y ?? 0) + (to.position?.y ?? 0)) / 2) + 60 },
+  };
+  g.nodes.push(node);
+  if (host) host.to = id;
+  else g.edges.push({ id: `e-${id}`, from: from.id, to: id, kind: 'next' });
+  g.edges.push({ id: `e-${id}-out`, from: id, to: to.id, kind: 'next' });
+  const r = saveWorkflowVersion(workflowId, g, `add ${a.name} to the flow`, 'owner');
+  return 'error' in r ? r : { ok: true, nodeId: id };
 }
