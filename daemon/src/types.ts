@@ -229,6 +229,18 @@ export interface AgentModelSettings {
   maxOutputTokens?: number;
   contextTokens?: number;
   fallbacks?: { accountId: string; modelId: string | null }[];
+  // Forces the model tier the router asks for on this agent's work, in any workflow (including the read-only
+  // default pipeline). A workflow node's own tier still wins; unset = chosen per work item by kind and difficulty.
+  tierOverride?: 'fast' | 'standard' | 'strong' | null;
+  // How a CLI-backed agent uses CLI sessions (see services/cli-sessions.ts).
+  cliSession?: CliSessionSettings | null;
+}
+
+export interface CliSessionSettings {
+  mode: 'reuse' | 'new' | 'pinned';   // reuse: keep using this agent's session; new: a fresh one every work item; pinned: always this one
+  pinnedId?: string | null;           // the registry session used when mode is 'pinned'
+  whenBusy: 'new' | 'wait';           // the session is in use by another work item: start an additional session, or wait for it
+  rotateAfter: number;                // start a fresh session after this many work items (a long-lived one keeps growing); 0 = never
 }
 
 export type MessageKind = 'question' | 'finding' | 'help' | 'challenge' | 'handoff' | 'decision' | 'note';

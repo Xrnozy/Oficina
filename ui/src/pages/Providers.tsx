@@ -124,7 +124,7 @@ export default function Providers() {
   const { data: providers, reload, loading } = useQuery<any>('/providers');
   const { data: usage } = useQuery<any>('/usage');
   const [adding, setAdding] = useState(false);
-  const blank = { kind: 'openai-compatible', id: '', baseUrl: '', model: '', apiKey: '', monthlyBudgetUsd: 25, command: '', timeoutSec: 900, orgId: '', preset: 'claude' };
+  const blank = { kind: 'openai-compatible', id: '', baseUrl: '', model: '', apiKey: '', monthlyBudgetUsd: 25, command: '', timeoutSec: 900, orgId: '', preset: 'claude', resumeArgs: '', newSessionArgs: '', sessionIdPattern: '' };
   const [form, setForm] = useState(blank);
   const [formErr, setFormErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -428,6 +428,15 @@ export default function Providers() {
               </label>
               <label className="block"><span className="field-label">Timeout (seconds)</span><input className="input w-32 num" type="number" value={form.timeoutSec} onChange={(e) => setForm({ ...form, timeoutSec: +e.target.value })} /></label>
               <p className="text-xs text-fg-3 leading-relaxed">Uses the CLI's own login, so no API key is needed. Without a <span className="mono">{'{prompt}'}</span> placeholder the prompt is piped through stdin (safest); <span className="mono">{'{promptFile}'}</span> passes it as a file path instead, for CLIs that don't read stdin (Devin CLI). <span className="mono">{'{worktree}'}</span> and <span className="mono">{'{model}'}</span> (the agent's selected model) are also available.</p>
+              <details className="rounded-lg border border-line px-3 py-2 text-xs">
+                <summary className="cursor-pointer text-fg-2">Session reuse for a custom CLI <span className="text-fg-4">(optional)</span></summary>
+                <div className="mt-2.5 space-y-2.5">
+                  <p className="text-fg-3 leading-relaxed">Claude Code, cursor-agent and Devin already continue their sessions between tasks. For any other CLI, tell Oficina how: the arguments that continue a session (<span className="mono">{'{session}'}</span> is its id), and either the arguments that start one under an id Oficina chooses, or a pattern that reads the id from the CLI's output.</p>
+                  <label className="block"><span className="field-label">Resume arguments</span><input className="input w-full font-mono text-xs" placeholder="--resume {session}" value={form.resumeArgs} onChange={(e) => setForm({ ...form, resumeArgs: e.target.value })} /></label>
+                  <label className="block"><span className="field-label">New-session arguments</span><input className="input w-full font-mono text-xs" placeholder="--session-id {session}" value={form.newSessionArgs} onChange={(e) => setForm({ ...form, newSessionArgs: e.target.value })} /></label>
+                  <label className="block"><span className="field-label">…or session id pattern</span><input className="input w-full font-mono text-xs" placeholder="session=(S+)" value={form.sessionIdPattern} onChange={(e) => setForm({ ...form, sessionIdPattern: e.target.value })} /></label>
+                </div>
+              </details>
             </>)}
             <label className="block"><span className="field-label">Monthly budget (USD)</span><input className="input w-32 num" type="number" min={0} value={form.monthlyBudgetUsd} onChange={(e) => setForm({ ...form, monthlyBudgetUsd: +e.target.value })} /></label>
             {formErr && <div className="text-sm text-bad">{formErr}</div>}

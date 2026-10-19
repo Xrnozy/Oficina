@@ -3,6 +3,8 @@ import { agentInOffice, useOffice } from '../office';
 import React, { useState } from 'react';
 import { get, post, put, useQuery } from '../api';
 import { useProviderCatalog } from './Providers';
+import { TierPicker } from '../tier';
+import { DEFAULT_SESSION, SessionSettings, SessionsPanel, useCliSessions, type CliSessionSettings } from '../cliSessions';
 import { Avatar, Drawer, Empty, KV, Modal, ObsBadge, PageHeader, Segmented, Skeleton, StatusChip, Tag, act, fmtUsd, roleLabel, toast } from '../components';
 import { ArrowDown, ArrowUp, Cpu, Plus, Send, SlidersHorizontal, UserMinus, UserPlus, X } from 'lucide-react';
 
@@ -30,6 +32,13 @@ function settingsSummary(m: any): string {
   return parts.length ? parts.join(' · ') : 'provider defaults';
 }
 
+function sessionSummary(agent: any, sessions: { agentId: string | null; status: string }[]): string {
+  const mode = agent.model?.cliSession?.mode ?? 'reuse';
+  const n = sessions.filter((x) => x.agentId === agent.id && x.status === 'active').length;
+  const label = mode === 'new' ? 'new session each time' : mode === 'pinned' ? 'one pinned session' : 'reuses its session';
+  return mode === 'new' ? label : `${label} · ${n} session${n === 1 ? '' : 's'}`;
+}
+
 const EFFORTS = ['default', 'auto', 'off', 'low', 'medium', 'high'] as const; // auto: the router sizes it per task
 const SUPPORT_NOTE: Record<string, string> = { model: 'Only some models accept this.', engine: 'Applied by the Office, not the provider.' };
 
@@ -51,11 +60,16 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
   const [maxOut, setMaxOut] = useState<string>(m.maxOutputTokens ? String(m.maxOutputTokens) : '');
   const [ctx, setCtx] = useState<string>(m.contextTokens ? String(m.contextTokens) : '');
   const [fallbacks, setFallbacks] = useState<{ accountId: string; modelId: string | null }[]>(m.fallbacks ?? []);
+  const [tier, setTier] = useState<string>(m.tierOverride ?? '');
+  const [cliSession, setCliSession] = useState<CliSessionSettings>({ ...DEFAULT_SESSION, ...(m.cliSession ?? {}) });
+  const { data: sessData } = useCliSessions();
   const [perTask, setPerTask] = useState<string>(String(agent.caps?.perTaskUsd ?? 10));
   const [perDay, setPerDay] = useState<string>(String(agent.caps?.perDayUsd ?? 50));
   const [problem, setProblem] = useState('');
   const prov = provOf(accountId);
   const sup = prov?.settingsSupport ?? {};
+  const isCli = prov?.adapter_id === 'cli';
+  const cliBackend = sessData?.backends.find((b) => b.accountId === accountId);
   const off = (k: string) => sup[k] === 'no';
   // models the backend itself says it offers (live, not a hardcoded list)
   const { models: remoteCatalog, loading: catalogLoading, error: catalogError } = useProviderCatalog(prov?.id, prov?.adapter_id);
@@ -75,6 +89,7 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
     if (mo != null && (!Number.isInteger(mo) || mo < 256)) return setProblem('Max output tokens must be a whole number ≥ 256.');
     if (cx != null && (!Number.isInteger(cx) || cx < 2000)) return setProblem('Context limit must be a whole number ≥ 2000.');
     if (fallbacks.some((f) => !f.accountId)) return setProblem('Pick a backend for every fallback, or remove the empty row.');
+    if (isCli && cliSession.mode === 'pinned' && !cliSession.pinnedId) return setProblem('Choose the session to pin, or pick another session mode.');
     if (fallbacks.some((f) => f.accountId === accountId && f.modelId === modelId)) return setProblem('A fallback repeats the primary model.');
     setProblem('');
     // A catalog model that isn't registered on the provider yet — register it
@@ -91,7 +106,7 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
     const r = await act(put(`/agents/${agent.id}`, {
       name: name.trim() || agent.name, avatar,
       accountId, modelId: finalModelId,
-      settings: { reasoningEffort: effort === 'default' ? null : effort, temperature: t, maxOutputTokens: mo, contextTokens: cx, fallbacks },
+      settings: { reasoningEffort: effort === 'default' ? null : effort, temperature: t, maxOutputTokens: mo, contextTokens: cx, fallbacks, tierOverride: tier || null, ...(isCli ? { cliSession } : {}) },
       caps: { perTaskUsd: Number(perTask) || 0, perDayUsd: Number(perDay) || 0 },
     }), `${agent.name} updated — applies from the next call`);
     if (r) onSaved();
@@ -137,6 +152,14 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
           {catalogError && <p className="text-xs text-warn">Couldn't list models from {prov?.name ?? 'the provider'}: {catalogError}. Registered models are still shown.</p>}
           {sup.note && <p className="text-xs text-fg-3 rounded-lg border border-line bg-sunken/50 px-3 py-2">{sup.note}</p>}
         </section>
+
+        <section className="space-y-3">
+          <h3 className="eyebrow">Model tier</h3>
+          <TierPicker value={tier} onChange={setTier}
+            note="Forces the tier for everything this agent does, in any workflow, including the default pipeline. A workflow step that sets its own tier still wins." />
+        </section>
+
+        {isCli && <SessionSettings value={cliSession} onChange={setCliSession} backend={cliBackend} accountId={accountId} data={sessData} />}
 
         <section className="space-y-3.5">
           <h3 className="eyebrow">Model parameters</h3>
@@ -201,6 +224,8 @@ export default function Agents() {
   const { data: workspaces } = useQuery<any[]>('/workspaces');
   const { data: roles } = useQuery<any[]>('/roles');
   const { data: providers } = useQuery<any>('/providers');
+  const { data: sessData, reload: reloadSessions } = useCliSessions();
+  const { data: officeRepos } = useQuery<any[]>(office ? `/repos?workspaceId=${office.id}` : null, [office?.id]);
   const [hire, setHire] = useState(false);
   const [form, setForm] = useState({ name: '', role: '', workspace: '', avatar: '', observability: 'actions' });
   const [tried, setTried] = useState(false);
@@ -244,6 +269,10 @@ export default function Agents() {
                 {a.caps?.perTaskUsd != null && <KV k="Caps"><span className="num text-xs">{fmtUsd(a.caps.perTaskUsd)}/task · {fmtUsd(a.caps.perDayUsd)}/day</span></KV>}
                 <KV k="Model">{backendName(providers, a.accountId, a.modelId)}</KV>
                 <KV k="Settings"><span className="text-xs">{settingsSummary(a.model)}</span></KV>
+                {a.model?.tierOverride && <KV k="Tier"><span className="text-xs">{a.model.tierOverride} <span className="text-fg-4">(forced)</span></span></KV>}
+                {sessData?.backends.some((b) => b.accountId === a.accountId) && (
+                  <KV k="CLI session"><span className="text-xs">{sessionSummary(a, sessData.sessions)}</span></KV>
+                )}
                 <KV k="Fallbacks">{a.model?.fallbacks?.length
                   ? <ol className="text-xs space-y-0.5">{a.model.fallbacks.map((f: any, i: number) => <li key={i} className="truncate"><span className="text-fg-4 num">{i + 1}.</span> {backendName(providers, f.accountId, f.modelId)}</li>)}</ol>
                   : <span className="text-xs text-fg-4">none — work moves to another agent in the role</span>}</KV>
@@ -267,6 +296,8 @@ export default function Agents() {
           );
         })}
       </div>
+
+      <SessionsPanel agents={agents ?? []} repoPath={officeRepos?.[0]?.path ?? null} data={sessData} reload={reloadSessions} />
 
       {hire && (
         <Modal title="Hire agent" onClose={() => setHire(false)} footer={<>

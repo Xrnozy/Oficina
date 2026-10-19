@@ -48,7 +48,9 @@ export interface SelectProps {
 
 export function Select({ value, onChange, children, className: cls = '', disabled, title, placeholder, autoFocus, ...rest }: SelectProps) {
   // a select is one line: a caller's `block` / `inline-block` would stack the label and the chevron
-  const className = cls.replace(/(^|s)block(?=s|$)/g, '$1flex').replace(/(^|s)inline-block(?=s|$)/g, '$1inline-flex');
+  // never let a flex row squeeze a dropdown to a sliver: unless the caller sets a width, keep it at least 8rem
+  const sized = /(^|s)!?(w-|min-w-|flex-1)/.test(cls) ? cls : `${cls} min-w-[8rem]`;
+  const className = sized.replace(/(^|s)block(?=s|$)/g, '$1flex').replace(/(^|s)inline-block(?=s|$)/g, '$1inline-flex');
   const opts = useMemo(() => collect(children), [children]);
   const current = value == null ? '' : String(value);
   const selected = opts.find((o) => o.value === current);

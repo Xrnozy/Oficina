@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, updateSession } from '../services/cli-sessions.ts';
 import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
 import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -37,7 +38,7 @@ import {
 } from '../services/workflow.ts';
 import { CATALOG_ADAPTERS, fetchCatalog, fetchProviderCatalog, syncProviderModels } from '../services/provider-catalog.ts';
 import { DEFAULT_BASE_URL } from '../services/api-catalog.ts';
-import { CLI_PRESETS, detectInstalledClis } from '../adapters/cli-resolve.ts';
+import { CLI_PRESETS, cliSessionSupport, detectInstalledClis, effectiveCliCommand } from '../adapters/cli-resolve.ts';
 import { registerHistoryRoutes } from './history.ts';
 import {
   attachSkill, createSkill, detachSkill, duplicateSkill, findSkillDirs, hasSkillMd, importSkillDir,
@@ -94,6 +95,41 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.get('/api/workspaces', (_req, res) => {
     const rows = q('SELECT * FROM workspaces').map((r) => ({ ...r, repoIds: parseJson(r.repo_ids as string, []), allowedProviderIds: parseJson(r.allowed_provider_ids as string, []), settings: parseJson(r.settings as string, {}) }));
     ok(res, rows);
+  });
+
+  // ---------- CLI sessions: which conversations CLI agents keep using ----------
+  app.get('/api/cli-sessions', (req, res) => ok(res, {
+    sessions: listSessions({ accountId: req.query.accountId ? String(req.query.accountId) : undefined, agentId: req.query.agentId ? String(req.query.agentId) : undefined, includeArchived: req.query.archived === '1' }),
+    backends: cliBackends(),
+  }));
+  app.post('/api/cli-sessions', (req, res) => {
+    const r = createAdditionalSession({ agentId: req.body?.agentId ?? null, accountId: req.body?.accountId ?? null, cwd: req.body?.cwd ?? null, label: req.body?.label });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
+  });
+  app.post('/api/cli-sessions/import', async (req, res) => {
+    const accountId = String(req.body?.accountId ?? '');
+    const cwd = String(req.body?.cwd ?? '').trim();
+    const acct = accountId ? getAccount(accountId) : null;
+    if (!acct) return err(res, 400, 'choose a CLI backend');
+    if (!cwd) return err(res, 400, 'give the folder whose sessions to import');
+    const backend = cliBackends().find((b) => b.accountId === accountId);
+    if (!backend) return err(res, 400, 'that backend is not a CLI');
+    const cfg = (acct.config ?? {}) as Record<string, unknown>;
+    const template = effectiveCliCommand(String(cfg.command ?? ''));
+    const r = await importSessions({ accountId, preset: backend.preset, template, support: cliSessionSupport(template, cfg), cwd });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
+  });
+  app.put('/api/cli-sessions/:id', (req, res) => {
+    const r = updateSession(req.params.id, { agentId: req.body?.agentId, label: req.body?.label, status: req.body?.status });
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 409, r.error);
+    ok(res, getSession(req.params.id));
+  });
+  app.delete('/api/cli-sessions/:id', (req, res) => {
+    const r = deleteSession(req.params.id);
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 409, r.error);
+    ok(res, r);
   });
 
   // ---------- request queue: prompts typed in the tray or the dashboard wait here, per office ----------
@@ -693,8 +729,10 @@ export function createServer(port: number, uiDir: string): http.Server {
 
   // Create a provider (+ model + account) in one call — the "add backend" form.
   app.post('/api/providers', async (req, res) => {
-    const { kind, name, baseUrl, model, apiKey, monthlyBudgetUsd, command, timeoutSec, orgId } = req.body ?? {};
+    const { kind, name, baseUrl, model, apiKey, monthlyBudgetUsd, command, timeoutSec, orgId, resumeArgs, newSessionArgs, sessionIdPattern } = req.body ?? {};
     if (!kind) return err(res, 400, 'kind required');
+    if (sessionIdPattern) { try { new RegExp(String(sessionIdPattern)); } catch { return err(res, 400, 'the session id pattern is not a valid regular expression'); } }
+    if (resumeArgs && !String(resumeArgs).includes('{session}')) return err(res, 400, 'the resume arguments must contain {session}');
     // id is just a slug for you to recognize the backend — derive it when blank.
     let id = String(req.body?.id ?? '').trim();
     if (!id) {
@@ -728,7 +766,8 @@ export function createServer(port: number, uiDir: string): http.Server {
     const accountId = `acct-${id}`;
     run(`INSERT INTO accounts (id, provider_id, label, secret_ref, billing, monthly_budget_usd, enabled, config)
          VALUES (?,?,?,?,'payg',?,1,?)`, accountId, id, `${name ?? id} account`, secretRef, monthlyBudgetUsd ?? null,
-      JSON.stringify({ baseUrl, command, timeoutSec, orgId: orgId ? String(orgId).trim() : null }));
+      JSON.stringify({ baseUrl, command, timeoutSec, orgId: orgId ? String(orgId).trim() : null,
+        ...(kind === 'cli' && resumeArgs ? { resumeArgs: String(resumeArgs).trim(), newSessionArgs: newSessionArgs ? String(newSessionArgs).trim() : undefined, sessionIdPattern: sessionIdPattern ? String(sessionIdPattern).trim() : undefined } : {}) }));
     emit('account.added', 'owner', { accountId, providerId: id });
     // The model list always comes from the provider itself (Devin needs its key first).
     let syncWarning: string | null = null;
@@ -775,7 +814,7 @@ export function createServer(port: number, uiDir: string): http.Server {
       if (problems.length) return err(res, 400, problems.join('; '));
       // keep non-model settings (e.g. a scripted agent's script) untouched; null clears a field
       settings = { ...a.settings };
-      for (const k of ['reasoningEffort', 'temperature', 'maxOutputTokens', 'contextTokens', 'fallbacks'] as const) {
+      for (const k of ['reasoningEffort', 'temperature', 'maxOutputTokens', 'contextTokens', 'fallbacks', 'tierOverride', 'cliSession'] as const) {
         if (k in patch) { if (patch[k] == null) delete settings[k]; else settings[k] = patch[k]; }
       }
     }

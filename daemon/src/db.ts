@@ -195,6 +195,14 @@ CREATE TABLE IF NOT EXISTS request_queue (
   status TEXT DEFAULT 'queued', run_id TEXT, created_at TEXT, started_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_queue_ws ON request_queue(workspace_id, status);
+-- CLI sessions an agent can keep using across work items instead of starting a new one each time.
+-- external_id is the CLI's own id for the session (what --resume takes); started = the CLI has actually created it.
+CREATE TABLE IF NOT EXISTS cli_sessions (
+  id TEXT PRIMARY KEY, account_id TEXT, preset TEXT NOT NULL, agent_id TEXT, label TEXT DEFAULT '',
+  cwd TEXT NOT NULL, external_id TEXT, started INTEGER DEFAULT 0, status TEXT DEFAULT 'active',
+  busy_item TEXT, uses INTEGER DEFAULT 0, created_at TEXT, last_used_at TEXT, last_item_id TEXT, note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_cli_sessions_agent ON cli_sessions(agent_id, status);
 `);
 
 // Columns added after the first release — added in place, data kept.

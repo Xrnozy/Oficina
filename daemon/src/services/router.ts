@@ -278,11 +278,15 @@ export async function dispatchThroughAdapter(
   // primary backend). Each entry is tried at most once per work item, so an
   // unavailable provider can't cause a retry loop.
   let ownChain = modelChain(candidate.substituted ? { ...candidate, ...pickPrimary(candidate) } : candidate, allowed);
-  const required = node?.requiredTier ?? requiredTier(wi.kind, baseCtx.task?.difficulty ?? 3);
+  // precedence: the workflow node's tier, then this agent's own override, then kind + difficulty
+  const agentTier = modelSettings(candidate.agent.settings).tierOverride ?? undefined;
+  const forcedTier = node?.requiredTier ?? agentTier;
+  const tierSource: 'node' | 'agent' = node?.requiredTier ? 'node' : 'agent';
+  const required = forcedTier ?? requiredTier(wi.kind, baseCtx.task?.difficulty ?? 3);
   if (routingStrategy(workspaceId) === 'smart') {
-    const d = routeChain(ownChain, wi.kind, baseCtx.task?.difficulty ?? 3, node?.requiredTier);
+    const d = routeChain(ownChain, wi.kind, baseCtx.task?.difficulty ?? 3, forcedTier, tierSource);
     ownChain = d.ordered;
-    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, options: ownChain.length, ...(node ? { nodeId: node.id, node: node.label } : {}) }, wi.runId, wi.id);
+    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, tierSource: forcedTier ? tierSource : 'auto', options: ownChain.length, ...(node ? { nodeId: node.id, node: node.label } : {}) }, wi.runId, wi.id);
   }
   const others = fallbacks.filter((f) => f.agent.id !== candidate.agent.id && !f.blocked);
   const chain = [...ownChain, ...others];

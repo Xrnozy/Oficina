@@ -1,3 +1,4 @@
+import { clearBusySessions } from './services/cli-sessions.ts';
 import { startQueueLoop } from './services/queue.ts';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,6 +44,7 @@ wireEngineEvents();
 reconcileOnBoot();
 startTimerLoop();
 startQueueLoop();
+clearBusySessions();
 createServer(config.port, config.uiDir);
 
 // Providers declared in office.yaml are upserted so accounts/agents can point

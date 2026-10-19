@@ -30,6 +30,7 @@ Because the engine is deterministic and event-sourced, every agent — including
 | **Deterministic workflow engine** | A durable state machine drives the loop. Agents are called at defined decision points; loops are bounded (3 attempts, then you decide). |
 | **Definition of Done** | Acceptance criteria map to checks: commands that must `exit 0`, zero open high/critical error reports, reviews approved by a *different* agent, required README sections, and more. |
 | **Visual workflow editor** | Edit the pipeline as a graph (agent, condition, merge, human and end nodes; success/failure/reject/message edges). Validate, dry-run with no model calls, version, clone and activate it — or pick a workflow per request. |
+| **CLI session reuse** | A CLI agent (Claude Code, cursor-agent, Devin) keeps using the same CLI session from task to task instead of opening a new one for every task. Per agent you choose: reuse its session, a new one each time, or one pinned session; what to do when it is busy (start an additional session or wait); and when to rotate. A manager lists every session, lets you assign them to agents, create more and import existing ones. |
 | **Quick requests & queue** | Click the tray icon, type a prompt and pick the office: it joins that office's queue, which the whole app sees (the Dashboard lists it, Requests shows a badge). Start a queued request by hand, or let an office start them itself when it's idle (opt-in, one at a time). |
 | **Multiple offices** | Each office is its own set of agents, desks and workflows. Create one blank or by copying another, switch from the sidebar, and every page follows the choice. Export or import a whole office, or a single workflow, as portable JSON. |
 | **Smart model routing** | Per work item, picks the cheapest model option strong enough for the job — plan-billed CLI logins first, then lowest metered price — with circuit breakers, quota windows, budgets and failover. |
@@ -98,6 +99,17 @@ Right-click gives a themed menu that follows the Windows light/dark setting and 
 The queue appears on the Dashboard. **Start…** opens the New request form with the queued text (so you still pick the repository, budget and workflow); the checkbox lets the office start the next one automatically when it has no run in progress.
 
 <img src="docs/screenshots/queue.png" alt="Dashboard queue panel listing three queued requests with Start and remove buttons and an auto-start checkbox" width="900">
+
+### CLI sessions and the model tier
+Each CLI agent can keep using its own CLI session across tasks, so it remembers earlier work and you don't collect a new session per task. The agent's settings drawer chooses how (reuse, new each time, or pinned), what to do when the session is busy, and when to retire a long one; the **CLI sessions** list on the Agents page assigns sessions to agents and creates or imports more.
+
+<img src="docs/screenshots/cli-session-settings.png" alt="Agent settings drawer showing the model tier choice and the CLI session options" width="560">
+
+<img src="docs/screenshots/cli-sessions.png" alt="CLI sessions list with sessions assigned to agents, usage counts and an in-use state" width="900">
+
+The model tier can be forced per workflow step and per agent. All four choices are visible at once instead of hiding in a dropdown.
+
+<img src="docs/screenshots/tier-override.png" alt="Routing page with the model tier choice (Auto, Fast, Standard, Strong) for a step and for an agent" width="900">
 
 ### Dropdowns
 Selects are a styled, keyboard-accessible dropdown that opens over modals and panels instead of the browser's native list.
@@ -231,7 +243,7 @@ npm run bench -w daemon        # scripted end-to-end scenario (no model calls)
 npm run demo:workflow -w daemon  # end-to-end run on a custom workflow graph
 ```
 
-At the time of writing the daemon type-checks cleanly and the suite passes (146 tests).
+At the time of writing the daemon type-checks cleanly and the suite passes (168 tests).
 
 ## Status and limitations
 

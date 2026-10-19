@@ -1,4 +1,17 @@
-import type { AgentModelSettings, ModelRow } from '../types.ts';
+import type { AgentModelSettings, CliSessionSettings, ModelRow } from '../types.ts';
+
+export const DEFAULT_CLI_SESSION: CliSessionSettings = { mode: 'reuse', pinnedId: null, whenBusy: 'new', rotateAfter: 30 };
+
+/** An agent's CLI-session settings with defaults filled in: reuse its session, add one if it is busy, rotate after 30 work items. */
+export function cliSessionSettings(settings: Record<string, unknown> | undefined): CliSessionSettings {
+  const c = ((settings ?? {}).cliSession ?? {}) as Partial<CliSessionSettings>;
+  return {
+    mode: c.mode === 'new' || c.mode === 'pinned' ? c.mode : 'reuse',
+    pinnedId: typeof c.pinnedId === 'string' && c.pinnedId ? c.pinnedId : null,
+    whenBusy: c.whenBusy === 'wait' ? 'wait' : 'new',
+    rotateAfter: Number.isInteger(c.rotateAfter) && (c.rotateAfter as number) >= 0 ? (c.rotateAfter as number) : DEFAULT_CLI_SESSION.rotateAfter,
+  };
+}
 
 // Which per-agent model settings each integration can actually apply (spec:
 // distinguish provider-level, model-specific and unsupported settings).
@@ -43,6 +56,8 @@ export function modelSettings(settings: Record<string, unknown> | undefined): Ag
     maxOutputTokens: typeof s.maxOutputTokens === 'number' ? s.maxOutputTokens : undefined,
     contextTokens: typeof s.contextTokens === 'number' ? s.contextTokens : undefined,
     fallbacks: Array.isArray(s.fallbacks) ? s.fallbacks : [],
+    tierOverride: s.tierOverride === 'fast' || s.tierOverride === 'standard' || s.tierOverride === 'strong' ? s.tierOverride : null,
+    cliSession: cliSessionSettings(settings),
   };
 }
 
@@ -68,5 +83,13 @@ export function validateModelSettings(s: AgentModelSettings): string[] {
   if (s.temperature != null && (s.temperature < 0 || s.temperature > 2)) p.push('temperature must be between 0 and 2');
   if (s.maxOutputTokens != null && (s.maxOutputTokens < 256 || !Number.isInteger(s.maxOutputTokens))) p.push('maxOutputTokens must be an integer ≥ 256');
   if (s.contextTokens != null && (s.contextTokens < 2000 || !Number.isInteger(s.contextTokens))) p.push('contextTokens must be an integer ≥ 2000');
+  if (s.tierOverride != null && !['fast', 'standard', 'strong'].includes(s.tierOverride)) p.push('tierOverride must be fast|standard|strong');
+  if (s.cliSession != null) {
+    const c = s.cliSession as Partial<CliSessionSettings>;
+    if (c.mode != null && !['reuse', 'new', 'pinned'].includes(c.mode)) p.push('cliSession.mode must be reuse|new|pinned');
+    if (c.whenBusy != null && !['new', 'wait'].includes(c.whenBusy)) p.push('cliSession.whenBusy must be new|wait');
+    if (c.rotateAfter != null && !(Number.isInteger(c.rotateAfter) && c.rotateAfter >= 0 && c.rotateAfter <= 1000)) p.push('cliSession.rotateAfter must be a whole number from 0 to 1000');
+    if (c.mode === 'pinned' && !c.pinnedId) p.push('choose the session to pin');
+  }
   return p;
 }

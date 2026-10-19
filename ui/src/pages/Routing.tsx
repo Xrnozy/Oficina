@@ -6,6 +6,7 @@ import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, toast, u
 import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, GitBranch, Mail, Pencil, Plus, X } from 'lucide-react';
 import type { WorkflowRow } from '../workflow';
 import { useOffice } from '../office';
+import { TierPicker } from '../tier';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
 // Routing: who does each step of the flow, which models each step may run
@@ -60,16 +61,17 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
   ];
   const [opts, setOpts] = useState<Option[]>(initial);
   const [effort, setEffort] = useState<string>(agent.model?.reasoningEffort ?? 'default');
+  const [agentTier, setAgentTier] = useState<string>(agent.model?.tierOverride ?? '');
   const [adding, setAdding] = useState<Option | null>(null);
-  useEffect(() => { setOpts(initial()); setEffort(agent.model?.reasoningEffort ?? 'default'); }, [agent]); // eslint-disable-line react-hooks/exhaustive-deps
-  const dirty = JSON.stringify(opts) !== JSON.stringify(initial()) || effort !== (agent.model?.reasoningEffort ?? 'default');
+  useEffect(() => { setOpts(initial()); setEffort(agent.model?.reasoningEffort ?? 'default'); setAgentTier(agent.model?.tierOverride ?? ''); }, [agent]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dirty = JSON.stringify(opts) !== JSON.stringify(initial()) || effort !== (agent.model?.reasoningEffort ?? 'default') || agentTier !== (agent.model?.tierOverride ?? '');
 
   const move = (i: number, d: number) => setOpts((o) => { const n = [...o]; const [x] = n.splice(i, 1); n.splice(i + d, 0, x); return n; });
   const save = async () => {
     const [first, ...rest] = opts;
     const r = await act(put(`/agents/${agent.id}`, {
       accountId: first?.accountId ?? null, modelId: first?.modelId ?? null,
-      settings: { fallbacks: rest, reasoningEffort: effort === 'default' ? null : effort },
+      settings: { fallbacks: rest, reasoningEffort: effort === 'default' ? null : effort, tierOverride: agentTier || null },
     }), `${agent.name}: model options saved`);
     if (r) onSaved();
   };
@@ -88,6 +90,8 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
           </Select>
         </label>
       </div>
+      <TierPicker className="rounded-lg bg-raised/40 border border-line/70 px-3 py-2.5" label="Model tier for this agent" value={agentTier} onChange={setAgentTier}
+        note="Applies to all of this agent's work, in any workflow. A workflow step that sets its own tier wins." />
       <ol className="space-y-1">
         {opts.map((o, i) => {
           const prov = provOf(o.accountId);
@@ -131,7 +135,7 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
         <div className="flex items-center gap-2">
           <button className="btn btn-sm btn-ghost" onClick={() => setAdding({ accountId: '', modelId: null })}><Plus size={12} /> Add model option</button>
           <div className="flex-1" />
-          {dirty && <button className="btn btn-sm btn-ghost" onClick={() => { setOpts(initial()); setEffort(agent.model?.reasoningEffort ?? 'default'); }}>Reset</button>}
+          {dirty && <button className="btn btn-sm btn-ghost" onClick={() => { setOpts(initial()); setEffort(agent.model?.reasoningEffort ?? 'default'); setAgentTier(agent.model?.tierOverride ?? ''); }}>Reset</button>}
           <button className="btn btn-sm btn-primary" disabled={!dirty} onClick={save}>Save</button>
         </div>
       )}
@@ -158,24 +162,19 @@ function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: Routing
   const full = (id: string) => agentFor(id);
   return (
     <div className="space-y-3">
-      <div className="flex items-end gap-3 flex-wrap rounded-lg border border-line/70 bg-raised/40 px-3 py-2">
-        <label className="text-xs text-fg-3">model tier override
-          <Select className="input input-sm block mt-0.5" value={tier} disabled={!editable} onChange={(e) => setTier(e.target.value)}
-            title={editable ? 'Force the tier the router requires for this step' : 'The default pipeline is read-only — clone it in Workflow'}>
-            <option value="">auto — by kind &amp; difficulty</option>
-            <option value="fast">fast</option>
-            <option value="standard">standard</option>
-            <option value="strong">strong</option>
-          </Select>
-        </label>
-        <label className="text-xs text-fg-3">token budget
-          <input className="input input-sm block mt-0.5 w-28" type="number" min={0} value={budget} disabled={!editable} placeholder="auto"
-            onChange={(e) => setBudget(e.target.value)} title="Prompt + context-pack budget in chars (~4 chars per token)" />
-        </label>
-        {dirty && editable && <button className="btn btn-sm btn-primary" onClick={save}>Save</button>}
-        {dirty && editable && <button className="btn btn-sm btn-ghost" onClick={() => { setTier(step.modelTier ?? ''); setBudget(step.budgetChars != null ? String(step.budgetChars) : ''); }}>Reset</button>}
-        {!editable && <Muted>read-only — clone the workflow in Workflow to tune per-step</Muted>}
-        {step.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>! {w}</Tag>)}
+      <div className="rounded-lg border border-line/70 bg-raised/40 px-3.5 py-3 space-y-3">
+        <TierPicker label="Model tier for this step" value={tier} onChange={setTier} disabled={!editable}
+          note={editable && tier ? 'Overrides the agent\'s own tier.' : undefined} />
+        <div className="flex items-end gap-3 flex-wrap">
+          <label className="text-xs text-fg-3">token budget
+            <input className="input input-sm block mt-0.5 w-28" type="number" min={0} value={budget} disabled={!editable} placeholder="auto"
+              onChange={(e) => setBudget(e.target.value)} title="Prompt + context-pack budget in chars (~4 chars per token)" />
+          </label>
+          {dirty && editable && <button className="btn btn-sm btn-primary" onClick={save}>Save</button>}
+          {dirty && editable && <button className="btn btn-sm btn-ghost" onClick={() => { setTier(step.modelTier ?? ''); setBudget(step.budgetChars != null ? String(step.budgetChars) : ''); }}>Reset</button>}
+          {!editable && <Muted>read-only — clone the workflow in Workflow to tune per-step. You can still set a tier for the agent itself below.</Muted>}
+          {step.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>! {w}</Tag>)}
+        </div>
       </div>
       {step.agents.map((a) => {
         const fa = full(a.id);

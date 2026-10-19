@@ -100,6 +100,33 @@ An **office** is a workspace with its own agents, desks (roles), workflows and r
 
 Agents are referenced **by name**, never by local id. On import a pinned step goes to the agent of that name in the target office (case-insensitive); if there is none it falls back to the step's role and the import reports which steps changed. Machine-specific things are not exported: backends, API keys and model fallbacks. Imported agents start on this machine's first enabled account, so check **Routing** afterwards.
 
+## CLI sessions
+
+A headless CLI run (`claude -p`, `agent -p`, `devin -p`) starts a brand-new conversation unless it is told to continue one, so without help every work item leaves another session behind. Oficina keeps a registry of CLI sessions and tells the CLI to continue one.
+
+**Per agent** (agent settings → *CLI sessions*, CLI backends only):
+
+- **Reuse its session** (default): the agent keeps using its own session. The first work item creates it; later ones continue it, so the CLI remembers earlier work.
+- **New session every time**: the old behaviour, nothing is tracked or reused.
+- **Always one chosen session**: a specific session you pick. Several agents may share it; only one process uses it at a time.
+- **If the session is busy**: *start an additional session* (the default; the new one is kept and reused later) or *wait for it* (up to 10 minutes, then an additional session).
+- **Start a fresh session after N tasks** (default 30, 0 = never): a long-lived session grows slow and costly, so it is retired (archived) and a new one takes over.
+
+**How each CLI is driven** (checked against the real CLIs' help and error messages):
+
+| CLI | New session | Continue | How the id is learned |
+|---|---|---|---|
+| Claude Code | `--session-id <uuid>` chosen by Oficina | `--resume <id>` | assigned up front |
+| cursor-agent | none | `--resume <id>` | `session_id` in the JSON output |
+| Devin CLI | none | `--resume <id>` | `devin list --format json` before/after the run (it lists the folder's sessions) |
+| any other | *New-session arguments* on the backend | *Resume arguments* on the backend | those arguments, or a *session id pattern* applied to the output |
+
+For a custom CLI, fill in the optional *Session reuse* fields when adding the backend (Providers). Without them such a CLI starts fresh every time, and the agent's drawer says so.
+
+**Rules that keep this safe.** A CLI can only continue a session from the folder that started it, so sessions are tracked per folder and backend. A per-task worktree is a different folder every time, so work in isolated mode starts fresh and records nothing, which also means no clutter. If the CLI no longer has a session it is asked to continue ("No conversation found…" from Claude Code, "No session found matching…" from Devin), the session is archived and the work item is retried once with a new one, transparently. If a CLI never reports its session id the row is dropped instead of piling up. A restart clears any "in use" flags.
+
+**Managing them.** The *CLI sessions* list on the Agents page shows each session's agent, folder, how many tasks it has served, when it was last used and whether it is in use. You can rename, assign to another agent (not while it is in use), archive/restore and remove sessions, press *New session* to create an additional one for an agent ahead of time, and, for CLIs that can list their sessions (Devin), *Import* the ones that already exist in the repository; they arrive unassigned and the first agent that needs one claims it. Removing a session only forgets it in Oficina; the CLI keeps its own copy.
+
 ## Request queue
 
 Prompts typed somewhere quick wait in a **per-office queue** that the whole app shares: the Dashboard lists it, and the Requests item in the sidebar shows how many are waiting in the open office.
@@ -152,6 +179,9 @@ Claude Code and cursor-agent `stream-json` are parsed; other CLIs (e.g. Devin) s
 Write general skills (reusable by any role) or role-specific ones on **Skills**, or import `SKILL.md` folders. Imported skills are scanned and need your approval; your own skills don't. Attach a skill to a role or to one agent. Unpinned attachments follow your edits. Each skill can be limited to kinds of work and/or task keywords, so it is sent only where relevant, within a per-prompt budget. Skills travel in the prompt, which works for every provider. Each work item records which skills were applied or skipped and why (`skill.applied`), and the Skills page shows when each was last actually delivered. Skills imported before content was stored are relinked by exact content hash from `~/.claude/skills` and similar folders (or re-import the folder; your approval is kept).
 
 ## Model routing
+
+**Tier override.** The router normally picks the tier from what a work item is and how hard its task is. You can force it in two places: on a **workflow step** (Routing → the step's *Model tier*, custom workflows only) and on an **agent** (agent settings or Routing → *Model tier for this agent*, which also works in the read-only default pipeline). Precedence: the step's tier, then the agent's, then automatic. Each routing decision records where its tier came from.
+
 
 Each agent has an ordered list of **model options** (Routing page; any backend from Providers, mixed freely). For every work item the router picks one:
 

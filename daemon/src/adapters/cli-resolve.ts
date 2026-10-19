@@ -109,8 +109,25 @@ export function killProcessTree(child: ChildProcess): void {
 
 export type CliPresetId = 'claude' | 'cursor' | 'devin';
 
+/**
+ * How a CLI continues a conversation. {session} is the CLI's own session id.
+ *  - assign:  we pick the id for a new session (`fresh` args) and resume it later (Claude Code --session-id / --resume)
+ *  - stream:  the CLI reports the id in its JSON output (cursor-agent)
+ *  - list:    the CLI lists a directory's sessions as JSON; the new one is found by diffing before and after (Devin)
+ *  - pattern: the id is cut out of the output with a regular expression the owner configured
+ */
+export interface CliSessionSupport {
+  resume: string;
+  fresh?: string;
+  idFrom: 'assign' | 'stream' | 'list' | 'pattern';
+  list?: string;
+  pattern?: string;
+}
+
 export interface CliPreset {
   id: CliPresetId;
+  /** how to continue a session with this CLI (absent: no known way) */
+  sessions?: CliSessionSupport;
   label: string;
   command: string;
   /** model-listing subcommands, tried in order (appended to the executable) */
@@ -124,12 +141,14 @@ export const CLI_PRESETS: Record<CliPresetId, CliPreset> = {
     command: 'claude -p --verbose --dangerously-skip-permissions --output-format stream-json',
     // no --bare: it skips the CLI's own login, so /model would report "Not logged in"
     listArgs: ['-p /model', '--list-models', 'models'],
+    sessions: { resume: '--resume {session}', fresh: '--session-id {session}', idFrom: 'assign' },
     loginHint: 'Claude Code did not return models — run `claude auth login` on this machine, then Sync from provider again',
   },
   cursor: {
     id: 'cursor', label: 'cursor-agent',
     command: 'agent -p --output-format stream-json --force',
     listArgs: ['--list-models', 'models'],
+    sessions: { resume: '--resume {session}', idFrom: 'stream' },
     loginHint: 'cursor-agent did not return models — install it (`irm https://cursor.com/install?win32=true | iex`) and run `agent login`, then Sync from provider again',
   },
   devin: {
@@ -137,6 +156,7 @@ export const CLI_PRESETS: Record<CliPresetId, CliPreset> = {
     // Devin's print mode doesn't read stdin, so the prompt goes in as a file
     command: 'devin -p --prompt-file {promptFile} --permission-mode dangerous --respect-workspace-trust false',
     listArgs: ['models list --format json'],
+    sessions: { resume: '--resume {session}', idFrom: 'list', list: 'list --format json' },
     loginHint: 'Devin CLI did not return models — run `devin auth login` (check with `devin auth status`), then Sync from provider again',
   },
 };
@@ -179,6 +199,25 @@ export function detectInstalledClis(pathEnv?: string): { id: CliPresetId; label:
     }
   }
   return found;
+}
+
+/**
+ * Session support for a backend: the owner's own arguments on the account (resumeArgs / newSessionArgs /
+ * sessionIdPattern) win, otherwise the known CLI's defaults. null = this CLI cannot continue a session.
+ */
+export function cliSessionSupport(template: string, cfg: Record<string, unknown> = {}): CliSessionSupport | null {
+  const resume = String(cfg.resumeArgs ?? '').trim();
+  if (resume) {
+    const fresh = String(cfg.newSessionArgs ?? '').trim();
+    const pattern = String(cfg.sessionIdPattern ?? '').trim();
+    return { resume, fresh: fresh || undefined, idFrom: fresh ? 'assign' : pattern ? 'pattern' : 'stream', pattern: pattern || undefined };
+  }
+  return cliPresetOf(template)?.sessions ?? null;
+}
+
+/** Add session arguments (with {session} filled in) to a built command line. */
+export function withSessionArgs(cmd: string, args: string, sessionId: string): string {
+  return `${cmd} ${args.split('{session}').join(JSON.stringify(sessionId))}`;
 }
 
 /** An empty command means the Claude Code preset. */
