@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { post, put, useEvents, useQuery } from '../api';
 import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, toast, useCurrentRun, type Tone } from '../components';
-import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, Mail, Pencil, Plus, X } from 'lucide-react';
+import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, GitBranch, Mail, Pencil, Plus, X } from 'lucide-react';
 import type { WorkflowRow } from '../workflow';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
@@ -189,56 +189,58 @@ function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: Routing
   );
 }
 
-// One step on the flow strip — a workflow node. Click opens it in the editor.
+// One step on the flow rail — a workflow node. Click opens it in the editor.
 function StepCard({ s }: { s: RoutingStep }) {
+  const what =
+    s.type === 'start' ? 'the request enters here'
+    : s.type === 'end' ? 'task completes here'
+    : s.type === 'condition' ? 'branches on a check'
+    : s.type === 'merge' ? 'waits for its branches'
+    : s.type === 'human' ? 'pauses for you'
+    : (PURPOSE_LABEL[s.purpose ?? ''] ?? s.purpose ?? 'step');
+  const chip = 'inline-flex items-center gap-1 rounded-md bg-sunken px-1.5 py-0.5 text-2xs text-fg-3';
   return (
     <Link
       to={`/workflow?node=${s.nodeId}`}
-      className={`rounded-xl border px-3 py-2 text-xs min-w-[10rem] max-w-[15rem] block hover:border-line-strong transition-colors ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
+      className={`block rounded-xl border bg-surface px-3.5 py-2 text-xs hover:border-line-strong transition-colors ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
       title={`${s.label}${s.warnings.length ? ` — ${s.warnings.join('; ')}` : ''}`}
     >
-      <div className="font-medium text-fg text-sm flex items-center gap-1.5 flex-wrap">
-        {s.label}
-        {s.disabled && <Tag tone="idle">bypassed</Tag>}
-        {s.type === 'merge' && <Tag tone="idle">merge</Tag>}
-        {s.type === 'human' && <Tag tone="warn">approval</Tag>}
-      </div>
-      <div className="text-fg-3 mt-0.5">
-        {s.type === 'start' && 'the request enters here'}
-        {s.type === 'end' && 'task completes here'}
-        {s.type === 'condition' && 'branches on a check'}
-        {s.type === 'merge' && 'waits for its branches'}
-        {s.type === 'human' && 'pauses for you'}
-        {s.type === 'agent' && (PURPOSE_LABEL[s.purpose ?? ''] ?? s.purpose ?? 'step')}
-        {s.scope === 'run' && ' · once per run'}
-      </div>
-      <div className="mt-1 flex flex-wrap gap-1">
-        {s.type === 'agent' && (
-          s.agentId
-            ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="bad">agent deleted</Tag>)
-            : s.role
-              ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="warn">any {s.role} — none assigned</Tag>)
-              : <Tag tone="warn">no agent or role</Tag>
-        )}
-        {s.modelTier && <Tag tone={TIER_TONE[s.modelTier]}>{s.modelTier}</Tag>}
-        {s.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>!</Tag>)}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <div className="min-w-[11rem] flex-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="font-medium text-fg text-sm">{s.label}</span>
+          {s.disabled && <Tag tone="idle">bypassed</Tag>}
+          {s.type === 'merge' && <Tag tone="idle">merge</Tag>}
+          {s.type === 'human' && <Tag tone="warn">approval</Tag>}
+          <span className="text-fg-3">{what}{s.scope === 'run' && ' · once per run'}</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          {s.type === 'agent' && (
+            s.agentId
+              ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="bad">agent deleted</Tag>)
+              : s.role
+                ? (s.agents.length ? s.agents.map((a) => <Tag key={a.id}>{a.name}</Tag>) : <Tag tone="warn">any {s.role} — none assigned</Tag>)
+                : <Tag tone="warn">no agent or role</Tag>
+          )}
+          {s.modelTier && <Tag tone={TIER_TONE[s.modelTier]}>{s.modelTier}</Tag>}
+          {s.warnings.map((w, k) => <Tag key={k} tone="warn" title={w}>!</Tag>)}
+        </div>
       </div>
       {(s.loops.length > 0 || s.exits.length > 0 || s.messages.length > 0) && (
-        <div className="mt-1.5 space-y-0.5 border-t border-line/60 pt-1">
+        <div className="mt-2 flex flex-wrap gap-1.5 border-t border-line/60 pt-2">
           {s.loops.map((e) => (
-            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-fg-3">
+            <span key={e.edgeId} className={chip}>
               <CornerUpLeft size={10} className="shrink-0" /> {e.label ?? 'back'} → {e.toLabel}{e.maxLoops ? ` ×${e.maxLoops}` : ''}
-            </div>
+            </span>
           ))}
           {s.exits.map((e) => (
-            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-fg-3">
+            <span key={e.edgeId} className={chip}>
               <ArrowRight size={10} className="shrink-0" /> {e.label ?? e.kind} → {e.toLabel}
-            </div>
+            </span>
           ))}
           {s.messages.map((e) => (
-            <div key={e.edgeId} className="flex items-center gap-1 text-2xs text-info">
+            <span key={e.edgeId} className={`${chip} !text-info`}>
               <Mail size={10} className="shrink-0" /> {e.label ?? 'message'} → {e.toLabel}
-            </div>
+            </span>
           ))}
         </div>
       )}
@@ -246,43 +248,44 @@ function StepCard({ s }: { s: RoutingStep }) {
   );
 }
 
-function FlowRows({ rows }: { rows: RoutingRow[] }) {
+// The flow reads top to bottom along a rail: numbered steps on the main path, small dots inside a
+// branch lane. A fan-out splits into side-by-side lanes, each headed by its condition.
+function FlowRows({ rows, nested = false }: { rows: RoutingRow[]; nested?: boolean }) {
+  let n = 0;
   return (
-    <ol className="flex flex-wrap items-stretch gap-2">
-      {rows.map((r, i) => <FlowRowView key={i} row={r} arrow={i > 0} />)}
+    <ol>
+      {rows.map((r, i) => {
+        const last = i === rows.length - 1;
+        const marker = r.kind === 'step' ? (nested ? null : ++n) : r.kind === 'back' ? 'back' : 'branch';
+        return (
+          <li key={i} className={`relative ${nested ? 'pl-6' : 'pl-10'} ${last ? '' : 'pb-3'}`}>
+            {!last && <span aria-hidden className={`absolute w-px bg-line ${nested ? 'left-[3.5px] top-5 bottom-0' : 'left-[13.5px] top-8 bottom-0'}`} />}
+            {marker === null && <span aria-hidden className="absolute left-0 top-[16px] h-2 w-2 rounded-full border border-line-strong bg-surface" />}
+            {marker !== null && (
+              <span aria-hidden className={`absolute left-0 grid h-7 w-7 place-items-center rounded-full border border-line-strong bg-surface text-2xs font-mono text-fg-2 ${nested ? 'top-0.5' : 'top-1'}`}>
+                {marker === 'back' ? <CornerUpLeft size={12} /> : marker === 'branch' ? <GitBranch size={12} /> : marker}
+              </span>
+            )}
+            {r.kind === 'step' && <StepCard s={r.step} />}
+            {r.kind === 'back' && (
+              <div className="inline-flex items-center gap-1 rounded-lg border border-dashed border-line-strong px-2.5 py-1.5 text-xs text-fg-3">
+                back to <b className="font-medium text-fg-2">{r.toLabel}</b>
+              </div>
+            )}
+            {r.kind === 'branches' && (
+              <div className={`grid gap-3 ${r.lanes.length > 1 && !nested ? 'lg:grid-cols-2' : ''}`}>
+                {r.lanes.map((l) => (
+                  <div key={l.edgeId} className="min-w-0 rounded-xl border border-dashed border-line-strong bg-sunken/40 p-3">
+                    <div className="mb-3"><Tag tone={l.isElse ? 'idle' : 'info'}>{l.label}</Tag></div>
+                    <FlowRows rows={l.rows} nested />
+                  </div>
+                ))}
+              </div>
+            )}
+          </li>
+        );
+      })}
     </ol>
-  );
-}
-
-function FlowRowView({ row, arrow = true }: { row: RoutingRow; arrow?: boolean }) {
-  if (row.kind === 'step') {
-    return (
-      <>
-        {arrow && <li className="self-center text-fg-4"><ArrowRight size={14} /></li>}
-        <li><StepCard s={row.step} /></li>
-      </>
-    );
-  }
-  if (row.kind === 'back') {
-    return (
-      <li className="self-center flex items-center gap-1 text-2xs text-fg-3 rounded-lg border border-dashed border-line px-2 py-1">
-        <CornerUpLeft size={11} /> back to {row.toLabel}
-      </li>
-    );
-  }
-  // a fan-out: each lane is a stacked row labeled by its condition
-  return (
-    <li className="w-full mt-1 space-y-1.5">
-      {row.lanes.map((l) => (
-        <div key={l.edgeId} className="flex items-start gap-2">
-          <Tag tone={l.isElse ? 'idle' : 'info'}>{l.label}</Tag>
-          <ArrowRight size={12} className="mt-1 text-fg-4 shrink-0" />
-          <ol className="flex flex-wrap items-stretch gap-2 min-w-0">
-            {l.rows.map((r, i) => <FlowRowView key={i} row={r} arrow={i > 0} />)}
-          </ol>
-        </div>
-      ))}
-    </li>
   );
 }
 

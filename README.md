@@ -47,9 +47,9 @@ Build or clone a pipeline as a graph. When a run is selected, node rings and tak
 <img src="docs/screenshots/workflow.png" alt="Workflow editor showing a custom graph with a condition branch, loops and a message edge, with node states from a finished run" width="900">
 
 ### Routing
-The routing page is derived from the saved active workflow: each step shows its agents and model tier, with per-node overrides.
+The flow is derived from the saved active workflow and reads top to bottom: numbered steps, branch lanes with their conditions, and loop, send-back and message links on each step. Per-node model tier and budget overrides sit below it.
 
-<img src="docs/screenshots/routing.png" alt="Routing page showing the flow strip derived from the active workflow and per-agent model options" width="900">
+<img src="docs/screenshots/routing.png" alt="Routing page showing the active workflow as a numbered vertical flow with a two-lane branch, followed by per-agent model options" width="900">
 
 ### Live activity
 What each agent's CLI reports — prompts, messages, checks and hand-offs — with no extra model calls.
