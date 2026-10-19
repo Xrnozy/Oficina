@@ -1,6 +1,6 @@
 import { q, q1, run, tx } from '../db.ts';
 import { emit, onEvent } from '../bus.ts';
-import { compactLog, minutesFromNow, now, parseJson, shortId, ulid } from '../util.ts';
+import { compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import type {
   Check, DodItem, PlanDiff, PlanTaskSpec, Repo, Run, StopLimits, Task,
@@ -21,7 +21,9 @@ import {
 import { contextBudget } from '../services/models.ts';
 import { extractMessages, formatInbox, postMessage, takeInbox } from '../services/messages.ts';
 import { envelopeText, handoffEnvelope, STRICT_REPLY_KINDS, validateReply } from '../services/handoffs.ts';
+import { backoffDelayMs, classifyFailure, fixHintFor, notifyOnce } from '../services/failure.ts';
 import { getAdapter } from '../adapters/index.ts';
+import { killCliChildrenForRun } from '../adapters/cli.ts';
 import { requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
 import { AdapterError } from '../adapters/types.ts';
 import { beginCheckpoint, endCheckpoint, getCheckpoint, recoverInterruptedCheckpoints, setCheckpointCommit, type Checkpoint } from '../services/checkpoints.ts';
@@ -296,6 +298,9 @@ export function pauseRun(runId: string, hard = false): void {
   setRunStatus(runId, 'pausing', { hard });
   const inFlight = q1(`SELECT COUNT(*) c FROM work_items WHERE run_id = ? AND status IN ('queued','running')`, runId)?.c as number;
   if (hard) {
+    // kill agent CLI children first — their close handlers must still see the
+    // cancelled status below, so mark items after the kill fires
+    killCliChildrenForRun(runId);
     for (const wi of q(`SELECT id FROM work_items WHERE run_id = ? AND status IN ('queued','running')`, runId)) {
       run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
       emit('workitem.cancelled', 'owner', { hard: true }, runId, wi.id as string);
@@ -315,6 +320,7 @@ export function resumeRun(runId: string): void {
 
 export function stopRun(runId: string, reason = 'OWNER'): void {
   setRunStatus(runId, 'stopped', { stopReason: reason });
+  killCliChildrenForRun(runId);
   for (const wi of q(`SELECT id FROM work_items WHERE run_id = ? AND status IN ('queued','running','waiting')`, runId)) {
     run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
   }
@@ -485,10 +491,15 @@ function applyPlanDiff(runId: string, diff: PlanDiff, plannedBy: string, dodItem
 // Work item records + dispatch
 // ---------------------------------------------------------------------------
 
-function createWorkItemRecord(runId: string, task: Task | null, kind: WorkItemKind, candidate: Candidate, prompt: string | RenderedPrompt, packHash: string): WorkItem {
+export function createWorkItemRecord(runId: string, task: Task | null, kind: WorkItemKind, candidate: Candidate, prompt: string | RenderedPrompt, packHash: string): WorkItem {
   const wiId = ulid();
   const pvId = ulid();
   const text = typeof prompt === 'string' ? prompt : prompt.text;
+  const key = shaKey(task?.id ?? 'run', kind, text);
+  // idempotent requeue: the same logical dispatch (task, kind, prompt) must
+  // not create a second live work item — e.g. a restart plus a nudge
+  const dup = q1(`SELECT id FROM work_items WHERE idempotency_key = ? AND status NOT IN ('failed','cancelled','interrupted','delivered')`, key);
+  if (dup) return getWorkItem(dup.id as string)!;
   const dropped = typeof prompt === 'string' ? [] : prompt.dropped;
   const budgetChars = typeof prompt === 'string' ? null : prompt.budgetChars;
   run(`INSERT INTO prompt_versions (id, work_item_id, template_id, version, rendered_text, context_pack_hash, dropped, budget_chars, created_at)
@@ -497,13 +508,15 @@ function createWorkItemRecord(runId: string, task: Task | null, kind: WorkItemKi
   run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, status, started_at, heartbeat_at, attempt)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wiId, task?.id ?? null, runId, kind, candidate.agent.id, candidate.account?.id ?? null, candidate.model?.id ?? null,
-    pvId, shaKey(task?.id ?? 'run', kind, text), 'queued', now(), now(), task ? task.attempts + 1 : 1);
+    pvId, key, 'queued', now(), now(), task ? task.attempts + 1 : 1);
   emit('workitem.created', 'engine', { kind, agent: candidate.agent.name, taskId: task?.id }, runId, wiId);
   return getWorkItem(wiId)!;
 }
 
+// Stable key for a logical dispatch: a restart + nudge, or a double sweep,
+// must not create two live work items for the same work.
 function shaKey(taskId: string, kind: string, prompt: string): string {
-  return `${taskId}:${kind}:${prompt.length}:${Date.now()}`;
+  return `${taskId}:${kind}:${prompt.length}:${sha256(prompt)}`;
 }
 
 function scheduleTimer(runId: string | null, inMinutes: number, type: string, payload: Record<string, unknown>): void {
@@ -600,6 +613,13 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
     );
 
     if (live) clearInterval(live);
+    // a stopped/hard-paused run killed this work item's process — the adapter
+    // resolved, but the result must not be recorded as a delivery
+    if (getWorkItem(wi.id)?.status === 'cancelled') {
+      if (agentCp) { try { endCheckpoint(agentCp.id, 'interrupted'); } catch { /* repo gone */ } agentCp = null; }
+      setAgentStatus(candidate.agent.id, 'idle');
+      return;
+    }
     if (agentCp) {
       const done = endCheckpoint(agentCp.id);
       agentCp = null;
@@ -627,8 +647,11 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
       run('UPDATE runs SET spent_usd = spent_usd + ? WHERE id = ?', result.usage.costUsd, wi.runId);
       const t2 = getTask(wi.taskId);
       if (t2 && t2.spentUsd > t2.budgetUsd && !TERMINAL_TASK.includes(t2.status)) {
-        setTaskStatus(t2.id, 'failed', 'engine', { reason: `BUDGET_TASK: spent $${t2.spentUsd.toFixed(2)} > $${t2.budgetUsd}` });
-        requestApproval({ action: 'task.budget', taskId: t2.id, runId: wi.runId, requestedBy: 'engine', payload: { summary: `Task "${t2.title}" exceeded its $${t2.budgetUsd} budget` } });
+        // per-task cost ceiling: pause the run and ask once — the delivery
+        // itself already landed, so the task waits for the owner's call
+        setTaskStatus(t2.id, 'waiting-input', 'engine', { reason: `cost ceiling: spent $${t2.spentUsd.toFixed(2)} of $${t2.budgetUsd}` });
+        notifyOnce(wi.runId, 'task.budget', t2.id, `Task "${t2.title}" exceeded its $${t2.budgetUsd} cost ceiling (spent $${t2.spentUsd.toFixed(2)})`, { hint: 'Raise the task budget and resume, or stop the run.' });
+        pauseRun(wi.runId);
         setAgentStatus(usedAgent.id, 'idle');
         return;
       }
@@ -677,7 +700,7 @@ function relayAgentMessages(wi: WorkItem, result: NonNullable<WorkItem['result']
 // prompts — and never receives code, review, test or analysis work. Roles not
 // listed (custom roles) are unrestricted.
 const ROLE_WORK: Record<string, WorkItemKind[]> = {
-  pm: ['plan', 'prompt', 'prompt-review', 'accept'],
+  pm: ['plan', 'prompt', 'prompt-review', 'accept', 'diagnose'],
   'prompt-creator': ['prompt'],
   reviewer: ['review'],
   analyst: ['analyse'],
@@ -698,7 +721,7 @@ function pmHandoff(r: Run, task: Task, to: Candidate, text: string): void {
 }
 
 function roleNameFor(kind: WorkItemKind, task: Task | null): string {
-  if (kind === 'plan' || kind === 'prompt-review' || kind === 'accept') return 'pm';
+  if (kind === 'plan' || kind === 'prompt-review' || kind === 'accept' || kind === 'diagnose') return 'pm';
   if (kind === 'prompt') return 'prompt-creator';
   if (kind === 'review') return 'reviewer';
   if (kind === 'analyse') return 'analyst';
@@ -711,7 +734,7 @@ function roleNameFor(kind: WorkItemKind, task: Task | null): string {
 // What an agent is doing, from the work it is actually running.
 const AGENT_STATE: Partial<Record<WorkItemKind, string>> = {
   plan: 'planning', prompt: 'planning', 'prompt-review': 'reviewing', accept: 'reviewing', review: 'reviewing',
-  qa: 'testing', test: 'coding', implement: 'coding', fix: 'coding', doc: 'coding', analyse: 'working',
+  qa: 'testing', test: 'coding', implement: 'coding', fix: 'coding', doc: 'coding', analyse: 'working', diagnose: 'working',
 };
 
 function setAgentStatus(agentId: string, status: string): void {
@@ -805,18 +828,70 @@ async function handleWorkItemFailure(wi: WorkItem, msg: string): Promise<void> {
     }
     return;
   }
-  run('UPDATE tasks SET attempts = attempts + 1 WHERE id = ?', task.id);
+  const cls = classifyFailure(msg);
+  if (cls === 'fatal') {
+    // fatal (auth, missing CLI, repo conflict): pause the run and raise one
+    // Needs-you item with the concrete fix — retrying cannot help
+    setTaskStatus(task.id, 'waiting-input', 'engine', { reason: msg.slice(0, 300) });
+    notifyOnce(wi.runId, 'run.fatal', task.id, `Fatal error — run paused: ${msg.slice(0, 300)}`, { fix: fixHintFor(msg), kind: wi.kind });
+    pauseRun(wi.runId);
+    return;
+  }
   const r = getRun(wi.runId)!;
+  // model-quality dispatch failures: one bounce on a stronger tier before the
+  // attempt budget burns (delivered-but-invalid replies go through repairReply)
+  if (cls === 'model-quality' && !task.meta?.tierEscalated) {
+    setTaskMeta(task.id, 'tierEscalated', true);
+    run('UPDATE tasks SET difficulty = ? WHERE id = ?', Math.min(5, task.difficulty + 2), task.id);
+    emit('task.strategy', 'engine', { taskId: task.id, strategy: 'stronger-tier', reason: msg.slice(0, 200) }, wi.runId, task.id);
+    setTaskStatus(task.id, 'ready', 'engine', { reason: 'invalid output — retrying on a stronger model' });
+    void maybeAdvanceRun(wi.runId);
+    return;
+  }
+  run('UPDATE tasks SET attempts = attempts + 1 WHERE id = ?', task.id);
   if (task.attempts + 1 >= r.limits.sameErrorAttempts) {
+    // before the owner is asked, the PM gets one shot at a diagnosis + strategy
+    if (dispatchDiagnosis(getTask(task.id)!, msg)) return;
     setTaskStatus(task.id, 'failed', 'engine', { reason: msg });
     requestApproval({
       action: 'task.escalate', taskId: task.id, runId: wi.runId, requestedBy: 'engine',
       payload: { summary: `Task "${task.title}" failed ${task.attempts + 1} dispatch attempt(s): ${msg.slice(0, 200)}` },
     });
   } else {
-    setTaskStatus(task.id, 'ready', 'engine', { reason: 'dispatch failed, retrying' });
+    // transient: exponential backoff with jitter — the task stays out of the
+    // ready pool until the delay lands
+    const delay = cls === 'transient' ? backoffDelayMs(task.attempts + 1) : 0;
+    emit('workitem.retry', 'engine', { taskId: task.id, kind: wi.kind, class: cls, inSec: Math.round(delay / 1000), error: msg.slice(0, 200) }, wi.runId, task.id);
+    const requeue = () => { const t = getTask(task.id); if (t && !TERMINAL_TASK.includes(t.status) && t.status !== 'waiting-input') { setTaskStatus(task.id, 'ready', 'engine', { reason: 'retry after backoff' }); void maybeAdvanceRun(wi.runId); } };
+    if (delay) setTimeout(requeue, delay); else requeue();
   }
-  void maybeAdvanceRun(wi.runId);
+}
+
+// ---------------------------------------------------------------------------
+// PM diagnosis (stage 4.3): when a task exhausts its dispatch attempts the PM
+// writes a short diagnosis and picks one strategy change — a stronger model,
+// or splitting the task — before the owner is asked.
+// ---------------------------------------------------------------------------
+
+function dispatchDiagnosis(task: Task, why: string): boolean {
+  if (task.meta?.diagnosed) return false;   // already diagnosed once
+  const r = getRun(task.runId);
+  if (!r || r.status !== 'running') return false;
+  const pm = pickHelper(r.workspaceId, 'pm', [task.ownerAgentId ?? undefined]);
+  if (!pm) return false;
+  setTaskMeta(task.id, 'diagnosed', true);
+  const history = q(`SELECT kind, error_signature, status, finished_at FROM work_items WHERE task_id = ? AND status = 'failed' ORDER BY finished_at DESC LIMIT 4`, task.id)
+    .map((w) => `- ${w.kind} failed: ${String(w.error_signature ?? '').slice(0, 200)}`);
+  const prompt = renderPrompt({
+    kind: 'diagnose', agent: pm.agent, role: pm.role, task, pack: deskPack(pm, 8000, 'diagnose'), adapterId: pm.provider?.adapterId,
+    extra: { checkResults: `Dispatch failures (${r.limits.sameErrorAttempts} attempts exhausted):\n${why.slice(0, 800)}\n${history.join('\n')}`,
+      approvedPrompt: approvedPromptFor(task.id) },
+  });
+  setTaskStatus(task.id, 'in-review', 'engine', { stage: 'diagnose', pm: pm.agent.name });
+  const wi = createWorkItemRecord(r.id, task, 'diagnose', pm, prompt, 'desk');
+  emit('task.diagnosing', 'engine', { taskId: task.id, pm: pm.agent.name }, r.id, wi.id);
+  void executeWorkItem(wi, pm, prompt.text, null);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1118,39 @@ async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['resul
       setTaskStatus(task.id, 'changes-requested', 'pm', { reason: j.notes ?? 'sent back for rework' });
       const instructions = typeof j.prompt === 'string' && j.prompt.trim() ? j.prompt.trim() : `Rework needed: ${j.notes ?? 'see the QA report'}`;
       dispatchFix(task, instructions, false, instructions);
+      return;
+    }
+
+    case 'diagnose': {
+      if (!task) return;
+      const raw = (result.raw ?? {}) as Record<string, any>;
+      const j = (raw.json ?? raw) as { diagnosis?: string; strategy?: string; splits?: { title?: string; description?: string; affectedPaths?: string[]; acceptanceCriteria?: string[] }[]; notes?: string };
+      emit('task.diagnosed', getAgent(usedAgentId)?.name ?? 'pm', { taskId: task.id, diagnosis: j.diagnosis ?? null, strategy: j.strategy ?? 'human' }, r.id, task.id);
+      const splits = (Array.isArray(j.splits) ? j.splits : []).filter((s) => s?.title).slice(0, 3);
+      if (j.strategy === 'retry-stronger') {
+        run('UPDATE tasks SET attempts = 0, difficulty = ? WHERE id = ?', Math.min(5, task.difficulty + 2), task.id);
+        emit('task.strategy', 'engine', { taskId: task.id, strategy: 'stronger-tier', diagnosis: j.diagnosis }, r.id, task.id);
+        setTaskStatus(task.id, 'ready', 'engine', { reason: `PM diagnosis: retry on a stronger model — ${j.diagnosis ?? ''}` });
+      } else if (j.strategy === 'split' && splits.length >= 2) {
+        for (const s of splits) {
+          const tid = ulid();
+          run(`INSERT INTO tasks (id, run_id, parent_id, title, description, type, status, priority, depends_on, acceptance_criteria, planned_by, difficulty, budget_usd, affected_paths, meta)
+               VALUES (?,?,?,?,?,?, 'ready', ?, '[]', ?, 'pm', ?, ?, ?, '{}')`,
+            tid, r.id, task.id, String(s.title).slice(0, 200), String(s.description ?? '').slice(0, 2000), task.type, task.priority,
+            JSON.stringify((s.acceptanceCriteria ?? []).slice(0, 8)), task.difficulty, task.budgetUsd, JSON.stringify((s.affectedPaths ?? []).slice(0, 20)));
+          emit('task.created', 'engine', { taskId: tid, title: s.title, splitFrom: task.id }, r.id, tid);
+        }
+        setTaskStatus(task.id, 'cancelled', 'engine', { reason: `split into ${splits.length} subtasks by the PM` });
+      } else {
+        // "human" — or an unreadable strategy: escalate with the diagnosis
+        setTaskStatus(task.id, 'failed', 'engine', { reason: j.diagnosis ?? 'PM could not find a strategy change' });
+        requestApproval({
+          action: 'task.escalate', taskId: task.id, runId: r.id, requestedBy: 'pm',
+          payload: { summary: `"${task.title}" needs the owner. PM diagnosis: ${(j.diagnosis ?? j.notes ?? 'no path forward').slice(0, 300)}` },
+        });
+        return;
+      }
+      void maybeAdvanceRun(r.id);
       return;
     }
 
@@ -1874,6 +1982,13 @@ export async function maybeAdvanceRun(runId: string): Promise<void> {
   const stop = evaluateStopRules(r);
   if (stop) {
     if (stop === 'pause') { pauseRun(runId); return; }
+    if (stop.startsWith('CEILING:')) {
+      // a ceiling pauses (never kills) and tells the owner once
+      notifyOnce(runId, 'run.ceiling', null, stop.slice(8), { hint: 'Adjust the limit under the run controls, then resume.' });
+      emit('run.ceiling', 'engine', { reason: stop.slice(8) }, runId, runId);
+      pauseRun(runId);
+      return;
+    }
     stopRun(runId, stop);
     return;
   }
@@ -1947,12 +2062,21 @@ export async function maybeAdvanceRun(runId: string): Promise<void> {
   assignSweep(runId);
 }
 
+// Ceilings pause the run (never kill) and notify once with the exact reason;
+// 'pause' alone stays silent — those rules emit their own events already.
 function evaluateStopRules(r: Run): string | 'pause' | null {
-  if (r.spentUsd >= r.budget.runUsd) return 'BUDGET_RUN';
+  if (r.spentUsd >= r.budget.runUsd) return `CEILING:Run budget reached — spent $${r.spentUsd.toFixed(2)} of the $${r.budget.runUsd} cap. Raise the budget or stop the run.`;
   if (r.spentUsd >= r.budget.runUsd * (r.budget.warnPct / 100)) {
     emit('budget.warn', 'engine', { spentUsd: r.spentUsd, budget: r.budget.runUsd }, r.id);
   }
-  if (r.startedAt && Date.now() - Date.parse(r.startedAt) > r.limits.maxWallclockMin * 60000) return 'MAX_WALLCLOCK';
+  if (r.startedAt && Date.now() - Date.parse(r.startedAt) > r.limits.maxWallclockMin * 60000)
+    return `CEILING:Run time limit reached — ${r.limits.maxWallclockMin} min wallclock. Raise the limit (or resume to continue anyway).`;
+  const maxTaskMin = Number((r.limits as { maxTaskMinutes?: number }).maxTaskMinutes) || 0;
+  if (maxTaskMin > 0) {
+    const over = q1(`SELECT w.task_id FROM work_items w WHERE w.run_id = ? AND w.status = 'running' AND w.started_at < ? LIMIT 1`,
+      r.id, new Date(Date.now() - maxTaskMin * 60000).toISOString());
+    if (over) return `CEILING:A task exceeded the per-task time limit (${maxTaskMin} min). Raise it, or resume to keep waiting.`;
+  }
   // NO_PROGRESS / REGRESSION from cycle history
   const cycles = q('SELECT progress_score FROM cycles WHERE run_id = ? AND ended_at IS NOT NULL ORDER BY n DESC LIMIT 4', r.id)
     .map((c) => c.progress_score as number);

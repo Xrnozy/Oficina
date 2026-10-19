@@ -218,6 +218,20 @@ function roleSection(role: Role | undefined): string {
   return lines.join('\n');
 }
 
+// PM diagnosis prompt (stage 4): runs once when a task exhausts its dispatch
+// attempts — diagnose why, pick exactly one strategy change.
+const DIAGNOSE_CONTRACT = `
+OUTPUT CONTRACT (mandatory): reply with ONLY a JSON object:
+{
+  "diagnosis": "why this task keeps failing — one or two specific sentences",
+  "strategy": "retry-stronger" | "split" | "human",
+  "splits": [ { "title": "...", "description": "...", "affectedPaths": ["..."] } ],
+  "notes": "optional note for the owner"
+}
+- "splits" is required for "split" (2–3 smaller tasks, disjoint paths) and ignored otherwise.
+- Choose "human" only when neither retrying on a stronger model nor splitting can help.
+`.trim();
+
 const FILE_KINDS: WorkItemKind[] = ['implement', 'fix', 'test', 'doc'];
 
 // A rendered prompt plus what was cut to fit the budget (recorded on the
@@ -302,6 +316,7 @@ export function renderPrompt(opts: {
     case 'accept': stable.push(ACCEPT_CONTRACT); break;
     case 'prompt': stable.push(PROMPT_CONTRACT); break;
     case 'prompt-review': stable.push(PROMPT_REVIEW_CONTRACT); break;
+    case 'diagnose': stable.push(DIAGNOSE_CONTRACT); break;
   }
   if (!FILE_KINDS.includes(kind) && kind !== 'qa' && (opts.adapterId === 'cli' || opts.adapterId === 'devin')) stable.push(READ_ONLY);
   if (kind !== 'prompt-review' && kind !== 'prompt') stable.push(COLLAB);

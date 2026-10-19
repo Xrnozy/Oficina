@@ -216,7 +216,7 @@ export interface Task {
   meta: Record<string, unknown>;
 }
 
-export type WorkItemKind = 'plan' | 'implement' | 'review' | 'test' | 'analyse' | 'fix' | 'doc' | 'prompt' | 'prompt-review' | 'qa' | 'accept';
+export type WorkItemKind = 'plan' | 'implement' | 'review' | 'test' | 'analyse' | 'fix' | 'doc' | 'prompt' | 'prompt-review' | 'qa' | 'accept' | 'diagnose';
 
 // Per-agent model configuration (kept in agents.settings). Which fields a
 // backend honours is described by settingsSupport() in services/models.ts.

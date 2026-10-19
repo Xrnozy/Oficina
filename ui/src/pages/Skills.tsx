@@ -9,7 +9,7 @@ import { Copy, FolderInput, Link2, Pencil, Plus, Puzzle, RefreshCw, ShieldCheck,
 // content and is attached to the agent or its role — and only for relevant
 // work. "Last applied" is read from what was actually sent to agents.
 
-const KINDS = ['implement', 'fix', 'test', 'doc', 'qa', 'review', 'analyse', 'plan', 'prompt', 'prompt-review', 'accept'];
+const KINDS = ['implement', 'fix', 'test', 'doc', 'qa', 'review', 'analyse', 'plan', 'prompt', 'prompt-review', 'accept', 'diagnose'];
 
 interface Draft { id?: string; name: string; category: 'general' | 'role'; description: string; purpose: string; useCases: string; instructions: string; constraints: string; expectedOutput: string; kinds: string[]; keywords: string }
 const EMPTY: Draft = { name: '', category: 'general', description: '', purpose: '', useCases: '', instructions: '', constraints: '', expectedOutput: '', kinds: [], keywords: '' };

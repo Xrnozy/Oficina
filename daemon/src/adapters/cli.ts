@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../db.ts';
 import { headSha } from '../services/git.ts';
-import { buildCliCommand, cliExecutable, effectiveCliCommand, prepareCliCommand, spawnShell } from './cli-resolve.ts';
+import { buildCliCommand, cliExecutable, effectiveCliCommand, killProcessTree, prepareCliCommand, spawnShell } from './cli-resolve.ts';
 import { parseJsonFromText } from './llm.ts';
 import { CliStream, parseCliLine } from './cli-events.ts';
 import { AdapterError, type Adapter, type AdapterCtx } from './types.ts';
@@ -14,6 +14,21 @@ import type { WorkItemResult } from '../types.ts';
 // worktree. Delivery is detected via the Git boundary: when the process
 // exits, HEAD on the task branch is the result. Streams stdout lines as
 // agent.output events; hard timeout per account.config.timeoutSec.
+
+// Live CLI children keyed by pid — a run stop/hard-pause kills the whole
+// tree, not just the shell wrapper.
+const liveChildren = new Map<number, { runId: string | null; workItemId: string }>();
+
+export function killCliChildrenForRun(runId: string): number {
+  let n = 0;
+  for (const [pid, meta] of liveChildren) {
+    if (meta.runId !== runId) continue;
+    // synthetic handle: only pid is needed by killProcessTree on win32
+    killProcessTree({ pid } as Parameters<typeof killProcessTree>[0]);
+    n++;
+  }
+  return n;
+}
 
 export const cliAdapter: Adapter = {
   id: 'cli',
@@ -27,7 +42,7 @@ export const cliAdapter: Adapter = {
     const kind = ctx.workItem.kind;
     const fileWork = ['implement', 'fix', 'test', 'doc'].includes(kind);
     // (acceptance is the PM judging reports — it never needs the code either)
-    const orchestration = ['plan', 'prompt', 'prompt-review', 'accept'].includes(kind);
+    const orchestration = ['plan', 'prompt', 'prompt-review', 'accept', 'diagnose'].includes(kind);
     const desk = orchestration ? path.join(DATA_DIR, 'desks', ctx.agent.id.replace(/[^\w-]+/g, '_')) : null;
     if (desk) fs.mkdirSync(desk, { recursive: true });
     const cwd = desk ?? ctx.worktree ?? (fileWork ? null : ctx.repo?.path);
@@ -87,9 +102,10 @@ export const cliAdapter: Adapter = {
     const { code, output } = await new Promise<{ code: number | null; output: string }>((resolve) => {
       const child = spawnShell(spawnCmd, { cwd, env: spawnEnv });
       ctx.emit('agent.activity', { kind: 'status', text: `Started ${cliExecutable(template).name}${child.pid ? ` (pid ${child.pid})` : ''} in ${cwd}${ctx.model?.name ? ` · model ${ctx.model.name}` : ''}` });
+      if (child.pid) liveChildren.set(child.pid, { runId: ctx.workItem.runId, workItemId: ctx.workItem.id });
       let out = '';
       let lastData = Date.now();
-      const killer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutSec * 1000);
+      const killer = setTimeout(() => { killProcessTree(child); }, timeoutSec * 1000);
       const idle = setInterval(() => {
         if (Date.now() - lastData < 2000) return;
         for (const from of ['stdout', 'stderr'] as const) if (streams[from].pending().trim()) emitLines(streams[from].flushLines(), from);
@@ -106,13 +122,14 @@ export const cliAdapter: Adapter = {
       child.stderr!.on('data', onData('stderr'));
       child.on('close', (c) => {
         clearTimeout(killer); clearInterval(idle);
+        if (child.pid) liveChildren.delete(child.pid);
         emitLines(streams.stdout.flushLines(), 'stdout'); emitLines(streams.stderr.flushLines(), 'stderr');
         flushThinking();
         const secs = Math.round((Date.now() - started) / 1000);
         ctx.emit('agent.activity', { kind: c === 0 ? 'status' : 'error', text: `${cliExecutable(template).name} exited with code ${c} after ${secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`}` });
         resolve({ code: c, output: out });
       });
-      child.on('error', (e) => { clearTimeout(killer); clearInterval(idle); ctx.emit('agent.activity', { kind: 'error', text: `could not start the CLI: ${String(e)}` }); resolve({ code: -1, output: String(e) }); });
+      child.on('error', (e) => { clearTimeout(killer); clearInterval(idle); if (child.pid) liveChildren.delete(child.pid); ctx.emit('agent.activity', { kind: 'error', text: `could not start the CLI: ${String(e)}` }); resolve({ code: -1, output: String(e) }); });
     });
 
     const afterSha = ctx.worktree ? headSha(ctx.worktree) : null;

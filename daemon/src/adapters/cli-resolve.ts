@@ -89,6 +89,19 @@ export function spawnShell(cmd: string, opts: SpawnOptions): ChildProcess {
   return spawn('/bin/sh', ['-c', cmd], opts);
 }
 
+// Kill a CLI child AND its whole process tree. `child.kill()` alone only ends
+// the shell wrapper — on Windows the agent process it spawned survives and
+// keeps the worktree/files locked forever.
+export function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    const tk = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    tk.on('error', () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
+  } else {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
 // ---- presets ----------------------------------------------------------------
 // Each supported agent CLI: its default command, how to ask it for models,
 // and what to tell the user when that fails. Everything preset-specific lives

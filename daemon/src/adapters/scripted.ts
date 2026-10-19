@@ -188,6 +188,17 @@ async function scriptedResult(ctx: AdapterCtx, script: Record<string, any>, kind
         usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, costSource: 'estimate' },
       };
 
+    // PM diagnosis (stage 4): script.diagnose picks the strategy; the default
+    // escalates to the human, which is the safe scripted choice.
+    case 'diagnose': {
+      const d = script.diagnose ?? {};
+      return {
+        summary: `Diagnosis (scripted): ${d.strategy ?? 'human'}`,
+        raw: { diagnosis: d.diagnosis ?? 'Scripted adapter cannot fail for a real reason; escalating.', strategy: d.strategy ?? 'human', splits: d.splits, notes: d.notes },
+        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, costSource: 'estimate' },
+      };
+    }
+
     // PM acceptance: accepts what QA passed, sends back what it failed.
     case 'accept': {
       const report = block(ctx.prompt, 'QA_REPORT');

@@ -18,7 +18,7 @@ export interface HandoffEnvelope {
 
 const KIND_ROLE: Partial<Record<WorkItemKind, string>> = {
   plan: 'pm', prompt: 'prompt-creator', 'prompt-review': 'pm', accept: 'pm',
-  review: 'reviewer', analyse: 'analyst', qa: 'qa', doc: 'docs',
+  review: 'reviewer', analyse: 'analyst', qa: 'qa', doc: 'docs', diagnose: 'pm',
 };
 
 // Build the envelope for the transition into `toRole`, persist it as a
@@ -72,6 +72,7 @@ const REPLY_CHECKS: Partial<Record<WorkItemKind, (j: Record<string, any>) => str
   review: (j) => (['approve', 'request-changes'].includes(j?.decision) ? null : 'expected JSON { decision: "approve" | "request-changes", notes }'),
   qa: (j) => (['pass', 'fail'].includes(j?.decision) && (j?.findings === undefined || Array.isArray(j.findings)) ? null : 'expected JSON { decision: "pass" | "fail", findings: [...], criteria: [...] }'),
   accept: (j) => (['accept', 'rework'].includes(j?.decision) ? null : 'expected JSON { decision: "accept" | "rework", notes, prompt?, commit? }'),
+  diagnose: (j) => (['retry-stronger', 'split', 'human'].includes(j?.strategy) && (j?.strategy !== 'split' || Array.isArray(j?.splits) && j.splits.length >= 2) ? null : 'expected JSON { diagnosis, strategy: "retry-stronger" | "split" | "human", splits? }'),
 };
 
 export const STRICT_REPLY_KINDS: WorkItemKind[] = Object.keys(REPLY_CHECKS) as WorkItemKind[];
