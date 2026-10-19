@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { post, useQuery, useWsConnected } from './api';
 import { OfficeSwitcher, useOffice, useOfficeApprovals, useOfficeQueue } from './office';
@@ -263,8 +264,10 @@ function useEscape(onClose: () => void) {
 
 export function Modal({ title, onClose, children, footer, width = 'max-w-lg' }: { title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; width?: string }) {
   useEscape(onClose);
-  return (
-    <div className="fixed inset-0 z-50 bg-fg/[0.06] flex items-start sm:items-center justify-center p-4 pt-[10vh] sm:pt-4" onClick={onClose}>
+  // rendered into <body>: a modal opened from inside a page must sit above every part of it (a page section with its own
+  // stacking context, such as the Live activity chat, otherwise paints over it)
+  return createPortal(
+    <div className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-[2px] flex items-start sm:items-center justify-center p-4 pt-[8vh] sm:pt-4" onClick={onClose}>
       <div role="dialog" aria-modal aria-label={title} className={`animate-rise w-full ${width} max-h-[85vh] flex flex-col bg-surface border border-line-strong rounded-2xl shadow-pop`} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 pt-4 pb-3">
           <h2 className="text-[15px] font-semibold">{title}</h2>
@@ -273,14 +276,15 @@ export function Modal({ title, onClose, children, footer, width = 'max-w-lg' }: 
         <div className="px-5 pb-5 overflow-auto">{children}</div>
         {footer && <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-line bg-raised/40 rounded-b-2xl">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 export function Drawer({ title, onClose, children, footer }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode }) {
   useEscape(onClose);
-  return (
-    <div className="fixed inset-0 z-50 bg-black/40" onClick={onClose}>
+  return createPortal(
+    <div className="fixed inset-0 z-[80] bg-black/40" onClick={onClose}>
       <aside role="dialog" aria-modal className="animate-slide absolute right-0 top-0 h-full w-full max-w-[520px] flex flex-col bg-surface border-l border-line-strong shadow-pop" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 h-14 border-b border-line shrink-0">
           <div className="flex-1 min-w-0 flex items-center gap-2.5">{title}</div>
@@ -289,7 +293,8 @@ export function Drawer({ title, onClose, children, footer }: { title: React.Reac
         <div className="flex-1 overflow-auto px-5 py-4">{children}</div>
         {footer && <div className="px-5 py-3.5 border-t border-line bg-raised/40">{footer}</div>}
       </aside>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

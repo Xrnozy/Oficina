@@ -1,23 +1,24 @@
 import { Select } from '../Select';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { get, useQuery, type OfficeEvent } from '../api';
-import { Empty, PageHeader, StatusChip, Tag, fmtTime } from '../components';
-import { Clock, Pause, Play, X } from 'lucide-react';
+import { Empty, PageHeader, StatusChip, TONE_BG, Tag, fmtTime, toneOf } from '../components';
+import { Clock, Pause, Play, SkipBack, SkipForward, X } from 'lucide-react';
 import { useOffice } from '../office';
 
-// Run timeline & replay (spec §9): lanes per actor, filterable event list;
-// clicking an event shows its payload; a replay slider reconstructs the
-// task board as of that event (read-only — never re-executes).
+// Run timeline & replay (spec §9): one lane per actor, a milestones lane, filterable event list. Drag across the lanes (or press
+// play) to scrub: the board below shows every task as it was at that point. Replay is read-only — it never re-executes anything.
 
 const KIND_COLOR: Record<string, string> = {
   'task.': 'bg-info', 'workitem.': 'bg-fg-4', 'checkrun.': 'bg-info/60',
   'error.': 'bg-bad', 'plan.': 'bg-warn', 'merge.': 'bg-ok',
   'approval.': 'bg-warn', 'cycle.': 'bg-fg-3', 'run.': 'bg-accent',
-  'agent.': 'bg-fg-4', 'review.': 'bg-ok/60',
+  'agent.': 'bg-fg-4', 'review.': 'bg-ok/60', 'human.': 'bg-pink',
 };
 const colorFor = (t: string) => KIND_COLOR[Object.keys(KIND_COLOR).find((k) => t.startsWith(k)) ?? ''] ?? 'bg-fg-4';
-const KINDS = ['run', 'cycle', 'plan', 'task', 'workitem', 'checkrun', 'review', 'merge', 'error', 'approval', 'agent'];
-const LABEL_COL = '8.75rem'; // actor column (8rem) + gap — the playhead is positioned against this
+const KINDS = ['run', 'cycle', 'plan', 'task', 'workitem', 'checkrun', 'review', 'merge', 'error', 'approval', 'human', 'agent'];
+const MILESTONES = new Set(['run.started', 'run.done', 'run.stopped', 'cycle.started', 'plan.applied', 'approval.requested', 'human.decided', 'human.prepared', 'merge.completed', 'error.reported']);
+const LABEL_W = '9rem';
+const SPEEDS = [1, 2, 4] as const;
 
 export default function Timeline() {
   const { data: allRuns } = useQuery<any[]>('/runs');
@@ -32,23 +33,12 @@ export default function Timeline() {
   const [sel, setSel] = useState<OfficeEvent | null>(null);
   const [cap, setCap] = useState(600);
   const [replaySeq, setReplaySeq] = useState<number | null>(null);
-  const [replayState, setReplayState] = useState<any>(null);
   const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
 
   useEffect(() => {
     if (run) get<OfficeEvent[]>(`/runs/${run.id}/events?limit=2000`).then(setEvents).catch(() => setEvents([]));
   }, [run?.id]);
-
-  // debounce the state fetch while dragging and drop stale answers, so the
-  // panel below the slider doesn't flicker (and resize the page) on every tick
-  useEffect(() => {
-    if (replaySeq == null || !run) { setReplayState(null); return; }
-    let dead = false;
-    const t = setTimeout(() => {
-      get(`/runs/${run.id}/state-at?seq=${replaySeq}`).then((st) => { if (!dead) setReplayState(st); }).catch(() => {});
-    }, 120);
-    return () => { dead = true; clearTimeout(t); };
-  }, [replaySeq, run?.id]);
 
   const filtered = events.filter((e) =>
     (!kind || e.type.startsWith(`${kind}.`)) &&
@@ -60,7 +50,30 @@ export default function Timeline() {
   const maxSeq = events.length ? events[events.length - 1].seq : 0;
   const span = Math.max(1, maxSeq - minSeq);
   const at = replaySeq ?? maxSeq;
-  const frac = (q: number) => (q - minSeq) / span;
+  const frac = (q: number) => Math.min(1, Math.max(0, (q - minSeq) / span));
+  const atIndex = useMemo(() => {   // the last event at or before the playhead
+    let lo = 0, hi = events.length - 1, ans = -1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (events[m].seq <= at) { ans = m; lo = m + 1; } else hi = m - 1; }
+    return ans;
+  }, [events, at]);
+  const current = atIndex >= 0 ? events[atIndex] : null;
+
+  // The board as it was at the playhead, rebuilt from the events already loaded: instant while scrubbing or playing, no request per tick.
+  const replayState = useMemo(() => {
+    if (replaySeq == null) return null;
+    const tasks = new Map<string, { id: string; title: string; status: string }>();
+    let runStatus = 'draft';
+    for (let i = 0; i <= atIndex; i++) {
+      const e = events[i]; const p = e.payload as Record<string, unknown>;
+      if (e.type === 'task.created' && e.entityId) tasks.set(e.entityId, { id: e.entityId, title: String(p.title ?? ''), status: p.held ? 'held' : 'backlog' });
+      else if (e.type === 'task.status' && e.entityId && tasks.has(e.entityId)) { const t = tasks.get(e.entityId)!; t.status = String(p.status); if (p.title) t.title = String(p.title); }
+      else if (e.type === 'task.deleted' && e.entityId) tasks.delete(e.entityId);
+      else if (e.type === 'run.status' && p.status) runStatus = String(p.status);
+      else if (e.type === 'run.started') runStatus = 'running';
+      else if (e.type === 'run.done') runStatus = 'done';
+    }
+    return { runStatus, tasks: [...tasks.values()] };
+  }, [events, atIndex, replaySeq]);
 
   const counts = useMemo(() => {
     const m = new Map<string, number>();
@@ -72,13 +85,14 @@ export default function Timeline() {
     for (const e of events) { const l = m.get(e.actor); if (l) l.push(e); else m.set(e.actor, [e]); }
     return m;
   }, [events]);
+  const milestones = useMemo(() => events.filter((e) => MILESTONES.has(e.type)), [events]);
   const errorCount = counts.get('error') ?? 0;
   const durationMs = events.length ? Date.parse(events[events.length - 1].ts) - Date.parse(events[0].ts) : 0;
 
   // play: step the playhead forward until it reaches the end, then drop back to live
   useEffect(() => {
     if (!playing) return;
-    const step = Math.max(1, Math.round(span / 140));
+    const step = Math.max(1, Math.round((span / 140) * speed));
     const t = setInterval(() => {
       setReplaySeq((cur) => {
         const next = (cur ?? minSeq) + step;
@@ -87,7 +101,38 @@ export default function Timeline() {
       });
     }, 70);
     return () => clearInterval(t);
-  }, [playing, span, minSeq, maxSeq]);
+  }, [playing, span, minSeq, maxSeq, speed]);
+
+  // scrubbing: press and drag anywhere across the lanes
+  const tracks = useRef<HTMLDivElement>(null);
+  const seekTo = (clientX: number) => {
+    const r = tracks.current?.getBoundingClientRect();
+    if (!r || !r.width) return;
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    setPlaying(false);
+    const seq = Math.round(minSeq + f * span);
+    setReplaySeq(seq >= maxSeq ? null : seq);
+  };
+  const stepBy = (dir: -1 | 1) => {
+    const idx = atIndex + dir;
+    if (idx < 0) return;
+    setPlaying(false);
+    if (idx >= events.length - 1) setReplaySeq(null); else setReplaySeq(events[idx].seq);
+  };
+
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!playing || !current) return;
+    // scroll the list itself, never the page (scrollIntoView would drag the whole page along)
+    const box = listRef.current;
+    const row = box?.querySelector<HTMLElement>(`[data-seq="${current.seq}"]`);
+    if (box && row && (row.offsetTop < box.scrollTop + 32 || row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight)) box.scrollTop = Math.max(0, row.offsetTop - box.clientHeight / 2);
+  }, [playing, current?.seq]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const times = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const e = events[Math.min(events.length - 1, Math.max(0, events.findIndex((x) => x.seq >= minSeq + f * span)))];
+    return e ? fmtTime(e.ts) : '';
+  });
 
   return (
     <div>
@@ -117,71 +162,91 @@ export default function Timeline() {
 
       {events.length > 0 && (
         <section className="panel mb-5 overflow-hidden">
-          <div className="px-4 pt-3.5 pb-3 flex items-center gap-3 flex-wrap">
+          <div className="px-4 pt-3.5 pb-3 flex items-center gap-x-4 gap-y-2 flex-wrap">
             <h2 className="text-[13px] font-medium text-fg">Replay</h2>
-            <span className="text-2xs text-fg-4">click a mark to inspect it</span>
-            <div className="ml-auto flex items-center gap-3 flex-wrap">
+            <span className="text-2xs text-fg-4">drag across the lanes to scrub · click a mark to inspect it</span>
+            <div className="ml-auto flex items-center gap-x-3 gap-y-1 flex-wrap">
               {KINDS.filter((k) => counts.has(k)).map((k) => (
                 <span key={k} className="flex items-center gap-1.5 text-2xs text-fg-3"><span className={`w-2 h-2 rounded-sm ${colorFor(`${k}.`)}`} />{k}</span>
               ))}
             </div>
           </div>
 
-          <div className="px-4 pb-3">
-            <div className="relative">
-              <div className="space-y-1">
+          {/* lanes */}
+          <div className="px-4 pb-3 select-none">
+            <div className="grid gap-x-3" style={{ gridTemplateColumns: `${LABEL_W} minmax(0,1fr)` }}>
+              <div className="space-y-1.5 pt-px">
+                <div className="h-5 flex items-center text-2xs text-fg-4 uppercase tracking-wide">Milestones</div>
                 {actors.map((a) => (
-                  <div key={a} className="grid grid-cols-[8rem_1fr] gap-3 items-center">
-                    <button onClick={() => setActor(actor === a ? '' : a)} title="Filter the list to this actor"
-                      className={`text-left text-xs flex items-baseline gap-1.5 min-w-0 ${actor === a ? 'text-fg font-medium' : 'text-fg-3 hover:text-fg'}`}>
-                      <span className="truncate">{a}</span>
-                      <span className="text-2xs text-fg-4 num">{perActor.get(a)?.length}</span>
-                    </button>
-                    <div className="relative h-6 rounded-md bg-sunken border border-line">
-                      {(perActor.get(a) ?? []).map((e) => (
-                        <button key={e.seq} onClick={() => setSel(e)} title={`#${e.seq} ${e.type}`}
-                          className={`absolute top-1 bottom-1 w-[3px] -ml-px rounded-sm ${colorFor(e.type)} ${sel?.seq === e.seq ? 'ring-2 ring-fg scale-y-125 z-10' : 'opacity-85 hover:opacity-100'} ${e.seq > at ? '!opacity-15' : ''}`}
-                          style={{ left: `${frac(e.seq) * 100}%` }} />
-                      ))}
-                    </div>
-                  </div>
+                  <button key={a} onClick={() => setActor(actor === a ? '' : a)} title="Filter the event list to this actor"
+                    className={`h-7 w-full text-left text-xs flex items-center gap-1.5 min-w-0 rounded ${actor === a ? 'text-fg font-medium' : 'text-fg-3 hover:text-fg'}`}>
+                    <span className="truncate">{a}</span>
+                    <span className="text-2xs text-fg-4 num">{perActor.get(a)?.length}</span>
+                  </button>
                 ))}
               </div>
-              <div aria-hidden className="absolute top-0 bottom-0 w-px bg-fg/70 pointer-events-none" style={{ left: `calc(${LABEL_COL} + (100% - ${LABEL_COL}) * ${frac(at)})` }}>
-                <span className="absolute -top-1 -left-[3px] w-[7px] h-[7px] rounded-full bg-fg" />
+              <div ref={tracks} className="relative space-y-1.5 touch-none cursor-col-resize"
+                onPointerDown={(e) => { if ((e.target as HTMLElement).closest('[data-mark]')) return; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); seekTo(e.clientX); }}
+                onPointerMove={(e) => { if (e.buttons === 1 && (e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) seekTo(e.clientX); }}>
+                <div className="relative h-5">
+                  {milestones.map((e) => (
+                    <button key={e.seq} data-mark onClick={() => setSel(e)} title={`#${e.seq} ${e.type}`}
+                      className={`absolute top-1/2 -mt-[5px] -ml-[5px] w-[10px] h-[10px] rotate-45 rounded-[2px] ${colorFor(e.type)} ${sel?.seq === e.seq ? 'ring-2 ring-fg z-10' : ''} ${e.seq > at ? 'opacity-30' : ''}`}
+                      style={{ left: `${frac(e.seq) * 100}%` }} />
+                  ))}
+                </div>
+                {actors.map((a) => (
+                  <div key={a} className="relative h-7 rounded-md bg-sunken border border-line overflow-hidden">
+                    <div aria-hidden className="absolute inset-y-0 left-0 bg-fg/[0.05] pointer-events-none" style={{ width: `${frac(at) * 100}%` }} />
+                    {(perActor.get(a) ?? []).map((e) => (
+                      <button key={e.seq} data-mark onClick={() => setSel(e)} title={`#${e.seq} ${e.type}`}
+                        className={`absolute top-1 bottom-1 w-1 -ml-[2px] rounded-sm ${colorFor(e.type)} ${sel?.seq === e.seq ? 'ring-2 ring-fg z-10' : 'hover:brightness-125'} ${e.seq > at ? 'opacity-25' : 'opacity-90'}`}
+                        style={{ left: `${frac(e.seq) * 100}%` }} />
+                    ))}
+                  </div>
+                ))}
+                {/* the playhead */}
+                <div aria-hidden className="absolute -top-0.5 -bottom-0.5 w-px bg-fg pointer-events-none" style={{ left: `${frac(at) * 100}%` }}>
+                  <span className="absolute -top-1 -left-[5px] w-[11px] h-[11px] rounded-full bg-fg border-2 border-surface" />
+                </div>
               </div>
             </div>
-            <div className="grid grid-cols-[8rem_1fr] gap-3 mt-1.5 text-2xs text-fg-4 num">
+            <div className="grid gap-x-3 mt-2" style={{ gridTemplateColumns: `${LABEL_W} minmax(0,1fr)` }}>
               <span />
-              <div className="flex justify-between"><span>{fmtTime(events[0].ts)}</span><span>{fmtTime(events[events.length - 1].ts)}</span></div>
+              <div className="flex justify-between text-2xs text-fg-4 num">{times.map((t, i) => <span key={i}>{t}</span>)}</div>
             </div>
           </div>
 
-          <div className="grid grid-cols-[8rem_1fr_auto] gap-3 items-center px-4 py-3 border-t border-line bg-sunken/40">
-            <div>
-              <button className="btn btn-xs w-[4.5rem] justify-center"
+          {/* player */}
+          <div className="flex items-center gap-2 px-4 py-3 border-t border-line bg-sunken/40 flex-wrap">
+            <div className="flex items-center gap-1">
+              <button className="btn btn-icon btn-sm" aria-label="Previous event" title="Previous event" onClick={() => stepBy(-1)} disabled={atIndex <= 0}><SkipBack size={13} /></button>
+              <button className="btn btn-primary btn-sm w-[5.25rem] justify-center"
                 onClick={() => { if (playing) setPlaying(false); else { if (replaySeq == null) setReplaySeq(minSeq); setPlaying(true); } }}>
                 {playing ? <><Pause size={12} /> Pause</> : <><Play size={12} /> Play</>}
               </button>
+              <button className="btn btn-icon btn-sm" aria-label="Next event" title="Next event" onClick={() => stepBy(1)} disabled={replaySeq == null}><SkipForward size={13} /></button>
             </div>
-            <input type="range" min={minSeq} max={maxSeq} value={at} aria-label="Replay position"
-              onChange={(e) => { setPlaying(false); setReplaySeq(+e.target.value >= maxSeq ? null : +e.target.value); }} className="min-w-0 w-full" />
-            {/* fixed-width slots: the label and button never change size, so the slider doesn't move under the cursor */}
-            <div className="flex items-center gap-2">
-              <span className="mono text-fg-3 w-20 text-right tabular-nums">{replaySeq == null ? <Tag tone="ok">live</Tag> : `seq ${replaySeq}`}</span>
-              <button className={`btn btn-xs w-24 justify-center ${replaySeq == null ? 'invisible' : ''}`} tabIndex={replaySeq == null ? -1 : 0}
+            <div className="inline-flex p-0.5 rounded-md bg-surface border border-line text-2xs" role="group" aria-label="Playback speed">
+              {SPEEDS.map((s) => <button key={s} onClick={() => setSpeed(s)} className={`px-2 h-6 rounded num ${speed === s ? 'bg-raised text-fg' : 'text-fg-3 hover:text-fg'}`}>{s}×</button>)}
+            </div>
+            {/* fixed-width slots: nothing here changes size while the playhead moves */}
+            <div className="ml-auto flex items-center gap-3 min-w-0">
+              <span className="text-xs text-fg-3 min-w-0 truncate hidden md:block">
+                {replaySeq == null ? <Tag tone="ok">live</Tag> : current ? <><span className="mono text-fg-2">#{current.seq}</span> · {current.type} · {fmtTime(current.ts)}</> : null}
+              </span>
+              <span className="mono text-2xs text-fg-4 num w-24 text-right">{Math.max(0, atIndex + 1).toLocaleString()} / {events.length.toLocaleString()}</span>
+              <button className={`btn btn-sm w-28 justify-center ${replaySeq == null ? 'invisible' : ''}`} tabIndex={replaySeq == null ? -1 : 0}
                 onClick={() => { setPlaying(false); setReplaySeq(null); }}>Back to live</button>
             </div>
           </div>
-          {replayState && (
-            <div className="px-4 py-3 border-t border-line flex flex-wrap items-center gap-2 min-h-[3.25rem]">
-              <span className="text-xs text-fg-3 mr-1">Board as of #{replaySeq}:</span>
-              <StatusChip value={replayState.runStatus} />
-              {replayState.tasks.map((t: any) => (
-                <span key={t.id} className="chip" title={t.title}><span className="max-w-[22ch] truncate text-fg-2">{t.title || t.id}</span> → {t.status}</span>
-              ))}
-            </div>
-          )}
+
+          {/* the board at the playhead */}
+          <div className="px-4 py-3.5 border-t border-line min-h-[4.5rem]">
+            {!replayState ? (
+              <p className="text-xs text-fg-4 py-1.5">Showing the run as it is now. Press play, step through events, or drag across the lanes to see how the board changed.</p>
+            ) : <BoardAt state={replayState} seq={replaySeq ?? maxSeq} />}
+          </div>
         </section>
       )}
 
@@ -201,8 +266,8 @@ export default function Timeline() {
       )}
 
       {events.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-4 items-start">
-          <div className="panel max-h-[62vh] overflow-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4 items-start">
+          <div ref={listRef} className="panel max-h-[62vh] overflow-auto">
             <div className="sticky top-0 z-10 flex items-center gap-3 px-3.5 h-8 bg-surface border-b border-line eyebrow">
               <span className="w-10 shrink-0">Seq</span>
               <span className="w-1.5 shrink-0" />
@@ -218,7 +283,8 @@ export default function Timeline() {
               </button>
             )}
             {filtered.slice(-cap).map((e) => (
-              <button key={e.seq} onClick={() => setSel(e)} className={`w-full text-left px-3.5 h-9 flex items-center gap-3 border-b border-line/60 last:border-0 transition-colors ${sel?.seq === e.seq ? 'bg-raised' : 'hover:bg-raised/60'} ${e.seq > at ? 'opacity-35' : ''}`}>
+              <button key={e.seq} data-seq={e.seq} onClick={() => setSel(e)}
+                className={`w-full text-left px-3.5 h-9 flex items-center gap-3 border-b border-line/60 last:border-0 transition-colors ${sel?.seq === e.seq ? 'bg-raised' : 'hover:bg-raised/60'} ${e.seq > at ? 'opacity-35' : ''} ${replaySeq != null && current?.seq === e.seq ? 'shadow-[inset_3px_0_0_rgb(var(--fg))] bg-raised/70' : ''}`}>
                 <span className="mono text-2xs text-fg-4 w-10 shrink-0">#{e.seq}</span>
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${colorFor(e.type)}`} />
                 <span className="text-xs text-fg-3 w-24 shrink-0 truncate">{e.actor}</span>
@@ -230,26 +296,80 @@ export default function Timeline() {
             {!filtered.length && <div className="p-6 text-center text-sm text-fg-4">No events match these filters.</div>}
           </div>
           <aside className="panel p-4 lg:sticky lg:top-4 max-h-[62vh] overflow-auto">
-            {!sel && <div className="text-sm text-fg-4 py-8 text-center">Select an event to see its payload and hash.</div>}
-            {sel && (
-              <div className="animate-rise">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`w-2 h-2 rounded-full ${colorFor(sel.type)}`} />
-                  <span className="mono text-fg">{sel.type}</span>
-                  <span className="mono text-fg-4 ml-auto">#{sel.seq}</span>
-                </div>
-                <div className="text-xs text-fg-3 mb-3">{sel.actor} · {new Date(sel.ts).toLocaleString()}</div>
-                <pre className="mono text-fg-2 whitespace-pre-wrap break-all bg-sunken border border-line rounded-lg p-3 leading-relaxed">{JSON.stringify(sel.payload, null, 2)}</pre>
-                <dl className="mt-3 space-y-1 text-2xs text-fg-4 mono break-all">
-                  <div>hash {sel.hash.slice(0, 24)}…</div>
-                  <div>prev {sel.prevHash?.slice(0, 24)}…</div>
-                  {sel.entityId && <div>entity {sel.entityId}</div>}
-                </dl>
-              </div>
-            )}
+            {!sel && <div className="text-sm text-fg-4 py-8 text-center">Select an event — from the lanes or the list — to see what happened.</div>}
+            {sel && <EventDetail e={sel} onReplay={() => { setPlaying(false); setReplaySeq(sel.seq >= maxSeq ? null : sel.seq); }} />}
           </aside>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Every task as it was at the playhead: a status bar, then the tasks. */
+function BoardAt({ state, seq }: { state: any; seq: number }) {
+  const tasks: any[] = state.tasks ?? [];
+  const groups = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of tasks) m.set(t.status, (m.get(t.status) ?? 0) + 1);
+    return [...m.entries()];
+  }, [tasks]);
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2.5 flex-wrap">
+        <span className="text-xs text-fg-3">Board as of <span className="mono text-fg-2">#{seq}</span></span>
+        <StatusChip value={state.runStatus} />
+        <span className="text-2xs text-fg-4 num">{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>
+      </div>
+      {tasks.length > 0 && (
+        <div className="flex h-1.5 rounded-full overflow-hidden bg-line gap-px mb-3" role="img" aria-label="Tasks by status">
+          {groups.map(([s, n]) => <div key={s} className={TONE_BG[toneOf(s)]} style={{ width: `${(n / tasks.length) * 100}%` }} title={`${s.replace(/-/g, ' ')}: ${n}`} />)}
+        </div>
+      )}
+      <ul className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+        {tasks.map((t) => (
+          <li key={t.id} className="flex items-center gap-2 min-w-0 rounded-lg border border-line px-2.5 py-1.5" title={t.title}>
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${TONE_BG[toneOf(t.status)]}`} />
+            <span className="text-xs text-fg-2 truncate min-w-0 flex-1">{t.title || t.id}</span>
+            <span className="text-2xs text-fg-4 shrink-0">{t.status === 'held' ? 'on hold' : String(t.status).replace(/-/g, ' ')}</span>
+          </li>
+        ))}
+        {!tasks.length && <li className="text-xs text-fg-4">No tasks existed yet.</li>}
+      </ul>
+    </div>
+  );
+}
+
+function EventDetail({ e, onReplay }: { e: OfficeEvent; onReplay: () => void }) {
+  const entries = Object.entries(e.payload as Record<string, unknown>).slice(0, 30);
+  return (
+    <div className="animate-rise">
+      <div className="flex items-center gap-2 mb-1">
+        <span className={`w-2 h-2 rounded-full ${colorFor(e.type)}`} />
+        <span className="mono text-fg">{e.type}</span>
+        <span className="mono text-fg-4 ml-auto">#{e.seq}</span>
+      </div>
+      <div className="text-xs text-fg-3 mb-3">{e.actor} · {new Date(e.ts).toLocaleString()}</div>
+      <button className="btn btn-sm w-full mb-3" onClick={onReplay}><Play size={12} /> Replay from here</button>
+      <dl className="space-y-1.5">
+        {entries.map(([k, v]) => (
+          <div key={k} className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-2 text-xs">
+            <dt className="mono text-fg-4 truncate" title={k}>{k}</dt>
+            <dd className="text-fg-2 break-words [overflow-wrap:anywhere] min-w-0">
+              {typeof v === 'object' && v !== null ? <code className="mono text-[11px] text-fg-3 whitespace-pre-wrap">{JSON.stringify(v)}</code> : String(v)}
+            </dd>
+          </div>
+        ))}
+        {!entries.length && <div className="text-xs text-fg-4">No details.</div>}
+      </dl>
+      <details className="mt-3 group">
+        <summary className="text-2xs text-fg-3 cursor-pointer hover:text-fg">Raw payload and hash</summary>
+        <pre className="mono text-fg-2 whitespace-pre-wrap break-all bg-sunken border border-line rounded-lg p-3 leading-relaxed mt-2 max-h-64 overflow-auto">{JSON.stringify(e.payload, null, 2)}</pre>
+        <dl className="mt-2 space-y-1 text-2xs text-fg-4 mono break-all">
+          <div>hash {e.hash.slice(0, 24)}…</div>
+          <div>prev {e.prevHash?.slice(0, 24)}…</div>
+          {e.entityId && <div>entity {e.entityId}</div>}
+        </dl>
+      </details>
     </div>
   );
 }

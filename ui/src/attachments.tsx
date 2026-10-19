@@ -406,7 +406,7 @@ export function NewTaskModal({ workspaceId, runId, initialFiles = [], onClose, o
 
 // ------------------------------------------------------------------- upload dock (Live activity)
 
-/** The upload panel docked directly below the Live activity chat. */
+/** Upload documents / attach files to a task: one modal, the same popup as Create task. */
 export function UploadDock({ workspaceId, runId, mode, onClose, onDone }: { workspaceId: string; runId: string | null; mode: 'documents' | 'task'; onClose: () => void; onDone?: () => void }) {
   const { data: detail } = useQuery<any>(runId ? `/runs/${runId}` : null, [runId]);
   const tasks = (detail?.tasks ?? []).filter((t: any) => !['done', 'cancelled'].includes(t.status));
@@ -416,8 +416,6 @@ export function UploadDock({ workspaceId, runId, mode, onClose, onDone }: { work
   const [note, setNote] = useState({ title: '', text: '' });
   const [busy, setBusy] = useState(false);
   const [added, setAdded] = useState<Attachment[]>([]);
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => { ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, [mode]);
   useEffect(() => { if (mode === 'task' && !taskId && tasks[0]) setTaskId(tasks[0].id); }, [tasks.length, mode]); // eslint-disable-line react-hooks/exhaustive-deps
   const target = (): Target | null => (mode === 'task' ? (taskId ? { workspaceId, scope: 'task', taskId } : null) : audienceTarget(audience, workspaceId, runId));
   const add = async (files: File[]) => {
@@ -426,49 +424,52 @@ export function UploadDock({ workspaceId, runId, mode, onClose, onDone }: { work
     setBusy(true);
     const stored = await uploadFiles(files, t);
     setBusy(false);
-    if (stored.length) { setAdded((cur) => [...stored, ...cur].slice(0, 6)); onDone?.(); }
+    if (stored.length) { setAdded((cur) => [...stored, ...cur].slice(0, 8)); onDone?.(); }
   };
   usePasteFiles(add, true);
   return (
-    <section ref={ref} className="panel shrink-0 animate-rise" aria-label={mode === 'task' ? 'Attach files to a task' : 'Upload documents'}>
-      <div className="flex items-center gap-2.5 px-4 h-11 border-b border-line">
-        <UploadCloud size={15} className="text-fg-3" />
-        <span className="text-sm font-medium text-fg">{mode === 'task' ? 'Attach files to a task' : 'Upload documents'}</span>
-        <div className="ml-auto inline-flex p-0.5 rounded-md bg-sunken border border-line text-2xs">
-          {(['files', 'note'] as const).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-2.5 h-6 rounded ${tab === t ? 'bg-raised text-fg' : 'text-fg-3 hover:text-fg'}`}>{t === 'files' ? 'Files' : 'Write a note'}</button>)}
-        </div>
-        <button className="btn btn-ghost btn-icon btn-sm" aria-label="Close upload panel" onClick={onClose}><X size={14} /></button>
-      </div>
-      <div className="p-4 space-y-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="field-label !mb-0 shrink-0">{mode === 'task' ? 'Task' : 'Who should get it'}</span>
-          <div className="flex-1 min-w-0">
-            {mode === 'task'
-              ? (tasks.length ? <Select className="input input-sm w-full" value={taskId} onChange={(e) => setTaskId(e.target.value)} aria-label="Task">{tasks.map((t: any) => <option key={t.id} value={t.id}>{t.title}</option>)}</Select> : <Muted>No open tasks yet.</Muted>)
-              : <AudiencePicker value={audience} onChange={setAudience} runId={runId} />}
-          </div>
-        </div>
-        <p className="text-2xs text-fg-4 leading-relaxed -mt-1">
-          {mode === 'task' ? 'Only agents working that task see them.' : audience === 'all' ? 'Filed in documents/all-agents/ of the repository. Every agent is told it exists.' : audience === 'run' ? 'Filed under documents/runs/. Used by this run only.' : audience.startsWith('role:') ? `Filed in documents/${ROLE_DIR[audience.slice(5)] ?? audience.slice(5)}/. Agents acting in that role are told it exists.` : 'Only that agent is told it exists.'}
+    <Modal title={mode === 'task' ? 'Attach files to a task' : 'Upload documents'} onClose={onClose} width="max-w-xl"
+      footer={<button className="btn btn-primary" onClick={onClose}>{added.length ? 'Done' : 'Close'}</button>}>
+      <div className="space-y-4">
+        <p className="text-sm text-fg-2">
+          {mode === 'task'
+            ? 'Screenshots, specs or scripts for one task. Only the agents working that task see them.'
+            : 'Specs, designs and standards the agents should follow. They are filed in your repository\'s documents/ folder by who needs them.'}
         </p>
-        {tab === 'files' ? (
-          <>
-            <DropZone compact onFiles={add} busy={busy} label="Drop files here, browse, or paste a screenshot (Ctrl+V)" />
-            {added.length > 0 && (
-              <ul className="space-y-0.5">
-                {added.map((a) => <li key={a.id} className="flex items-center gap-2 text-xs text-fg-2 min-w-0"><span className="text-ok">✓</span><span className="truncate">{a.name}</span>{a.location && <span className="mono text-fg-4 truncate">→ {a.location}</span>}</li>)}
-              </ul>
-            )}
-          </>
-        ) : (
-          <div className="space-y-2">
-            <input className="input input-sm w-full" placeholder="Name, e.g. coding-standards" aria-label="Note name" value={note.title} onChange={(e) => setNote({ ...note, title: e.target.value })} />
-            <textarea className="input w-full min-h-[6rem] font-mono text-xs" placeholder="Write or paste Markdown…" aria-label="Note text" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} />
-            <div className="flex justify-end"><button className="btn btn-primary btn-sm" disabled={!note.text.trim() || busy} onClick={async () => { await add([noteFile(note.title, note.text)]); setNote({ title: '', text: '' }); }}>Add note</button></div>
+        <label className="block">
+          <span className="field-label">{mode === 'task' ? 'Task' : 'Who should get it'}</span>
+          {mode === 'task'
+            ? (tasks.length ? <Select className="input w-full" value={taskId} onChange={(e) => setTaskId(e.target.value)} aria-label="Task">{tasks.map((t: any) => <option key={t.id} value={t.id}>{t.title}</option>)}</Select> : <Muted>No open tasks yet.</Muted>)
+            : <AudiencePicker value={audience} onChange={setAudience} runId={runId} className="!h-9" />}
+          {mode === 'documents' && (
+            <span className="block text-2xs text-fg-4 mt-1.5 leading-relaxed">
+              {audience === 'all' ? 'Filed in documents/all-agents/. Every agent is told it exists.' : audience === 'run' ? 'Filed under documents/runs/. Used by this run only.' : audience.startsWith('role:') ? `Filed in documents/${ROLE_DIR[audience.slice(5)] ?? audience.slice(5)}/. Agents acting in that role are told it exists.` : 'Only that agent is told it exists.'}
+            </span>
+          )}
+        </label>
+        <div>
+          <div className="inline-flex p-0.5 rounded-md bg-sunken border border-line text-2xs mb-2.5">
+            {(['files', 'note'] as const).map((t) => <button key={t} type="button" onClick={() => setTab(t)} className={`px-2.5 h-6 rounded ${tab === t ? 'bg-raised text-fg' : 'text-fg-3 hover:text-fg'}`}>{t === 'files' ? 'Files' : 'Write a note'}</button>)}
           </div>
-        )}
+          {tab === 'files' ? (
+            <>
+              <DropZone onFiles={add} busy={busy} label="Drop files here, browse, or paste a screenshot (Ctrl+V)" />
+              {added.length > 0 && (
+                <ul className="mt-3 space-y-1">
+                  {added.map((a) => <li key={a.id} className="flex items-center gap-2 text-xs text-fg-2 min-w-0"><span className="text-ok">✓</span><span className="truncate">{a.name}</span>{a.location && <span className="mono text-fg-4 truncate">→ {a.location}</span>}</li>)}
+                </ul>
+              )}
+            </>
+          ) : (
+            <div className="space-y-2">
+              <input className="input w-full" placeholder="Name, e.g. coding-standards" aria-label="Note name" value={note.title} onChange={(e) => setNote({ ...note, title: e.target.value })} />
+              <textarea className="input w-full min-h-[8rem] font-mono text-xs" placeholder="Write or paste Markdown…" aria-label="Note text" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} />
+              <div className="flex justify-end"><button className="btn btn-sm" disabled={!note.text.trim() || busy} onClick={async () => { await add([noteFile(note.title, note.text)]); setNote({ title: '', text: '' }); }}>Add note</button></div>
+            </div>
+          )}
+        </div>
       </div>
-    </section>
+    </Modal>
   );
 }
 

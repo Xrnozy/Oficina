@@ -135,11 +135,9 @@ export default function Activity() {
           </nav>
 
           {/* feed */}
-          <div className="flex flex-col gap-3 min-h-0 min-w-0">
-            <Feed key={selected?.id ?? 'all'} agent={selected} members={members} shown={shown} tab={tab} setTab={setTab} state={selected ? states.get(selected.id)! : null} agentOf={agentOf} now={now} />
-            {/* the upload panel opens right under the chat input */}
-            {dock && office && <UploadDock key={dock} workspaceId={office.id} runId={active[0]?.id ?? null} mode={dock} onClose={() => setDock(null)} onDone={reloadRuns} />}
-          </div>
+          <Feed key={selected?.id ?? 'all'} agent={selected} members={members} shown={shown} tab={tab} setTab={setTab} state={selected ? states.get(selected.id)! : null} agentOf={agentOf} now={now} />
+          {/* Create task, Upload documents and Attach files are modals: they open over the whole page */}
+          {dock && office && <UploadDock key={dock} workspaceId={office.id} runId={active[0]?.id ?? null} mode={dock} onClose={() => setDock(null)} onDone={reloadRuns} />}
 
           {/* changes */}
           <ChangesPane agent={changesFor} state={changesFor ? states.get(changesFor.id)! : null} />
@@ -162,7 +160,7 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
   useEffect(() => { if (pinned) ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [shown.length, pinned, tab]);
   const quiet = state?.running && state.lastOutputAt ? Math.round((now - Date.parse(state.lastOutputAt)) / 1000) : null;
   return (
-    <section className="panel flex flex-col flex-1 min-h-[200px] overflow-hidden">
+    <section className="panel flex flex-col min-h-[320px] overflow-hidden">
       <div className="flex items-center gap-2.5 px-4 h-12 border-b border-line shrink-0">
         {agent ? <><Avatar agent={agent} size="sm" /><span className="text-sm font-medium text-fg truncate">{agent.name}</span><StatusChip value={state?.running ? agent.status : 'idle'} /></>
           : <><Users size={15} className="text-fg-3" /><span className="text-sm font-medium text-fg">All agents</span></>}
