@@ -17,7 +17,7 @@ import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
 import {
-  approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, reviewAppControl, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
+  adoptLatestForRun, approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, reviewAppControl, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
   pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
@@ -251,8 +251,9 @@ export function createServer(port: number, uiDir: string): http.Server {
 
   // each run carries the workflow it is pinned to (null = the standard pipeline)
   app.get('/api/runs', (_req, res) => ok(res, q('SELECT * FROM runs ORDER BY rowid DESC LIMIT 50').map((r) => {
-    const v = r.workflow_version_id ? q1('SELECT v.n, w.id, w.name FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE v.id = ?', r.workflow_version_id as string) : null;
-    return { ...rowToRun(r), workflow: v ? { id: v.id as string, name: v.name as string, n: v.n as number } : null };
+    const v = r.workflow_version_id ? q1('SELECT v.n, w.id, w.name, (SELECT n FROM workflow_versions WHERE id = w.latest_version_id) latest_n FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE v.id = ?', r.workflow_version_id as string) : null;
+    const pend = r.pending_workflow_version_id ? q1('SELECT n FROM workflow_versions WHERE id = ?', r.pending_workflow_version_id as string) : null;
+    return { ...rowToRun(r), workflow: v ? { id: v.id as string, name: v.name as string, n: v.n as number, latestN: (v.latest_n as number | null) ?? null, pendingN: (pend?.n as number | undefined) ?? null } : null };
   })));
 
   app.get('/api/runs/:id', (req, res) => {
@@ -582,7 +583,10 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (!graph) return err(res, 400, 'graph required');
     const r = saveWorkflowVersion(req.params.id, graph, note ?? '', 'owner');
     if ('error' in r) return err(res, 422, r.error);
-    ok(res, r);
+    // runs following this workflow switch to the new version as the save lands (see adoptSavedVersion); say what happened
+    const live = q(`SELECT r.id, r.workflow_version_id v, r.pending_workflow_version_id p FROM runs r JOIN workflow_versions v ON v.id IN (r.workflow_version_id, r.pending_workflow_version_id) WHERE v.workflow_id = ? AND r.status NOT IN ('done','stopped','failed') GROUP BY r.id`, req.params.id)
+      .map((x) => ({ runId: x.id as string, adopted: x.v === r.version.id, pending: x.p === r.version.id }));
+    ok(res, { ...r, liveRuns: live });
   });
   app.post('/api/workflows/:id/clone', (req, res) => {
     const r = cloneWorkflow(req.params.id, req.body?.name);
@@ -746,6 +750,12 @@ export function createServer(port: number, uiDir: string): http.Server {
     const r = setRunWorkflow(req.params.id, wfId);
     if ('error' in r) return err(res, 409, r.error);
     ok(res, getRun(req.params.id));
+  });
+  // move a running request onto the newest saved version of its workflow (done automatically on save; this is the manual retry)
+  app.post('/api/runs/:id/adopt-workflow', (req, res) => {
+    const r = adoptLatestForRun(req.params.id);
+    if (r.error) return err(res, 409, r.error);
+    ok(res, r);
   });
   app.post('/api/runs/:id/pause', (req, res) => { pauseRun(req.params.id, !!req.body?.hard); ok(res, getRun(req.params.id)); });
   app.post('/api/runs/:id/resume', (req, res) => { resumeRun(req.params.id); ok(res, getRun(req.params.id)); });

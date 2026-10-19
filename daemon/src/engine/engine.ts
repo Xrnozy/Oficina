@@ -314,6 +314,80 @@ export function setRunWorkflow(runId: string, workflowId: string): { ok: true } 
   return { ok: true };
 }
 
+// ---- live workflow edits ---------------------------------------------------------------------------------------
+// Saving a workflow while a run follows it must not disturb work in flight, and the run should use the new version from
+// then on. A task mid-flow is identified by node ids, so the new version can take over as soon as every step that
+// currently has work (running, waiting for the owner, parked, or stalled) still exists in it as the same kind of step.
+// Anything added, rewired or reconfigured applies at once; if a running step was removed, the switch waits for it.
+
+function nodesInFlight(runId: string): { taskTitle: string; nodeId: string }[] {
+  const out: { taskTitle: string; nodeId: string }[] = [];
+  for (const t of q(`SELECT title, meta FROM tasks WHERE run_id = ? AND status NOT IN ('done','cancelled','failed')`, runId)) {
+    const wf = parseJson<Record<string, any>>(t.meta as string, {}).wf as Partial<WfState> | undefined;
+    if (!wf) continue;
+    const ids = new Set<string>([...(wf.nodes ?? []), ...(wf.queued ?? []), ...(wf.awaiting?.nodeId ? [wf.awaiting.nodeId] : []), ...(wf.held ? [wf.held] : []), ...(wf.deadEndNode ? [wf.deadEndNode] : [])]);
+    for (const nodeId of ids) out.push({ taskTitle: t.title as string, nodeId });
+  }
+  return out;
+}
+
+/** Why the run cannot switch to this version right now (empty: it can). */
+export function adoptBlockers(runId: string, to: WfGraph): string[] {
+  const r = getRun(runId);
+  const cur = r ? graphFor(r)?.graph : null;
+  const blockers: string[] = [];
+  for (const f of nodesInFlight(runId)) {
+    const next = to.nodes.find((n) => n.id === f.nodeId);
+    const prev = cur?.nodes.find((n) => n.id === f.nodeId);
+    if (!next) blockers.push(`“${prev?.label ?? f.nodeId}” is still working on “${f.taskTitle}” but is not in the new version`);
+    else if (prev && prev.type !== next.type) blockers.push(`“${prev.label}” changed kind while it is working on “${f.taskTitle}”`);
+  }
+  return blockers;
+}
+
+export function adoptWorkflowVersion(runId: string, versionId: string): { adopted: boolean; pending?: boolean; blockers?: string[] } {
+  const r = getRun(runId);
+  const v = getWorkflowVersion(versionId);
+  if (!r || !v || ['done', 'stopped', 'failed'].includes(r.status) || !r.workflowVersionId || r.workflowVersionId === versionId) return { adopted: false };
+  const blockers = adoptBlockers(runId, v.graph);
+  if (blockers.length) {
+    run('UPDATE runs SET pending_workflow_version_id = ? WHERE id = ?', versionId, runId);
+    emit('workflow.pending', 'engine', { versionId, n: v.version.n, blockers }, runId);
+    return { adopted: false, pending: true, blockers };
+  }
+  run('UPDATE runs SET workflow_version_id = ?, pending_workflow_version_id = NULL WHERE id = ?', versionId, runId);
+  wfGraphCache.delete(runId);
+  emit('workflow.adopted', 'engine', { from: r.workflowVersionId, versionId, n: v.version.n }, runId);
+  // work that was parked or waiting on a step that now exists differently picks up the new definition
+  void maybeAdvanceRun(runId);
+  return { adopted: true };
+}
+
+/** Move one run to the newest saved version of the workflow it follows. */
+export function adoptLatestForRun(runId: string): { adopted: boolean; pending?: boolean; blockers?: string[]; error?: string } {
+  const r = getRun(runId);
+  if (!r) return { adopted: false, error: 'run not found' };
+  if (!r.workflowVersionId) return { adopted: false, error: 'this run follows the built-in flow, which has no versions' };
+  const latest = q1('SELECT w.latest_version_id l FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE v.id = ?', r.workflowVersionId)?.l as string | undefined;
+  if (!latest || latest === r.workflowVersionId) return { adopted: false, error: 'this run already follows the latest version' };
+  return adoptWorkflowVersion(runId, latest);
+}
+
+/** A new version of a workflow was saved: every live run that follows that workflow switches to it. */
+export function adoptSavedVersion(workflowId: string, versionId: string): void {
+  for (const r of q(`SELECT r.id FROM runs r JOIN workflow_versions v ON v.id = r.workflow_version_id WHERE v.workflow_id = ? AND r.status NOT IN ('done','stopped','failed')`, workflowId)) {
+    adoptWorkflowVersion(r.id as string, versionId);
+  }
+}
+
+/** Retry a switch that was waiting on a step to finish. */
+function retryPendingAdoption(runId: string): void {
+  const p = q1('SELECT pending_workflow_version_id p FROM runs WHERE id = ?', runId)?.p as string | null | undefined;
+  if (!p) return;
+  const latest = q1('SELECT w.latest_version_id l FROM workflow_versions v JOIN workflows w ON w.id = v.workflow_id WHERE v.id = ?', p)?.l as string | undefined;
+  adoptWorkflowVersion(runId, latest ?? p);
+}
+
 // A task the owner adds while a run is going (Live activity, the Tasks board): it enters as ready, and the next assign
 // sweep hands it to whichever eligible agent is free, exactly like a planned task. Nothing in flight is touched.
 export interface UserWorkItem { id: string; title: string; instructions: string }
@@ -2342,6 +2416,8 @@ export async function evaluateDodOnIntegration(runId: string): Promise<{ pass: n
 }
 
 export async function maybeAdvanceRun(runId: string): Promise<void> {
+  const r0 = getRun(runId);
+  if (r0?.status === 'running') retryPendingAdoption(runId);
   const r = getRun(runId);
   if (!r || r.status !== 'running') return;
 
@@ -3774,6 +3850,11 @@ function graphGuardResume(r: Run, task: Task, approved: boolean): void {
 
 export function wireEngineEvents(): void {
   onEvent((e) => {
+    // the owner saved a workflow: runs following it switch to the new version without disturbing work in flight
+    if (e.type === 'workflow.saved' && e.payload.workflowId && e.payload.versionId) {
+      try { adoptSavedVersion(String(e.payload.workflowId), String(e.payload.versionId)); } catch (err) { console.warn('[engine] adopting a saved workflow failed:', String(err).slice(0, 160)); }
+      return;
+    }
     if (e.type !== 'approval.decided') return;
     const decided = q1('SELECT * FROM approvals WHERE id = ?', e.payload.approvalId as string);
     if (!decided) return;

@@ -244,6 +244,7 @@ addColumn('work_items', 'cache_key', `TEXT`);                      // (kind, pro
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_cache ON work_items(cache_key, status)`);
 addColumn('error_kb', 'repo_id', `TEXT`);                          // per-repo lessons (spec 6.5)
 addColumn('runs', 'summary_md', `TEXT`);                           // model-free end-of-run summary (spec 6.6)
+addColumn('runs', 'pending_workflow_version_id', `TEXT`);          // a newer saved version waiting for the steps it would orphan to finish
 addColumn('runs', 'workflow_version_id', `TEXT`);                  // the graph version a run follows
 addColumn('work_items', 'workflow_node_id', `TEXT`);               // graph node that produced this item
 addColumn('work_items', 'workflow_edge_id', `TEXT`);               // …and the edge that led to it

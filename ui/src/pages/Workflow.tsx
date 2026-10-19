@@ -990,57 +990,85 @@ function WorkflowEditor() {
   const liveRunId = wfRuns.find((r) => r.id === run?.id)?.id ?? wfRuns[0]?.id ?? null;
   const [pickedRun, setPickedRun] = useState<string | null>(null);
   useEffect(() => { setPickedRun(null); }, [wfId]);
-  const liveRun = pickedRun && wfRuns.some((r) => r.id === pickedRun) ? pickedRun : liveRunId;
-  const { data: runEvents } = useFetch<OfficeEvent[]>(
-    liveRun ? `/runs/${liveRun}/events?types=${encodeURIComponent('workflow.step,workflow.branch,workflow.loop,workflow.enter')}` : null, [liveRun]);
+  const liveRun = pickedRun && wfRuns.some((r) => r.id === pickedRun) ? pickedRun : liveRunId;   // ('all' is handled by showAll)
+  // with several requests running on this workflow the canvas shows all of them at once (the picker can narrow it to one)
+  const showAll = wfRuns.length > 1 && (pickedRun === null || pickedRun === 'all');
+  const liveRunIds = useMemo(() => (showAll ? wfRuns.map((r) => r.id) : liveRun ? [liveRun] : []), [showAll, wfRuns, liveRun]);
+  const liveKey = liveRunIds.join(',');
+  const STEP_TYPES = 'workflow.step,workflow.branch,workflow.loop,workflow.enter';
+  const [runEvents, setRunEvents] = useState<Record<string, OfficeEvent[]>>({});
+  const [taskTitles, setTaskTitles] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    const ids = liveKey ? liveKey.split(',') : [];
+    Promise.all(ids.map((id) => get<OfficeEvent[]>(`/runs/${id}/events?types=${encodeURIComponent(STEP_TYPES)}`).then((ev) => [id, ev] as const).catch(() => [id, [] as OfficeEvent[]] as const)))
+      .then((pairs) => { if (alive) setRunEvents(Object.fromEntries(pairs)); });
+    const loadTitles = () => Promise.all(ids.map((id) => get<any>(`/runs/${id}`).catch(() => null))).then((ds) => {
+      if (!alive) return;
+      const m: Record<string, string> = {};
+      for (const d of ds) for (const t of d?.tasks ?? []) m[t.id] = t.title;
+      setTaskTitles(m);
+    });
+    void loadTitles();
+    const t = setInterval(loadTitles, 10_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [liveKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const liveRunObj = (runs ?? []).find((r) => r.id === liveRun) ?? null;
   const runGoing = !!liveRunObj && ONGOING.includes(liveRunObj.status);
-  const { data: runDetail } = useQuery<any>(liveRun ? `/runs/${liveRun}` : null, [liveRun]);
   const [liveWs, setLiveWs] = useState<OfficeEvent[]>([]);
-  useEffect(() => { setLiveWs([]); }, [liveRun]);
+  useEffect(() => { setLiveWs([]); }, [liveKey]);
   useEvents(useCallback((e: OfficeEvent) => {
-    if (!e.type.startsWith('workflow.') || e.runId !== liveRun) return;
-    if (['workflow.step', 'workflow.branch', 'workflow.loop', 'workflow.enter'].includes(e.type)) {
+    if (!e.type.startsWith('workflow.') || !e.runId || !liveKey.split(',').includes(e.runId)) return;
+    if (STEP_TYPES.split(',').includes(e.type)) {
       setLiveWs((xs) => (xs.length > 300 ? [...xs.slice(-200), e] : [...xs, e]));
     }
-  }, [liveRun]));
+  }, [liveKey]));
 
   const live = useMemo(() => {
-    const nodeStatus = new Map<string, { status: string; taskId?: string; at: number; agent?: string; since?: string; human?: boolean }>();
+    type NS = { status: string; taskId?: string; at: number; agent?: string; since?: string; human?: boolean; runId?: string };
+    const nodeStatus = new Map<string, NS>();
     const taken = new Set<string>();
-    const mark = (evs: OfficeEvent[]) => {
-      for (const e of evs) {
-        const p = e.payload as Record<string, unknown>;
-        if (e.type === 'workflow.step' && p.nodeId) {
-          const cur = nodeStatus.get(String(p.nodeId));
-          const status = p.done ? 'done' : 'running';
-          if (!cur || cur.status !== 'running' || status === 'done') {
-            nodeStatus.set(String(p.nodeId), {
-              status, taskId: p.taskId as string | undefined, at: e.seq,
-              agent: (p.agent as string | undefined) ?? cur?.agent,
-              since: status === 'running' ? e.ts : cur?.since,
-              human: !!p.human,
-            });
+    for (const runId of liveRunIds) {
+      const per = new Map<string, NS>();
+      const mark = (evs: OfficeEvent[]) => {
+        for (const e of evs) {
+          const p = e.payload as Record<string, unknown>;
+          if (e.type === 'workflow.step' && p.nodeId) {
+            const cur = per.get(String(p.nodeId));
+            const status = p.done ? 'done' : 'running';
+            if (!cur || cur.status !== 'running' || status === 'done') {
+              per.set(String(p.nodeId), {
+                status, taskId: p.taskId as string | undefined, at: e.seq,
+                agent: (p.agent as string | undefined) ?? cur?.agent,
+                since: status === 'running' ? e.ts : cur?.since,
+                human: !!p.human, runId,
+              });
+            }
+          }
+          if (e.type === 'workflow.branch') {
+            for (const eid of (p.edges as string[] | undefined) ?? []) taken.add(eid);
+            if (p.from) { const cur = per.get(String(p.from)); if (cur?.status === 'running') per.set(String(p.from), { ...cur, status: 'done' }); }
+          }
+          if (e.type === 'workflow.loop' && p.taskId) {
+            // a loop edge exhausted or fired — mark the source node as retrying
+            if (p.edgeId) taken.add(String(p.edgeId));
+          }
+          if (e.type === 'workflow.enter' && Array.isArray(p.nodes)) {
+            for (const nid of p.nodes as string[]) if (!per.has(nid)) per.set(nid, { status: 'running', taskId: p.taskId as string | undefined, at: e.seq, since: e.ts, runId });
           }
         }
-        if (e.type === 'workflow.branch') {
-          for (const eid of (p.edges as string[] | undefined) ?? []) taken.add(eid);
-          if (p.from) { const cur = nodeStatus.get(String(p.from)); if (cur?.status === 'running') nodeStatus.set(String(p.from), { ...cur, status: 'done' }); }
-        }
-        if (e.type === 'workflow.loop' && p.taskId) {
-          // a loop edge exhausted or fired — mark the source node as retrying
-          if (p.edgeId) taken.add(String(p.edgeId));
-        }
-        if (e.type === 'workflow.enter' && Array.isArray(p.nodes)) {
-          for (const nid of p.nodes as string[]) if (!nodeStatus.has(nid)) nodeStatus.set(nid, { status: 'running', taskId: p.taskId as string | undefined, at: e.seq, since: e.ts });
-        }
+      };
+      mark(runEvents[runId] ?? []);
+      mark(liveWs.filter((e) => e.runId === runId));
+      // several requests can be on one step: running beats done
+      for (const [id, v] of per) {
+        const cur = nodeStatus.get(id);
+        if (!cur || (v.status === 'running' && cur.status !== 'running') || (v.status === cur.status && v.at > cur.at)) nodeStatus.set(id, v);
       }
-    };
-    mark(runEvents ?? []);
-    mark(liveWs);
+    }
     return { nodeStatus, taken };
-  }, [runEvents, liveWs]);
+  }, [runEvents, liveWs, liveRunIds]);
 
   // decorate nodes/edges with live + issue overlays (stable refs for memo)
   const issueMap = useMemo(() => {
@@ -1141,7 +1169,7 @@ function WorkflowEditor() {
     }
     return best;
   }, [live, nodes]);
-  const taskTitle = (id?: string) => (id ? (runDetail?.tasks ?? []).find((t: any) => t.id === id)?.title as string | undefined : undefined);
+  const taskTitle = (id?: string) => (id ? taskTitles[id] : undefined);
   const elapsed = (since?: string) => {
     if (!since) return '';
     const sec = Math.max(0, Math.round((clock - Date.parse(since)) / 1000));
@@ -1352,8 +1380,11 @@ function WorkflowEditor() {
   const save = useCallback(async () => {
     if (!detail || builtin) return;
     if (hasErrors) { toast('Fix validation errors before saving', 'bad'); return; }
-    const r = await act(put<{ version: WorkflowVersionRow }>(`/workflows/${detail.workflow.id}`, { graph: currentGraph(), note }), 'Saved as a new version');
-    if (r) { localStorage.removeItem(`wf-draft:${detail.workflow.id}`); setDirty(false); setNote(''); setDraftBanner(false); reloadDetail(); reloadList(); }
+    const r = await act(put<{ version: WorkflowVersionRow; liveRuns?: { runId: string; adopted: boolean; pending: boolean }[] }>(`/workflows/${detail.workflow.id}`, { graph: currentGraph(), note }));
+    if (r) {
+      const lr = r.liveRuns ?? [];
+      const now = lr.filter((x) => x.adopted).length, wait = lr.filter((x) => x.pending).length;
+      toast(!lr.length ? 'Saved as a new version' : `Saved — ${now ? `${now} running request${now === 1 ? ' uses' : 's use'} it now, work in progress untouched` : ''}${now && wait ? '; ' : ''}${wait ? `${wait} will switch when the step being removed or changed finishes` : ''}`, wait && !now ? 'warn' : 'ok'); localStorage.removeItem(`wf-draft:${detail.workflow.id}`); setDirty(false); setNote(''); setDraftBanner(false); reloadDetail(); reloadList(); }
   }, [detail, builtin, hasErrors, currentGraph, note, reloadDetail, reloadList]);
 
   const createNew = async () => setShowTemplates(true);
@@ -1472,7 +1503,18 @@ function WorkflowEditor() {
             <span className="font-medium text-fg">{working.length ? 'Working now' : runGoing ? (liveRunObj.status === 'paused' ? 'Paused' : 'Waiting') : 'Run finished'}</span>
             <span className="text-fg-3 max-w-[22ch] truncate" title={liveRunObj.goal}>{liveRunObj.goal}</span>
             <StatusChip value={liveRunObj.status} />
+            {showAll && <span className="chip shrink-0">{wfRuns.length} requests</span>}
           </span>
+          {!showAll && liveRunObj.workflow && liveRunObj.workflow.latestN != null && liveRunObj.workflow.latestN > liveRunObj.workflow.n && (
+            <span className="flex items-center gap-1.5 shrink-0 text-warn" title="Saving a workflow applies it to running requests automatically; use this when a save was waiting for a step to finish, or was made earlier">
+              {liveRunObj.workflow.pendingN ? `v${liveRunObj.workflow.pendingN} applies when the running steps it changes have finished` : `runs v${liveRunObj.workflow.n} · latest is v${liveRunObj.workflow.latestN}`}
+              <button className="btn btn-xs" onClick={async () => {
+                const r = await act(post<{ adopted: boolean; pending?: boolean; blockers?: string[] }>(`/runs/${liveRunObj.id}/adopt-workflow`));
+                if (!r) return;
+                toast(r.adopted ? 'This request now uses the latest version' : `Waiting: ${(r.blockers ?? []).join('; ')}`, r.adopted ? 'ok' : 'warn');
+              }}>Apply now</button>
+            </span>
+          )}
           <span className="w-px h-4 bg-line shrink-0" />
           {working.map((n) => {
             const l = n.data.live!;
@@ -1556,7 +1598,8 @@ function WorkflowEditor() {
             )}
             <Panel position="top-right" className="!m-3 flex flex-col items-end gap-1.5">
               {wfRuns.length > 0 && (
-                <Select className="input input-sm !w-auto" value={liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Show where a run actually went on this workflow">
+                <Select className="input input-sm !w-auto" value={showAll ? 'all' : liveRun ?? ''} onChange={(e) => setPickedRun(e.target.value || null)} title="Show where a request actually went on this workflow">
+                  {wfRuns.length > 1 && <option value="all">All {wfRuns.length} running requests</option>}
                   {wfRuns.map((r) => <option key={r.id} value={r.id}>{r.id === run?.id ? '● ' : ''}run {r.id.slice(0, 8)} · {r.status}</option>)}
                 </Select>
               )}

@@ -235,7 +235,14 @@ async function runCli(
     };
     child.stdout!.on('data', onData('stdout'));
     child.stderr!.on('data', onData('stderr'));
-    child.on('close', (c) => {
+    // 'close' fires only once every pipe the CLI handed out has closed. An agent that starts a dev server or a browser
+    // for a test inherits those pipes, and if that process outlives the CLI, 'close' never comes: the work was done and
+    // delivered in the output, but the hand-off to the next step never happened. So when the CLI itself has exited we
+    // give the pipes a moment to drain, then finish anyway and let go of them (the leftover process is not killed).
+    let finished = false;
+    const finish = (c: number | null) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(killer); clearInterval(idle);
       if (child.pid) liveChildren.delete(child.pid);
       emitLines(streams.stdout.flushLines(), 'stdout'); emitLines(streams.stderr.flushLines(), 'stderr');
@@ -243,6 +250,15 @@ async function runCli(
       const secs = Math.round((Date.now() - started) / 1000);
       ctx.emit('agent.activity', { kind: c === 0 ? 'status' : 'error', text: `${cliExecutable(template).name} exited with code ${c} after ${secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`}` });
       resolve({ code: c, output: out });
+    };
+    child.on('close', finish);
+    child.on('exit', (c) => {
+      setTimeout(() => {
+        if (finished) return;
+        ctx.emit('agent.activity', { kind: 'status', text: 'The CLI exited but a process it started is still holding its output open — continuing without waiting for it' });
+        try { child.stdout?.destroy(); child.stderr?.destroy(); } catch { /* already closed */ }
+        finish(c);
+      }, 2500);
     });
     child.on('error', (e) => { clearTimeout(killer); clearInterval(idle); if (child.pid) liveChildren.delete(child.pid); ctx.emit('agent.activity', { kind: 'error', text: `could not start the CLI: ${String(e)}` }); resolve({ code: -1, output: String(e) }); });
   });
