@@ -6,7 +6,7 @@ import { get, post, useEvents, useFetch, useQuery, type OfficeEvent } from '../a
 import { Avatar, Empty, PageHeader, StatusChip, Tag, act, fmtAgo, fmtTime } from '../components';
 import { DiffStat, DiffView } from '../diff';
 import { RunWorkflow } from '../workflowPicker';
-import { AddMenu } from '../attachments';
+import { AddMenu, UploadDock } from '../attachments';
 import {
   AlertTriangle, ArrowDown, CheckCircle2, ChevronDown, ChevronRight, CircleDot, FileEdit, FileSearch, FileText, Globe,
   ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Users, Wrench, XCircle,
@@ -60,6 +60,7 @@ export default function Activity() {
   const focus = params.get('agent');
   const [tab, setTab] = useState<'activity' | 'technical'>('activity');
   const [now, setNow] = useState(Date.now());
+  const [dock, setDock] = useState<null | 'documents' | 'task'>(null);
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(t); }, []);
 
   // every active run's recent events, merged in order
@@ -103,7 +104,7 @@ export default function Activity() {
     <div className="flex flex-col h-[calc(100dvh-3.5rem-4rem)] min-h-[560px]">
       <PageHeader title="Live activity" sub={`What each agent is doing, as its CLI reports it — across ${active.length || 'no'} active run${active.length === 1 ? '' : 's'}.`}>
         {(active[0] ?? runs?.[0]) && <RunWorkflow run={active[0] ?? runs![0]} onChanged={reloadRuns} />}
-        {office && <AddMenu workspaceId={office.id} runId={active[0]?.id ?? null} onChanged={reloadRuns} />}
+        {office && <AddMenu workspaceId={office.id} runId={active[0]?.id ?? null} onChanged={reloadRuns} onUpload={setDock} />}
       </PageHeader>
       {!members.length && <Empty icon={Radio} title="No active agents" text="Agents appear here once they hold a role. Assign one under Roles." />}
       {members.length > 0 && (
@@ -134,7 +135,11 @@ export default function Activity() {
           </nav>
 
           {/* feed */}
-          <Feed key={selected?.id ?? 'all'} agent={selected} members={members} shown={shown} tab={tab} setTab={setTab} state={selected ? states.get(selected.id)! : null} agentOf={agentOf} now={now} />
+          <div className="flex flex-col gap-3 min-h-0 min-w-0">
+            <Feed key={selected?.id ?? 'all'} agent={selected} members={members} shown={shown} tab={tab} setTab={setTab} state={selected ? states.get(selected.id)! : null} agentOf={agentOf} now={now} />
+            {/* the upload panel opens right under the chat input */}
+            {dock && office && <UploadDock key={dock} workspaceId={office.id} runId={active[0]?.id ?? null} mode={dock} onClose={() => setDock(null)} onDone={reloadRuns} />}
+          </div>
 
           {/* changes */}
           <ChangesPane agent={changesFor} state={changesFor ? states.get(changesFor.id)! : null} />
@@ -157,7 +162,7 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
   useEffect(() => { if (pinned) ref.current?.scrollTo({ top: ref.current.scrollHeight }); }, [shown.length, pinned, tab]);
   const quiet = state?.running && state.lastOutputAt ? Math.round((now - Date.parse(state.lastOutputAt)) / 1000) : null;
   return (
-    <section className="panel flex flex-col min-h-[320px] overflow-hidden">
+    <section className="panel flex flex-col flex-1 min-h-[200px] overflow-hidden">
       <div className="flex items-center gap-2.5 px-4 h-12 border-b border-line shrink-0">
         {agent ? <><Avatar agent={agent} size="sm" /><span className="text-sm font-medium text-fg truncate">{agent.name}</span><StatusChip value={state?.running ? agent.status : 'idle'} /></>
           : <><Users size={15} className="text-fg-3" /><span className="text-sm font-medium text-fg">All agents</span></>}

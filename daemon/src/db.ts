@@ -230,6 +230,10 @@ addColumn('runs', 'summary_md', `TEXT`);                           // model-free
 addColumn('runs', 'workflow_version_id', `TEXT`);                  // the graph version a run follows
 addColumn('work_items', 'workflow_node_id', `TEXT`);               // graph node that produced this item
 addColumn('work_items', 'workflow_edge_id', `TEXT`);               // …and the edge that led to it
+addColumn('attachments', 'role', `TEXT`);                          // audience: every agent acting in this role (scope 'role')
+addColumn('attachments', 'item_ref', `TEXT`);                      // the task work item a file was attached to
+addColumn('attachments', 'path', `TEXT`);                          // where the bytes are (documents/<audience>/ in the repository)
+addColumn('attachments', 'repo_id', `TEXT`);                       // the repository that holds it, if any
 
 // Stage 7 indexes: the hot predicates that had only run_id indexes before
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_task ON work_items(task_id, status)`);

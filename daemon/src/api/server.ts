@@ -15,7 +15,7 @@ import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
 import {
-  approveDod, assignSweep, createRun, createUserTask, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
+  approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
   pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
@@ -612,7 +612,7 @@ export function createServer(port: number, uiDir: string): http.Server {
   // ---------- reference files and task attachments ----------
   app.get('/api/attachments', (req, res) => {
     const s = (k: string) => (req.query[k] ? String(req.query[k]) : null);
-    ok(res, listAttachments({ workspaceId: s('workspaceId'), scope: s('scope'), agentId: s('agentId'), taskId: s('taskId'), runId: s('runId') }));
+    ok(res, listAttachments({ workspaceId: s('workspaceId'), scope: s('scope'), agentId: s('agentId'), taskId: s('taskId'), runId: s('runId'), role: s('role') }));
   });
   // the body is the file's bytes; everything else is in the query string, so nothing is base64-inflated
   app.post('/api/attachments', express.raw({ type: () => true, limit: MAX_FILE_BYTES + 1024 }), (req, res) => {
@@ -620,7 +620,7 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (!qs.workspaceId) return err(res, 400, 'workspaceId required');
     const r = addAttachment({
       workspaceId: qs.workspaceId, scope: (qs.scope ?? 'project') as never, name: qs.name, data: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
-      agentId: qs.agentId, taskId: qs.taskId, runId: qs.runId,
+      agentId: qs.agentId, taskId: qs.taskId, runId: qs.runId, role: qs.role, itemRef: qs.itemRef,
     });
     if ('error' in r) return err(res, r.status, r.error);
     ok(res, r);
@@ -647,9 +647,23 @@ export function createServer(port: number, uiDir: string): http.Server {
     ok(res, r);
   });
   app.post('/api/runs/:id/tasks', (req, res) => {
-    const t = createUserTask(req.params.id, { title: req.body?.title, description: req.body?.description, priority: req.body?.priority, difficulty: req.body?.difficulty });
-    if ('error' in t) return err(res, /not found/.test(t.error) ? 404 : 409, t.error);
+    const t = createUserTask(req.params.id, {
+      title: req.body?.title, description: req.body?.description, priority: req.body?.priority, difficulty: req.body?.difficulty,
+      hold: req.body?.hold === true, workItems: req.body?.workItems,
+    });
+    if ('error' in t) return err(res, /not found/.test(t.error) ? 404 : /too long|needs a|at most/.test(t.error) ? 400 : 409, t.error);
     ok(res, t);
+  });
+  // the owner can only hand a task to the agents (ready) or park it (held); every other status is the workflow's
+  app.post('/api/tasks/:id/move', (req, res) => {
+    const r = moveTask(req.params.id, String(req.body?.to ?? ''));
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r.task);
+  });
+  app.delete('/api/tasks/:id', (req, res) => {
+    const r = deleteTask(req.params.id);
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r);
   });
 
   app.post('/api/runs/:id/workflow', (req, res) => {

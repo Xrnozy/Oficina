@@ -1,5 +1,6 @@
 import { clearBusySessions } from './services/cli-sessions.ts';
 import { startQueueLoop } from './services/queue.ts';
+import { relocateLegacy } from './services/attachments.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.ts';
@@ -44,6 +45,7 @@ wireEngineEvents();
 reconcileOnBoot();
 startTimerLoop();
 startQueueLoop();
+try { const n = relocateLegacy(); if (n) console.log(`[attachments] moved ${n} reference file(s) into their repository's documents/ folder`); } catch (e) { console.warn('[attachments] relocation skipped:', String(e).slice(0, 120)); }
 clearBusySessions();
 createServer(config.port, config.uiDir);
 

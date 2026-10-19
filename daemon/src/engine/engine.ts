@@ -1,5 +1,5 @@
 import { DATA_DIR, q, q1, run, tx } from '../db.ts';
-import { bindToRun, manifestFingerprint, manifestSection } from '../services/attachments.ts';
+import { bindToRun, manifestFingerprint, manifestSection, removeAttachment } from '../services/attachments.ts';
 import { emit, onEvent } from '../bus.ts';
 import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
@@ -315,24 +315,109 @@ export function setRunWorkflow(runId: string, workflowId: string): { ok: true } 
 
 // A task the owner adds while a run is going (Live activity, the Tasks board): it enters as ready, and the next assign
 // sweep hands it to whichever eligible agent is free, exactly like a planned task. Nothing in flight is touched.
-export function createUserTask(runId: string, spec: { title: string; description?: string; priority?: number; difficulty?: number }): Task | { error: string } {
+export interface UserWorkItem { id: string; title: string; instructions: string }
+
+export function createUserTask(runId: string, spec: {
+  title: string; description?: string; priority?: number; difficulty?: number; hold?: boolean;
+  workItems?: { title?: string; instructions?: string }[];
+}): Task | { error: string } {
   const r = getRun(runId);
   if (!r) return { error: 'run not found' };
   if (['done', 'stopped', 'failed'].includes(r.status)) return { error: `this run is ${r.status} — start a new run to add work` };
   const title = String(spec.title ?? '').replace(/\s+/g, ' ').trim();
   if (!title) return { error: 'the task needs a title' };
   if (title.length > 200) return { error: 'the title is too long (200 characters at most)' };
-  const description = String(spec.description ?? '').trim().slice(0, 8000);
+  const rawItems = Array.isArray(spec.workItems) ? spec.workItems : [];
+  if (rawItems.length > 20) return { error: 'a task holds at most 20 work items — split it into several tasks' };
+  const items: UserWorkItem[] = [];
+  for (const w of rawItems) {
+    const t = String(w?.title ?? '').replace(/\s+/g, ' ').trim();
+    const ins = String(w?.instructions ?? '').trim();
+    if (!t && !ins) continue;                                   // an empty row is just ignored
+    if (!t) return { error: 'every work item needs a short title' };
+    if (t.length > 200) return { error: 'a work item title is too long (200 characters at most)' };
+    if (ins.length > 4000) return { error: `the instructions for "${t}" are too long (4000 characters at most)` };
+    items.push({ id: `w${items.length + 1}`, title: t, instructions: ins });
+  }
+  let description = String(spec.description ?? '').trim().slice(0, 8000);
+  if (items.length) {
+    // every prompt already carries the task's description and acceptance criteria — the work items ride along in both
+    const list = items.map((w, i) => `${i + 1}. ${w.title}${w.instructions ? `\n   Instructions: ${w.instructions.replace(/\n/g, '\n   ')}` : ''}`).join('\n');
+    description = [description, `## Work items\n${list}`].filter(Boolean).join('\n\n');
+  }
   const id = `T-${shortId('')}u`.replace('T--', 'T-');
-  const criteria = [`${title} works as described`, 'Existing behaviour keeps working'];
-  const status: TaskStatus = r.status === 'running' ? 'ready' : 'backlog';   // before the DoD is approved it waits like planned tasks
+  const criteria = items.length
+    ? [...items.map((w, i) => `Work item ${i + 1} is done: ${w.title}`), 'Existing behaviour keeps working']
+    : [`${title} works as described`, 'Existing behaviour keeps working'];
+  // on hold: kept on the board, never dispatched; otherwise before the DoD is approved it waits like the planned tasks
+  const status: TaskStatus = spec.hold ? 'held' : r.status === 'running' ? 'ready' : 'backlog';
   run(`INSERT INTO tasks (id, run_id, title, description, type, status, priority, depends_on, acceptance_criteria, deliverables, planned_by, difficulty, budget_usd, dod_item_ids, affected_paths, meta)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     id, runId, title, description, 'feature', status, Math.max(0, Math.min(9, Number(spec.priority ?? 1) || 1)),
-    '[]', JSON.stringify(criteria), '[]', 'owner', Math.max(1, Math.min(5, Number(spec.difficulty ?? 2) || 2)), 5, '[]', '[]', JSON.stringify({ createdBy: 'owner' }));
-  emit('task.created', 'owner', { taskId: id, title, by: 'owner' }, runId, id);
+    '[]', JSON.stringify(criteria), '[]', 'owner', Math.max(1, Math.min(5, Number(spec.difficulty ?? 2) || 2)), 5, '[]', '[]', JSON.stringify({ createdBy: 'owner', workItems: items }));
+  emit('task.created', 'owner', { taskId: id, title, by: 'owner', held: !!spec.hold, workItems: items.length }, runId, id);
   void maybeAdvanceRun(runId);
   return getTask(id)!;
+}
+
+// The owner moving a card. Only two destinations are the owner's to choose: Ready (hand it to the agents) and On hold
+// (keep it, but nobody works on it). In progress, In review, Done and Failed are facts the workflow produces from what
+// the agents actually did — they can never be set by hand, here or through the API.
+export function moveTask(taskId: string, to: string): { task: Task } | { error: string; status: number } {
+  const t = getTask(taskId);
+  if (!t) return { error: 'task not found', status: 404 };
+  const r = getRun(t.runId);
+  if (!r) return { error: 'run not found', status: 404 };
+  if (to !== 'ready' && to !== 'held') {
+    return { error: `"${to}" is set by the workflow from what the agents actually do — you can only move a task to Ready or On hold`, status: 409 };
+  }
+  if (to === 'held') {
+    if (t.status === 'held') return { task: t };
+    if (!['backlog', 'ready', 'blocked-quota'].includes(t.status)) {
+      return { error: `this task is ${t.status.replace(/-/g, ' ')} — an agent has already started on it, so it can't be put on hold`, status: 409 };
+    }
+    const dependents = runTasks(t.runId).filter((x) => x.dependsOn.includes(t.id) && !['done', 'cancelled', 'failed', 'held'].includes(x.status));
+    if (dependents.length) return { error: `${dependents.map((d) => `"${d.title}"`).join(', ')} wait${dependents.length === 1 ? 's' : ''} for this task — hold or delete ${dependents.length === 1 ? 'it' : 'them'} first`, status: 409 };
+    setTaskMeta(t.id, 'heldFrom', t.status);
+    setTaskStatus(t.id, 'held', 'owner', { reason: 'put on hold by the owner' });
+    return { task: getTask(t.id)! };
+  }
+  // to ready
+  if (t.status === 'ready' || t.status === 'backlog') return { task: t };
+  if (t.status !== 'held') return { error: `this task is ${t.status.replace(/-/g, ' ')} — only a task that is on hold can be moved back to Ready`, status: 409 };
+  if (['done', 'stopped', 'failed'].includes(r.status)) return { error: `this run is ${r.status} — start a new run to add work`, status: 409 };
+  setTaskStatus(t.id, r.status === 'running' ? 'ready' : 'backlog', 'owner', { reason: 'released from hold by the owner' });
+  void maybeAdvanceRun(t.runId);
+  return { task: getTask(t.id)! };
+}
+
+// Removing a task from the board. Refused while an agent is on it; the repository, commits and checkpoints are never
+// touched (undo them from Checkpoints), and other tasks stop waiting for it.
+export function deleteTask(taskId: string): { ok: true; title: string } | { error: string; status: number } {
+  const t = getTask(taskId);
+  if (!t) return { error: 'task not found', status: 404 };
+  const live = q1(`SELECT COUNT(*) c FROM work_items WHERE task_id = ? AND status IN ('queued','running','waiting')`, t.id)?.c as number;
+  if (live > 0 || holdsRepo(t) || ['in-progress', 'verifying', 'in-review'].includes(t.status)) {
+    return { error: 'an agent is working on this task right now — wait for it to finish, or stop the run, then delete it', status: 409 };
+  }
+  tx(() => {
+    for (const other of runTasks(t.runId)) {
+      if (other.dependsOn.includes(t.id)) run('UPDATE tasks SET depends_on = ? WHERE id = ?', JSON.stringify(other.dependsOn.filter((d) => d !== t.id)), other.id);
+    }
+    for (const a of q('SELECT id FROM attachments WHERE task_id = ?', t.id)) removeAttachment(a.id as string);
+    run(`DELETE FROM approvals WHERE task_id = ? AND status = 'pending'`, t.id);
+    run('DELETE FROM prompt_versions WHERE work_item_id IN (SELECT id FROM work_items WHERE task_id = ?)', t.id);
+    run('DELETE FROM work_items WHERE task_id = ?', t.id);
+    run('DELETE FROM check_runs WHERE task_id = ?', t.id);
+    run('DELETE FROM error_reports WHERE task_id = ?', t.id);
+    run('DELETE FROM handoffs WHERE task_id = ?', t.id);
+    run('DELETE FROM agent_messages WHERE task_id = ?', t.id);
+    run('DELETE FROM tasks WHERE id = ?', t.id);
+  });
+  try { fs.rmSync(path.join(DATA_DIR, 'handoff', `${t.id}.md`), { force: true }); } catch { /* notes are a courtesy */ }
+  emit('task.deleted', 'owner', { taskId: t.id, title: t.title, status: t.status }, t.runId, t.id);
+  void maybeAdvanceRun(t.runId);
+  return { ok: true, title: t.title };
 }
 
 export function approveDod(runId: string): void {
@@ -540,8 +625,10 @@ function applyPlanDiff(runId: string, diff: PlanDiff, plannedBy: string, dodItem
       // derived checks (spec 6.3): which repo check verifies each acceptance
       // criterion — known before the developer starts, not after it delivers
       const derived = deriveChecks(r.repoId, spec.acceptanceCriteria ?? []);
+      const refs = (Array.isArray(spec.references) ? spec.references : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
       const meta = {
         ...(spec.meta ?? {}),
+        ...(refs.length ? { references: refs } : {}),
         derivedChecks: derived.filter((d) => d.checkable).map((d) => ({ criterion: d.criterion.slice(0, 200), check: d.checkName })),
         nonCheckable: derived.filter((d) => !d.checkable).map((d) => d.criterion.slice(0, 200)),
       };
@@ -595,7 +682,7 @@ export function createWorkItemRecord(runId: string, task: Task | null, kind: Wor
   // the same work — a later dispatch may reuse the delivered result
   // …and the reference files the agent can see: adding or changing one must not reuse an older result
   const wsId = getRun(runId)?.workspaceId ?? '';
-  const cacheKey = sha256(`${kind}\n${text}\n${packHash}\n${candidate.model?.id ?? ''}\n${manifestFingerprint({ workspaceId: wsId, runId, taskId: task?.id, agentId: candidate.agent.id })}`);
+  const cacheKey = sha256(`${kind}\n${text}\n${packHash}\n${candidate.model?.id ?? ''}\n${manifestFingerprint({ workspaceId: wsId, runId, taskId: task?.id, agentId: candidate.agent.id, role: candidate.role?.name })}`);
   run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, cache_key, status, started_at, heartbeat_at, attempt)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wiId, task?.id ?? null, runId, kind, candidate.agent.id, candidate.account?.id ?? null, candidate.model?.id ?? null,
@@ -637,7 +724,7 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   let prompt = approvedPrompt;
   // reference files + this task's attachments: a short manifest (paths, not contents), recomputed for every dispatch so
   // a file added mid-run reaches the next work item without restarting anything
-  const att = manifestSection({ workspaceId: r.workspaceId, runId: r.id, taskId: task?.id, agentId: candidate.agent.id });
+  const att = manifestSection({ workspaceId: r.workspaceId, runId: r.id, taskId: task?.id, agentId: candidate.agent.id, role: candidate.role?.name });
   if (att.section) prompt = `${approvedPrompt}\n\n${att.section}`;
   if (sk.section) {
     if (prompt.length + sk.section.length + 2 <= budget) prompt = `${prompt}\n\n${sk.section}`;
@@ -2258,7 +2345,7 @@ export async function maybeAdvanceRun(runId: string): Promise<void> {
   const items = dodItems(r);
   const required = items.filter((i) => !i.optional);
   // work the owner added mid-run is outside the DoD, but the run is not finished while it is still open
-  const ownerWorkOpen = runTasks(runId).some((t) => t.meta?.createdBy === 'owner' && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status));
+  const ownerWorkOpen = runTasks(runId).some((t) => t.meta?.createdBy === 'owner' && !['done', 'cancelled', 'failed', 'blocked', 'held'].includes(t.status));
   if (!ownerWorkOpen && required.length && required.every((i) => i.status === 'pass')) {
     setRunStatus(runId, 'verifying');
     const res = await evaluateDodOnIntegration(runId);
@@ -2281,7 +2368,17 @@ export async function maybeAdvanceRun(runId: string): Promise<void> {
   // tasks approved but not yet merged (waiting on approvals) — nudge merge
   for (const t of tasks.filter((t) => t.status === 'approved')) void proceedMerge(t.id);
 
-  const unfinished = tasks.filter((t) => !['done', 'cancelled', 'failed', 'blocked'].includes(t.status));
+  const unfinished = tasks.filter((t) => !['done', 'cancelled', 'failed', 'blocked', 'held'].includes(t.status));
+  const onHold = tasks.filter((t) => t.status === 'held');
+  if (unfinished.length === 0 && anyInFlightWi === 0 && onHold.length) {
+    // everything left is parked by the owner: finish if the DoD already passes, otherwise wait quietly — a new planning
+    // cycle would re-plan the very work the owner chose to hold
+    const res = await evaluateDodOnIntegration(runId);
+    const req = res.items.filter((i) => !i.optional);
+    if (req.length && req.every((i) => i.status === 'pass')) { void maybeAdvanceRun(runId); return; }
+    notifyOnce(runId, 'run.onhold', null, `All remaining work is on hold (${onHold.length} task${onHold.length === 1 ? '' : 's'}). Move one to Ready to continue, or delete the ones you no longer need.`, { hint: 'Tasks board: drag a held task to Ready.' });
+    return;
+  }
   if (unfinished.length === 0 && anyInFlightWi === 0) {
     if ((r.limits as { oneShot?: boolean }).oneShot) {
       // one-shot: evaluate once, then finish — never begins another cycle.
@@ -2353,7 +2450,7 @@ function evaluateStopRules(r: Run): string | 'pause' | null {
     return 'pause';
   }
   const escalated = q1(`SELECT COUNT(*) c FROM error_reports WHERE run_id = ? AND status = 'escalated'`, r.id)?.c as number;
-  const active = q1(`SELECT COUNT(*) c FROM tasks WHERE run_id = ? AND status NOT IN ('done','cancelled','failed','blocked')`, r.id)?.c as number;
+  const active = q1(`SELECT COUNT(*) c FROM tasks WHERE run_id = ? AND status NOT IN ('done','cancelled','failed','blocked','held')`, r.id)?.c as number;
   if (escalated > 0 && active === 0) return 'pause';
   return null;
 }

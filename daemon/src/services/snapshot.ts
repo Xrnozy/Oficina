@@ -17,6 +17,10 @@ import { createHash } from 'node:crypto';
 //     either applies cleanly to exactly the lines it owns, or nothing changes.
 
 const OWN = ['.office', '.officechain'];
+// Files the office itself keeps inside a repository (its documents/ reference files) — never part of a task's changes.
+let extraOwn: (repo: string) => string[] = () => [];
+export function setOwnPathProvider(fn: (repo: string) => string[]): void { extraOwn = fn; }
+export const ownPaths = (repo: string): string[] => { try { return [...OWN, ...extraOwn(repo)]; } catch { return OWN; } };
 // Byte-exact: no CRLF conversion, so undo never rewrites a file's line endings.
 export const RAW = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false'];
 
@@ -129,7 +133,7 @@ export function snapshotTree(repo: string): string {
     const unaddable = [...res.err.matchAll(/(?:invalid path|unable to add|unable to index file) '([^']+)'/g)].map((m) => m[1]);
     skippedBroken.set(repo, [...new Set(unaddable)]);
     if (!res.ok && !unaddable.length) throw new Error(res.err.trim() || 'git add failed');
-    run(repo, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...OWN], { env });
+    run(repo, ['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...ownPaths(repo).map((p) => `:(literal)${p}`)], { env });
     return run(repo, ['write-tree'], { env }).trim();
   } catch (e) {
     // a damaged private index is just rebuilt next time
@@ -161,7 +165,7 @@ export async function snapshotTreeAsync(repo: string): Promise<string> {
     const unaddable = [...res.err.matchAll(/(?:invalid path|unable to add|unable to index file) '([^']+)'/g)].map((m) => m[1]);
     skippedBroken.set(repo, [...new Set(unaddable)]);
     if (!res.ok && !unaddable.length) throw new Error(res.err.trim() || 'git add failed');
-    await must(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...OWN]);
+    await must(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...ownPaths(repo).map((p) => `:(literal)${p}`)]);
     return (await must(['write-tree'])).trim();
   } catch (e) {
     const p = privateIndex.get(`${repo}\0`);
@@ -194,7 +198,7 @@ export async function liveChanges(repo: string, base: string): Promise<{ tree: s
   fs.writeFileSync(spec, ['.', ...big.map((f) => `:(exclude,literal)${f}`)].join('\0'));
   try { await runAsync(repo, [...cacheExcludes(), 'add', '-A', '--ignore-errors', `--pathspec-from-file=${spec}`, '--pathspec-file-nul'], { env }); }
   finally { fs.rmSync(spec, { force: true }); }
-  await must(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...OWN]);
+  await must(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...ownPaths(repo).map((p) => `:(literal)${p}`)]);
   const tree = (await must(['write-tree'])).trim();
   if (tree === base) return { tree, files: [] };
   const [ns, num] = await Promise.all([must(['diff', '--name-status', '-M', '-z', base, tree]), must(['diff', '--numstat', '-M', '-z', base, tree])]);

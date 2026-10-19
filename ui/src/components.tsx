@@ -42,7 +42,7 @@ export function Dot({ tone, live = false, className = '' }: { tone: Tone; live?:
 export function StatusChip({ value, tone }: { value: string; tone?: Tone }) {
   const t = tone ?? toneOf(value);
   const live = ['running', 'working', 'in-progress', 'verifying', 'fixing'].includes(value);
-  return <span className={`chip ${TONE_CHIP[t]}`}><Dot tone={t} live={live} />{value.replace(/-/g, ' ')}</span>;
+  return <span className={`chip ${TONE_CHIP[t]}`}><Dot tone={t} live={live} />{value === 'held' ? 'on hold' : value.replace(/-/g, ' ')}</span>;
 }
 
 export function Tag({ children, tone = 'idle', mono = false, title }: { children: React.ReactNode; tone?: Tone; mono?: boolean; title?: string }) {

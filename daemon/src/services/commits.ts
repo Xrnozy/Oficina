@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { RAW, applyPatch, changedFilesBetween, checkPatch, patchBetween, snapshotTree, type FileChange } from './snapshot.ts';
+import { RAW, applyPatch, changedFilesBetween, checkPatch, ownPaths, patchBetween, snapshotTree, type FileChange } from './snapshot.ts';
 
 // Task commits on the user's own branch. Only the task's files are committed
 // (`git commit --only -- <paths>`, so hooks, signing and the repo's identity
@@ -23,7 +23,7 @@ export function currentBranch(repo: string): string | null {
 
 /** Paths (excluding the office's own files) that differ from HEAD right now. */
 export function dirtyPaths(repo: string): string[] {
-  const r = tryGit(repo, ['status', '--porcelain', '-z', '--untracked-files=all', '--', '.', ':(exclude).office']);
+  const r = tryGit(repo, ['status', '--porcelain', '-z', '--untracked-files=all', '--', '.', ...ownPaths(repo).map((p) => `:(exclude,literal)${p}`)]);
   if (!r.ok) return [];
   const parts = r.out.split('\0').filter(Boolean);
   const out: string[] = [];

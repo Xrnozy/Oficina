@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { post, put, useQuery } from '../api';
 import { Empty, KV, Meter, Muted, PageHeader, Panel, Segmented, SevChip, Skeleton, StatusChip, Tag, act, fmtAgo, fmtTime, fmtUsd } from '../components';
-import { ChevronRight, FileQuestion, GitBranch, GitMerge, Pencil } from 'lucide-react';
+import { ChevronRight, FileQuestion, GitBranch, GitMerge, Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import { DeleteTaskModal } from './Tasks';
 import { TaskChanges, TaskRecord } from './TaskRecord';
 import { TaskFiles } from '../attachments';
 import { useOffice, useOfficeAgents } from '../office';
@@ -17,6 +18,8 @@ export default function TaskDetail() {
   const [draft, setDraft] = useState<{ title?: string; priority?: number; description?: string }>({});
   const [mode, setMode] = useState<'finish' | 'abort' | 'handoff'>('finish');
   const { office } = useOffice();
+  const nav = useNavigate();
+  const [removing, setRemoving] = useState(false);
   const { agents } = useOfficeAgents();
 
   if (loading) return <Skeleton rows={5} />;
@@ -31,8 +34,13 @@ export default function TaskDetail() {
         {t.status === 'in-review' && (
           <button className="btn btn-accent" onClick={async () => { await act(post(`/tasks/${t.id}/approve`, { reason: 'owner override' }), 'Approved as owner'); reload(); }}>Approve as owner</button>
         )}
+        {t.status === 'held' && <button className="btn" title="Hand it to the agents" onClick={async () => { await act(post(`/tasks/${t.id}/move`, { to: 'ready' }), 'Moved to Ready — the next free agent takes it'); reload(); }}><Play size={13} /> Release</button>}
+        {['backlog', 'ready', 'blocked-quota'].includes(t.status) && <button className="btn" title="Keep it, but no agent works on it" onClick={async () => { await act(post(`/tasks/${t.id}/move`, { to: 'held' }), 'On hold — no agent will pick it up'); reload(); }}><Pause size={13} /> Put on hold</button>}
+        <button className="btn btn-danger" disabled={['assigned', 'in-progress', 'verifying', 'in-review'].includes(t.status)} title={['assigned', 'in-progress', 'verifying', 'in-review'].includes(t.status) ? 'An agent is on it — wait or stop the run first' : 'Delete this task'} onClick={() => setRemoving(true)}><Trash2 size={13} /> Delete</button>
         <button className={`btn ${editMode ? 'btn-primary' : ''}`} onClick={() => { setEditMode((v) => !v); setDraft({}); }}><Pencil size={13} /> {editMode ? 'Close editor' : 'Edit'}</button>
       </PageHeader>
+
+      {removing && <DeleteTaskModal task={t} onClose={() => setRemoving(false)} onDeleted={() => nav('/tasks')} />}
 
       {editMode && (
         <Panel title="Edit task" className="animate-rise border-accent/30">
@@ -63,9 +71,25 @@ export default function TaskDetail() {
             </>)}
           </Panel>
 
+          {(t.meta?.workItems ?? []).length > 0 && (
+            <Panel title="Work items" action={<span className="text-2xs text-fg-4">each is an acceptance criterion the agents check</span>}>
+              <ol className="space-y-3">
+                {t.meta.workItems.map((w: any, i: number) => (
+                  <li key={w.id} className="flex gap-3 min-w-0">
+                    <span className="mono text-fg-4 pt-px shrink-0">{String(i + 1).padStart(2, '0')}</span>
+                    <div className="min-w-0">
+                      <div className="text-sm text-fg break-words [overflow-wrap:anywhere]">{w.title}</div>
+                      {w.instructions && <div className="text-xs text-fg-3 whitespace-pre-wrap break-words [overflow-wrap:anywhere] mt-0.5">{w.instructions}</div>}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </Panel>
+          )}
+
           {office && (
             <Panel title="Files" action={<span className="text-2xs text-fg-4 hidden sm:inline">only agents on this task see them</span>}>
-              <TaskFiles taskId={t.id} workspaceId={office.id} readOnly={['done', 'cancelled'].includes(t.status)} />
+              <TaskFiles taskId={t.id} workspaceId={office.id} workItems={t.meta?.workItems ?? []} readOnly={['done', 'cancelled'].includes(t.status)} />
             </Panel>
           )}
         </div>

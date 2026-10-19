@@ -57,6 +57,7 @@ Every code delivery then goes, automatically: engine checks → tester reviews
 and validates it against the acceptance criteria → you accept it (merge) or
 send it back to the Developer with instructions.
 Use "dependsOn" so hand-offs happen in the right order.
+If REFERENCE FILES are listed in your prompt, set each task's optional "references" to the ones (by file name) the agent doing it should start from — a file filed for another role reaches the task's agent that way. Leave it out when none applies; agents open only what they need.
 Never re-create work that EXISTING_TASKS shows as done (see "delivered"). For a
 failing DoD item, read its "evidence" in DOD_STATUS and plan only what is
 actually missing — if the evidence shows the check itself cannot pass, say so in
@@ -67,7 +68,7 @@ OUTPUT CONTRACT (mandatory): respond with ONE json code block:
 {
   "dodItems": [{"id":"F1","text":"...","kind":"feature|quality|review|docs","checks":["unit:all"]}],
   "tasks": [{"key":"T1","title":"...","description":"...","type":"feature|bugfix|refactor|infra|test|docs","priority":1,"difficulty":2,
-             "dependsOn":[],"acceptanceCriteria":["..."],"affectedPaths":["src/..."],"dodItemIds":["F1"],"budgetUsd":2}]
+             "dependsOn":[],"acceptanceCriteria":["..."],"affectedPaths":["src/..."],"dodItemIds":["F1"],"budgetUsd":2,"references":["design.md"]}]
 }
 \`\`\`
 

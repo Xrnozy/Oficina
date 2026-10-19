@@ -188,7 +188,8 @@ export interface Cycle {
 export type TaskStatus =
   | 'backlog' | 'ready' | 'assigned' | 'in-progress' | 'waiting-input'
   | 'blocked-quota' | 'verifying' | 'in-review' | 'changes-requested'
-  | 'approved' | 'done' | 'failed' | 'cancelled' | 'blocked';
+  | 'approved' | 'done' | 'failed' | 'cancelled' | 'blocked'
+  | 'held';   // parked by the owner: kept on the board, never picked up by an agent
 
 export type TaskType = 'feature' | 'infra' | 'refactor' | 'test' | 'docs' | 'fix' | 'review';
 
@@ -399,6 +400,7 @@ export interface PlanTaskSpec {
   acceptanceCriteria: string[]; deliverables?: string[];
   affectedPaths: string[]; dodItemIds: string[];
   budgetUsd: number; meta?: Record<string, unknown>;
+  references?: string[];     // reference files (by name) the PM points this task's agent at
 }
 
 export interface PlanDiff {

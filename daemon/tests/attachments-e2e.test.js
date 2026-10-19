@@ -94,3 +94,19 @@ test('references reach the planner and the developer; a task added mid-run is pi
   const finished = await waitFor(() => { const s = q1('SELECT status FROM tasks WHERE id = ?', t.id)?.status; return ['done', 'approved', 'failed', 'blocked'].includes(s) ? s : null; }, 120000);
   assert.ok(['done', 'approved'].includes(finished), `the owner task finished (was ${finished})`);
 });
+
+test('a task on hold is never picked up and does not keep the run open, and cannot be released on a finished run', { timeout: 150000 }, async () => {
+  const { moveTask } = await import('../src/engine/engine.ts');
+  const r = createRun({ workspaceId: 'ws-e', goal: 'Add module b', oneShot: true });
+  const planned = await waitFor(() => q1(`SELECT id FROM tasks WHERE run_id = ? AND planned_by != 'owner'`, r.id)?.id);
+  assert.ok(planned);
+  const parked = createUserTask(r.id, { title: 'Parked for later', hold: true });
+  const wanted = createUserTask(r.id, { title: 'Do this one too' });
+  assert.equal(parked.status, 'held');
+  const done = await waitFor(() => { const s = q1('SELECT status FROM runs WHERE id = ?', r.id)?.status; return ['done', 'stopped', 'failed'].includes(s) ? s : null; }, 120000);
+  assert.equal(done, 'done', 'the run finishes while a task is still on hold');
+  assert.equal(q1('SELECT status FROM tasks WHERE id = ?', parked.id).status, 'held');
+  assert.equal(q1(`SELECT COUNT(*) c FROM work_items WHERE task_id = ?`, parked.id).c, 0, 'no agent touched the held task');
+  assert.ok(['done', 'approved'].includes(q1('SELECT status FROM tasks WHERE id = ?', wanted.id).status), 'the task that was not on hold was worked');
+  assert.match(moveTask(parked.id, 'ready').error, /run is done/);
+});
