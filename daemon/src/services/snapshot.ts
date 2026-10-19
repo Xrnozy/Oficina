@@ -24,20 +24,37 @@ export const ownPaths = (repo: string): string[] => { try { return [...OWN, ...e
 // Byte-exact: no CRLF conversion, so undo never rewrites a file's line endings.
 export const RAW = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false'];
 
+// Two snapshots of the same repository share one private index; when they overlap (a sync one while an async one is running,
+// or two merges at once) git refuses with "Unable to create ...lock". That lock is released within milliseconds, so wait for it.
+const LOCKED = /Unable to create '[^']*\.lock'/;
+const LOCK_RETRIES = 40, LOCK_WAIT_MS = 60;
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
 function run(repo: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): string {
-  return execFileSync('git', [...RAW, '-C', repo, ...args], {
-    encoding: 'utf8', input: opts.input, maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env, ...opts.env }, stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return execFileSync('git', [...RAW, '-C', repo, ...args], {
+        encoding: 'utf8', input: opts.input, maxBuffer: 256 * 1024 * 1024,
+        env: { ...process.env, ...opts.env }, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e: any) {
+      if (attempt < LOCK_RETRIES && LOCKED.test(String(e?.stderr ?? e?.message ?? ''))) { sleepSync(LOCK_WAIT_MS); continue; }
+      throw e;
+    }
+  }
 }
 
 // Non-blocking variant for periodic work (the live diff): the sync calls
 // above freeze the daemon's HTTP server while git runs.
-function runAsync(repo: string, args: string[], opts: { env?: Record<string, string> } = {}): Promise<{ ok: boolean; out: string; err: string }> {
-  return new Promise((resolve) => {
-    execFile('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, ...opts.env }, windowsHide: true },
-      (e, out, err) => resolve({ ok: !e, out: String(out ?? ''), err: String(err ?? (e as any)?.message ?? '') }));
-  });
+async function runAsync(repo: string, args: string[], opts: { env?: Record<string, string> } = {}): Promise<{ ok: boolean; out: string; err: string }> {
+  for (let attempt = 0; ; attempt++) {
+    const r = await new Promise<{ ok: boolean; out: string; err: string }>((resolve) => {
+      execFile('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: { ...process.env, ...opts.env }, windowsHide: true },
+        (e, out, err) => resolve({ ok: !e, out: String(out ?? ''), err: String(err ?? (e as any)?.message ?? '') }));
+    });
+    if (r.ok || attempt >= LOCK_RETRIES || !LOCKED.test(r.err)) return r;
+    await new Promise((res) => setTimeout(res, LOCK_WAIT_MS));
+  }
 }
 
 function tryRun(repo: string, args: string[], opts: { env?: Record<string, string>; input?: string } = {}): { ok: boolean; out: string; err: string } {

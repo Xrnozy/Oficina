@@ -201,7 +201,7 @@ function stepTint(s: RoutingStep): string {
   if (s.type === 'end') return 'bg-navy';
   if (s.type === 'condition') return 'bg-cream';
   if (s.type === 'merge') return 'bg-lilac';
-  if (s.type === 'human') return 'bg-pink';
+  if (s.type === 'human' || s.type === 'approval') return 'bg-pink';
   return ROLE_TINT[s.role ?? ''] ?? PURPOSE_TINT[s.purpose ?? ''] ?? 'bg-raised';
 }
 
@@ -213,9 +213,10 @@ function StepCard({ s }: { s: RoutingStep }) {
     : s.type === 'condition' ? 'branches on a check'
     : s.type === 'merge' ? 'waits for its branches'
     : s.type === 'human' ? 'pauses for you'
+    : s.type === 'approval' ? 'an agent launches the app, then you approve or reject'
     : (PURPOSE_LABEL[s.purpose ?? ''] ?? s.purpose ?? 'step');
   const names = s.agents.map((a) => a.name).join(', ');
-  const problem = s.type !== 'agent' ? null
+  const problem = s.type !== 'agent' && s.type !== 'approval' ? null
     : s.agentId ? (s.agents.length ? null : 'agent deleted')
     : s.role ? (s.agents.length ? null : `any ${s.role} — none assigned`)
     : 'no agent or role';
@@ -229,7 +230,7 @@ function StepCard({ s }: { s: RoutingStep }) {
       <div className="flex items-baseline gap-3">
         <div className="min-w-0 flex-1 text-sm">
           <span className="font-medium text-fg">{s.label}</span>
-          <span className="ml-2 text-xs text-fg-3">{what}{s.scope === 'run' && ' · once per run'}{s.disabled && ' · bypassed'}{s.type === 'merge' && ' · merge'}{s.type === 'human' && ' · approval'}</span>
+          <span className="ml-2 text-xs text-fg-3">{what}{s.scope === 'run' && ' · once per run'}{s.disabled && ' · bypassed'}{s.type === 'merge' && ' · merge'}{s.type === 'human' && ' · approval'}{s.type === 'approval' && ' · human approval'}</span>
         </div>
         <div className="shrink-0 text-xs text-fg-2">
           {names}

@@ -11,7 +11,7 @@ import { layoutEdges, type EdgeGeo } from '../wfEdges';
 import {
   ArrowDown, ArrowLeftRight, ArrowUp, Ban, Bell, BookMarked, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2, FlaskConical,
   Cpu, GitBranch, GitMerge, History as HistoryIcon, LayoutDashboard, ListPlus, Lock, Maximize2, PanelLeft, PanelRight,
-  MessageSquare, Plus, Redo2, Save, Scissors, Shield, Trash2, Undo2, Upload, User, Zap,
+  MessageSquare, Plus, Redo2, Save, Scissors, Shield, Trash2, Undo2, Upload, User, UserCheck, X, Zap,
 } from 'lucide-react';
 import { get, post, put, del, useFetch, useQuery, useEvents, OfficeEvent } from '../api';
 import { Dot, Empty, Modal, PageHeader, StatusChip, Tag, act, fmtAgo, roleLabel, toast, useCurrentRun } from '../components';
@@ -73,11 +73,11 @@ const ROLE_SOFT: Record<string, string> = {
   pm: 'bg-lilac/30', 'prompt-creator': 'bg-cream/60', developer: 'bg-lime/30', qa: 'bg-mint/30',
   reviewer: 'bg-pink/40', analyst: 'bg-coral/30', docs: 'bg-cream/60',
 };
-const STEP_SOFT: Record<string, string> = { condition: 'bg-cream/60', merge: 'bg-lilac/30', human: 'bg-pink/40', end: 'bg-navy/10' };
+const STEP_SOFT: Record<string, string> = { condition: 'bg-cream/60', merge: 'bg-lilac/30', human: 'bg-pink/40', approval: 'bg-pink/40', end: 'bg-navy/10' };
 
 const TYPE_ICON: Record<WfNodeType, React.ReactNode> = {
   start: <CirclePlay size={14} />, end: <Check size={14} />, agent: <User size={14} />,
-  condition: <GitBranch size={14} />, merge: <GitMerge size={14} />, human: <Bell size={14} />,
+  condition: <GitBranch size={14} />, merge: <GitMerge size={14} />, human: <Bell size={14} />, approval: <UserCheck size={14} />,
 };
 
 // Plain-language one-liner under each step's name.
@@ -86,6 +86,7 @@ const TYPE_HINT: Partial<Record<WfNodeType, string>> = {
   end: 'The work is accepted',
   condition: 'Chooses a path',
   human: 'Waits for you',
+  approval: 'An agent launches the app; you approve or reject',
 };
 
 const SIDES: { id: string; pos: Position }[] = [
@@ -97,7 +98,7 @@ const HANDLE_CLS = 'wf-handle !w-3 !h-3 !bg-canvas !border-2 !border-fg-3 hover:
 // "Provider · model" for each agent a step can run on, from the agent's account and model.
 type ProvData = { providers?: { id: string; name: string }[]; accounts?: { id: string; provider_id: string; label?: string }[]; models?: { id: string; name: string; label?: string }[] };
 function providerInfo(wf: WfNode, agents: AgentRow[], wsId: string, pd: ProvData | null): { prov: string[]; provTitle: string } | null {
-  if (wf.type !== 'agent') return null;
+  if (wf.type !== 'agent' && wf.type !== 'approval') return null;
   const who = wf.agentId ? agents.filter((a) => a.id === wf.agentId)
     : wf.role ? agents.filter((a) => (a.memberships ?? []).some((m) => m.role === wf.role && m.active && m.workspace_id === wsId)) : [];
   if (!who.length) return { prov: [], provTitle: wf.role ? `No agent holds the "${wf.role}" role` : 'No agent chosen' };
@@ -120,9 +121,10 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
   const live = data.live;
   const err = (data.issues ?? 0) > 0;
   const isAgent = n.type === 'agent';
+  const isApproval = n.type === 'approval';
   const pill = n.type === 'start' || n.type === 'end';
   const [skillOver, setSkillOver] = useState(false);
-  const tint = isAgent ? ROLE_TINT[n.role ?? ''] ?? 'bg-raised' : n.type === 'condition' ? 'bg-cream' : n.type === 'merge' ? 'bg-lilac' : n.type === 'human' ? 'bg-pink' : n.type === 'start' ? 'bg-mint' : 'bg-navy text-white';
+  const tint = isAgent ? ROLE_TINT[n.role ?? ''] ?? 'bg-raised' : n.type === 'condition' ? 'bg-cream' : n.type === 'merge' ? 'bg-lilac' : n.type === 'human' || isApproval ? 'bg-pink' : n.type === 'start' ? 'bg-mint' : 'bg-navy text-white';
   const ring = selected ? 'border-fg ring-2 ring-fg/20' : err ? 'border-bad' : 'border-line-strong';
   const liveCls = live?.status === 'running' ? 'ring-2 ring-info/40 border-info' : live?.status === 'failed' ? 'border-bad' : live?.status === 'done' ? 'border-ok' : '';
   const tone = live?.status === 'failed' ? 'bad' : live?.status === 'running' ? 'info' : 'ok';
@@ -149,14 +151,14 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
           <span className="grid place-items-center w-5 h-5 rounded-full bg-fg text-canvas text-[10px] font-semibold tabular-nums shrink-0" title={`Step ${data.step} in the flow`}>{data.step}</span>
         )}
         {TYPE_ICON[n.type]}
-        <span className="text-[11px] font-medium truncate">{pill ? n.label : isAgent ? (n.role ? roleLabel(n.role) : 'Agent') : NODE_TYPE_LABEL[n.type]}</span>
+        <span className="text-[11px] font-medium truncate">{pill ? n.label : isAgent ? (n.role ? roleLabel(n.role) : 'Agent') : isApproval ? 'Human approval' : NODE_TYPE_LABEL[n.type]}</span>
         {live && <span className={`ml-auto flex items-center gap-1 text-2xs ${live.status === 'failed' ? 'text-bad' : live.status === 'running' ? 'text-info' : 'text-ok'}`}><Dot tone={tone} live={live.status === 'running'} />{live.status}</span>}
         {err && !live && <Dot tone="bad" className="ml-auto" />}
       </div>
       {!pill && (
         <div className="px-3 py-2.5">
           <div className="text-[13px] font-semibold leading-4 text-fg break-words line-clamp-2">{n.label || n.id}</div>
-          {isAgent && data.prov && (
+          {(isAgent || isApproval) && data.prov && (
             <div className="mt-1 flex items-center gap-1 text-2xs text-fg-3 min-w-0" title={data.provTitle}>
               <Cpu size={10} className="shrink-0" />
               {data.prov.length ? <span className="truncate">{data.prov[0]}</span> : <span className="text-warn">no agent</span>}
@@ -169,6 +171,14 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
               {n.config?.writable === false && <Tag title="Read-only: this step never edits files">read-only</Tag>}
               {n.config?.disabled && <Tag title="Bypassed: the engine passes straight through this step">bypassed</Tag>}
               {(n.config?.skills?.length ?? 0) > 0 && <Tag title={`${n.config!.skills!.length} skill(s) attached to this step`}><BookMarked size={9} />{n.config!.skills!.length}</Tag>}
+            </div>
+          ) : isApproval ? (
+            <div className="mt-1.5 space-y-1.5">
+              <div className="text-2xs text-fg-3">{n.role ? `${roleLabel(n.role)} launches the app and reports` : 'No agent connected'}</div>
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="chip !h-5 border-ok/40 bg-ok/10 text-ok"><Check size={10} /> Approved</span>
+                <span className="chip !h-5 border-bad/40 bg-bad/10 text-bad"><X size={10} /> Rejected</span>
+              </div>
             </div>
           ) : (
             <div className="mt-0.5 text-2xs text-fg-3">
@@ -265,7 +275,8 @@ function Palette({ agents, roles, wsId, skills }: { agents: AgentRow[]; roles: R
   const GENERIC: { type: WfNodeType; label: string; icon: React.ReactNode; hint: string }[] = [
     { type: 'condition', label: 'Condition', icon: <GitBranch size={13} />, hint: 'branch on step outcome' },
     { type: 'merge', label: 'Merge', icon: <GitMerge size={13} />, hint: 'join parallel branches' },
-    { type: 'human', label: 'Human approval', icon: <Bell size={13} />, hint: 'pause for the owner' },
+    { type: 'approval', label: 'Human approval', icon: <UserCheck size={13} />, hint: 'agent launches the app · you approve or reject' },
+    { type: 'human', label: 'Owner gate', icon: <Bell size={13} />, hint: 'a plain pause for the owner' },
     { type: 'end', label: 'End', icon: <Check size={13} />, hint: 'task completes here' },
   ];
   if (!open) return <button className="btn btn-ghost btn-sm w-full" onClick={() => setOpen(true)}><ListPlus size={13} /> Show palette</button>;
@@ -673,6 +684,60 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
           </Select>
         </Field>
       )}
+      {n.type === 'approval' && (() => {
+        const ap = cfg.approval ?? {};
+        const setAp = (patch: Partial<NonNullable<typeof cfg.approval>>) => setCfg({ approval: { ...ap, ...patch } });
+        return (
+          <>
+            <div className="rounded-lg border border-line bg-raised/50 p-2.5 text-2xs text-fg-3 leading-4 mb-3">
+              The connected agent gets the app running, picks the screens worth testing from your request and the changes, and writes a report. You then
+              <b className="text-ok"> approve</b> (follows the approve edge) or <b className="text-bad">reject with feedback</b> (follows the reject edge — connect it to the agent that should investigate and fix). Every decision is recorded.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Connected agent's role">
+                <Select className="inp" value={n.role ?? ''} onChange={(e) => set({ role: e.target.value || undefined, agentId: undefined })}>
+                  <option value="">— pick —</option>
+                  {roles.filter((r) => !['pm', 'prompt-creator'].includes(r.name)).map((r) => <option key={r.id} value={r.name}>{roleLabel(r.name)}</option>)}
+                </Select>
+              </Field>
+              <Field label="Pinned agent">
+                <Select className="inp" value={n.agentId ?? ''} onChange={(e) => set({ agentId: e.target.value || undefined })}>
+                  <option value="">any in role</option>
+                  {wsAgents.filter((a) => !n.role || (a.memberships ?? []).some((m) => m.role === n.role && m.workspace_id === wsId)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </Select>
+              </Field>
+            </div>
+            {!n.role && !n.agentId && <div className="text-2xs text-bad mb-3 -mt-1">Connect an agent: it prepares the app and writes the report you review.</div>}
+            <div className="field-label mt-1">The app</div>
+            <Field label="Start command">
+              <input className="inp font-mono text-xs" value={ap.command ?? ''} placeholder="empty = npm run dev / npm start from package.json" onChange={(e) => setAp({ command: e.target.value || undefined })} />
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Folder"><input className="inp font-mono text-xs" value={ap.cwd ?? ''} placeholder="repository root" onChange={(e) => setAp({ cwd: e.target.value || undefined })} /></Field>
+              <Field label="Wait up to (s)"><input className="inp" type="number" min={3} max={300} value={ap.readyTimeoutSec ?? ''} placeholder="45" onChange={(e) => setAp({ readyTimeoutSec: e.target.value ? Number(e.target.value) : undefined })} /></Field>
+            </div>
+            <Field label="Address">
+              <input className="inp font-mono text-xs" value={ap.url ?? ''} placeholder="empty = read it from the app's output" onChange={(e) => setAp({ url: e.target.value || undefined })} />
+            </Field>
+            <Field label="Always offer these screens (one path per line)">
+              <textarea className="inp min-h-[52px] font-mono text-xs" value={(ap.routes ?? []).join('\n')} placeholder={'/\n/login'}
+                onChange={(e) => setAp({ routes: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} />
+            </Field>
+            <label className="flex items-start gap-2 text-xs cursor-pointer mb-3">
+              <input type="checkbox" className="mt-0.5" checked={ap.openBrowser !== false} onChange={(e) => setAp({ openBrowser: e.target.checked ? undefined : false })} />
+              <span>Open the first screen in my browser when the report is ready</span>
+            </label>
+            <Field label="Extra guidance for the report (optional)">
+              <textarea className="inp min-h-[52px] text-xs" value={cfg.instructions ?? ''} placeholder="e.g. also check the mobile layout" onChange={(e) => setCfg({ instructions: e.target.value || undefined })} />
+            </Field>
+            <Field label="Model tier">
+              <Select className="inp" value={cfg.modelTier ?? ''} onChange={(e) => setCfg({ modelTier: (e.target.value || undefined) as 'fast' | 'standard' | 'strong' | undefined })}>
+                <option value="">auto</option><option value="fast">fast</option><option value="standard">standard</option><option value="strong">strong</option>
+              </Select>
+            </Field>
+          </>
+        );
+      })()}
       {n.type === 'human' && (
         <Field label="What the owner is asked">
           <textarea className="inp min-h-[64px] text-xs" value={cfg.instructions ?? ''} placeholder="Approve to continue" onChange={(e) => setCfg({ instructions: e.target.value || undefined })} />
@@ -1132,6 +1197,12 @@ function WorkflowEditor() {
     mutate((g) => {
       const src = g.nodes.find((n) => n.id === c.source);
       const e: WfEdge = { id: uid('e'), from: c.source!, to: c.target!, kind: 'next' };
+      if (src?.type === 'approval') {
+        // an approval node has exactly two outcomes: the first line out is the approve path, the second the reject path
+        const outs = g.edges.filter((x) => x.from === src.id && x.kind !== 'message');
+        if (!outs.some((x) => x.kind === 'on-success' || x.kind === 'next')) { e.kind = 'on-success'; e.label = 'approved'; }
+        else if (!outs.some((x) => x.kind === 'on-reject')) { e.kind = 'on-reject'; e.label = 'rejected'; e.maxLoops = 3; }
+      }
       if (src?.type === 'condition') {
         const hasElse = g.edges.some((x) => x.from === src.id && x.else);
         if (!hasElse) e.else = true;
@@ -1152,8 +1223,8 @@ function WorkflowEditor() {
     mutate((g) => {
       const node: WfNode = {
         id: uid('n'), type: p.type, label: p.label,
-        agentId: p.agentId, role: p.role,
-        config: p.type === 'agent' ? { purpose: 'custom' } : p.type === 'merge' ? { mergeMode: 'all' } : undefined,
+        agentId: p.agentId, role: p.type === 'approval' ? (p.role ?? 'qa') : p.role,
+        config: p.type === 'agent' ? { purpose: 'custom' } : p.type === 'merge' ? { mergeMode: 'all' } : p.type === 'approval' ? { approval: { openBrowser: true } } : undefined,
         position: pos,
       };
       const near = nearestEdge(g, { x: pos.x + 100, y: pos.y + 40 }, 80);

@@ -212,6 +212,27 @@ async function scriptedResult(ctx: AdapterCtx, script: Record<string, any>, kind
       };
     }
 
+    // Human approval node: the report an agent writes for the owner. script.approval can set the routes, issues and the
+    // claimed status; it also echoes what it was given so tests can see the engine's facts and the owner's earlier feedback.
+    case 'custom': {
+      if (!ctx.prompt.includes('HUMAN APPROVAL review')) return { summary: 'scripted custom noop', usage: { costUsd: 0, costSource: 'estimate' } };
+      const a = script.approval ?? {};
+      const earlier = block(ctx.prompt, 'NODE_INSTRUCTIONS').match(/EARLIER REJECTIONS BY THE OWNER[^\n]*\n([\s\S]*?)(?:\n\n|$)/)?.[1] ?? '';
+      return {
+        summary: 'Report prepared (scripted)',
+        raw: {
+          summary: a.summary ?? `The change for "${ctx.task?.title ?? 'the task'}" is in place and the app is running.${earlier ? ` Re-review after: ${earlier.split('\n')[0]}` : ''}`,
+          changes: a.changes ?? ['Implemented the requested change'],
+          testing: a.testing ?? [{ what: 'Read the app log and the engine facts', result: 'pass', notes: 'no errors' }],
+          issues: a.issues ?? [],
+          appStatus: a.appStatus ?? 'ready',
+          routes: a.routes ?? [{ label: 'Home', path: '/', why: 'the change is visible on the home page' }],
+          howToTest: a.howToTest ?? ['Open the page and try the change'],
+        },
+        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, costSource: 'estimate' },
+      };
+    }
+
     default:
       return { summary: `scripted ${kind} noop`, usage: { costUsd: 0, costSource: 'estimate' } };
   }

@@ -7,7 +7,10 @@ import { emit } from '../bus.ts';
 import { now, parseJson, ulid } from '../util.ts';
 import type { WorkItemKind } from '../types.ts';
 
-export type NodeType = 'start' | 'agent' | 'condition' | 'merge' | 'human' | 'end';
+// 'human' is the plain owner gate; 'approval' is Human approval: an agent prepares the app for the owner to test (launches it,
+// opens the right screens, reads the logs, writes a report) and the owner then approves or rejects with feedback —
+// approve follows the next/on-success edges, reject follows on-reject.
+export type NodeType = 'start' | 'agent' | 'condition' | 'merge' | 'human' | 'approval' | 'end';
 export type EdgeKind = 'next' | 'on-success' | 'on-failure' | 'on-reject' | 'message';
 
 // Deterministic condition (engine-evaluated, never a model): field/operator/
@@ -19,7 +22,17 @@ export interface WfCondition {
   and?: WfCondition[]; or?: WfCondition[]; not?: WfCondition;
 }
 
+export interface ApprovalConfig {
+  command?: string;           // how to start the app (empty = detect "dev"/"start" from package.json)
+  cwd?: string;               // folder to start it in, relative to the repository
+  url?: string;               // where it listens (empty = read from the app's output)
+  readyTimeoutSec?: number;   // how long to wait for it to answer
+  openBrowser?: boolean;      // open the first screen in the default browser (default true)
+  routes?: string[];          // screens (paths like /login) the owner always wants offered, besides the agent's picks
+}
+
 export interface NodeConfig {
+  approval?: ApprovalConfig;         // Human approval nodes only
   purpose?: WorkItemKind | 'custom'; // the work-item kind this agent node dispatches
   scope?: 'task' | 'run';            // run-scope nodes (e.g. plan) execute once per run
   instructions?: string;
@@ -123,7 +136,11 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     if (!n.id || ids.has(n.id)) err(`duplicate or missing node id "${n.id}"`, n.id);
     ids.add(n.id);
     if (n.type === 'agent' && !n.agentId && !n.role) err('agent node needs an agentId or a role', n.id);
-    if (n.type !== 'agent' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
+    if (n.type === 'approval' && !n.agentId && !n.role) err('a Human approval node needs an agent connected to it (pick an agent or a role): it prepares the app and writes the report you review', n.id);
+    if (n.type !== 'agent' && n.type !== 'approval' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
+    if (n.type === 'approval' && (n.role === 'pm' || n.role === 'prompt-creator')) err('the PM and the Prompt Creator orchestrate only — connect a QA, analyst, reviewer or developer agent to run and inspect the app', n.id);
+    if (n.type === 'approval' && n.config?.approval?.url && !/^https?:\/\//i.test(n.config.approval.url)) err('the app URL must start with http:// or https://', n.id);
+    if (n.type === 'approval' && n.config?.approval?.readyTimeoutSec != null && !(n.config.approval.readyTimeoutSec >= 3 && n.config.approval.readyTimeoutSec <= 300)) err('the app start timeout must be between 3 and 300 seconds', n.id);
     if (n.config?.disabled && n.type === 'agent') warn(`node "${n.label}" is bypassed — the engine will pass through it without dispatching`, n.id);
     if (n.config?.disabled && n.type !== 'agent') warn(`"disabled" only bypasses agent nodes — "${n.label}" still runs`, n.id);
   }
@@ -158,6 +175,11 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
   for (const n of graph.nodes) {
     if (n.type === 'start' && !flowOutOf(n.id).length) err('start has no outgoing edge', n.id);
     if (n.type === 'end' && flowOutOf(n.id).length) err('end node must not have outgoing edges', n.id);
+    if (n.type === 'approval') {
+      const outs = flowOutOf(n.id);
+      if (!outs.some((e) => e.kind === 'next' || e.kind === 'on-success')) err('a Human approval node needs an approve path: an outgoing next / on-success edge', n.id);
+      if (!outs.some((e) => e.kind === 'on-reject')) warn('rejecting has nowhere to go — add an on-reject edge to the agent that should investigate and fix, or a rejection will stop the task', n.id);
+    }
     if (n.type === 'merge' && graph.edges.filter((e) => e.to === n.id && e.kind !== 'message').length < 2)
       warn('merge node has fewer than two incoming branches', n.id);
     if (n.type === 'condition') {
@@ -452,8 +474,21 @@ export function workflowTemplates(): { id: string; name: string; description: st
       edge('e8', 'join', 'accept', 'next'), edge('e9', 'accept', 'dev', 'on-reject', { maxLoops: 2 }), edge('e10', 'accept', 'end', 'on-success')],
     guardrails: {},
   };
+  // the default pipeline with the owner's hands-on test before the PM accepts: an agent launches the app and prepares a report,
+  // the owner approves or rejects; a rejection goes to the analyst (with the owner's feedback and the app's logs), then the
+  // developer fixes it and it comes back through QA and review to the owner again.
+  const approvalGraph = defaultWorkflowGraph();
+  approvalGraph.nodes = approvalGraph.nodes.map((n) => (n.id === 'pm-accept' ? { ...n, position: { x: 1600, y: 120 } } : n.id === 'end' ? { ...n, position: { x: 1780, y: 120 } } : n));
+  approvalGraph.nodes.push({ id: 'human-approval', type: 'approval', label: 'Human approval', role: 'qa', config: { approval: { openBrowser: true } }, position: { x: 1420, y: 120 } });
+  approvalGraph.edges = approvalGraph.edges.filter((e) => e.id !== 'e-rev-accept');
+  approvalGraph.edges.push(
+    edge('e-rev-approval', 'reviewer', 'human-approval', 'next'),
+    edge('e-approval-accept', 'human-approval', 'pm-accept', 'on-success', { label: 'approved' }),
+    edge('e-approval-reject', 'human-approval', 'analyst', 'on-reject', { label: 'rejected — investigate', maxLoops: 3 }),
+  );
   return [
     { id: 'default', name: 'Default pipeline', description: 'The full office flow: plan, prompt draft + review, implement, verify, review, accept.', graph: defaultWorkflowGraph() },
+    { id: 'human-approval', name: 'With human approval', description: 'The default pipeline plus a test-it-yourself step: an agent launches the app on the right screen and reports; you approve or reject with feedback, and a rejection is investigated and fixed.', graph: approvalGraph },
     { id: 'fast', name: 'Fast path', description: 'Developer then reviewer — no plan or QA stage. For small, clear tasks.', graph: fast },
     { id: 'strict', name: 'Strict', description: 'Implement, QA, a security reviewer, a code reviewer, then accept. For risky changes.', graph: strict },
     { id: 'docs', name: 'Docs only', description: 'Docs writer then PM accept. For documentation tasks.', graph: docs },
@@ -480,10 +515,10 @@ export function estimateWorkflowCalls(graph: WfGraph): { minCalls: number; maxCa
       for (const e of g.edges) if (e.from === id && e.kind !== 'message') stack.push(e.to);
     }
   }
-  const agentNodes = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && !n.config?.disabled && (n.config?.scope ?? 'task') === 'task');
+  const agentNodes = g.nodes.filter((n) => (n.type === 'agent' || n.type === 'approval') && reachable.has(n.id) && !n.config?.disabled && (n.config?.scope ?? 'task') === 'task');
   const taskScoped = agentNodes.length;
   const runScoped = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && !n.config?.disabled && n.config?.scope === 'run').length;
-  const humans = g.nodes.filter((n) => n.type === 'human' && reachable.has(n.id)).length;
+  const humans = g.nodes.filter((n) => (n.type === 'human' || n.type === 'approval') && reachable.has(n.id)).length;
   // each loop edge's cycle body can re-run up to its bound. The body is the
   // nodes reachable from e.to that can also reach e.from — both endpoints
   // included, since each pass re-enters e.to and re-arrives at e.from.
@@ -504,7 +539,7 @@ export function estimateWorkflowCalls(graph: WfGraph): { minCalls: number; maxCa
       rev.add(id);
       for (const x of g.edges) if (x.to === id && x.kind !== 'message') back.push(x.from);
     }
-    loopExtra += cap * [...fwd].filter((id) => rev.has(id) && reachable.has(id) && g.nodes.find((x) => x.id === id)?.type === 'agent' && !g.nodes.find((x) => x.id === id)?.config?.disabled).length;
+    loopExtra += cap * [...fwd].filter((id) => rev.has(id) && reachable.has(id) && ['agent', 'approval'].includes(g.nodes.find((x) => x.id === id)?.type ?? '') && !g.nodes.find((x) => x.id === id)?.config?.disabled).length;
   }
   // node skill text the prompts may carry (approved version sizes)
   let skillChars = 0;
@@ -606,7 +641,7 @@ export function flattenAgentSteps(rows: RoutingRow[]): RoutingStep[] {
   const out: RoutingStep[] = [];
   const walk = (rs: RoutingRow[]) => {
     for (const r of rs) {
-      if (r.kind === 'step' && r.step.type === 'agent') out.push(r.step);
+      if (r.kind === 'step' && (r.step.type === 'agent' || r.step.type === 'approval')) out.push(r.step);
       if (r.kind === 'branches') for (const l of r.lanes) walk(l.rows);
     }
   };
@@ -735,7 +770,7 @@ export function routingView(wsId: string, forWorkflowId?: string | null, graphOv
   const decorate = (n: WfNode): Pick<RoutingStep, 'agents' | 'warnings'> => {
     const warnings: string[] = [];
     let agents: RoutingStep['agents'] = [];
-    if (n.type !== 'agent') return { agents, warnings };
+    if (n.type !== 'agent' && n.type !== 'approval') return { agents, warnings };
     if (n.agentId) {
       const a = q1('SELECT id, name, avatar, status FROM agents WHERE id = ?', n.agentId);
       if (!a) warnings.push('the pinned agent was deleted');
@@ -761,10 +796,10 @@ export function routingView(wsId: string, forWorkflowId?: string | null, graphOv
   const agentNodes = flattenAgentSteps(live.rows);
   // nodes nothing can reach stay visible — the warning names the problem
   for (const n of graph.nodes) {
-    if (n.type === 'agent' && !live.rendered.has(n.id)) {
+    if ((n.type === 'agent' || n.type === 'approval') && !live.rendered.has(n.id)) {
       const s = decorate(n);
       agentNodes.push({
-        nodeId: n.id, type: 'agent', label: n.label, purpose: n.config?.purpose ?? null, scope: n.config?.scope ?? 'task',
+        nodeId: n.id, type: n.type, label: n.label, purpose: n.config?.purpose ?? null, scope: n.config?.scope ?? 'task',
         role: n.role ?? null, agentId: n.agentId ?? null, agents: s.agents,
         modelTier: n.config?.modelTier ?? null, budgetChars: n.config?.budgetChars ?? null, disabled: !!n.config?.disabled,
         warnings: [...s.warnings, 'not reachable from start'], loops: [], exits: [], messages: [],

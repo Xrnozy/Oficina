@@ -83,9 +83,9 @@ const bookends = { start: { id: 'start', type: 'start', label: 'S', position: { 
 
 // ---------- templates ----------
 
-test('all six templates validate cleanly against the seeded roles', () => {
+test('all templates validate cleanly against the seeded roles', () => {
   const tpls = workflowTemplates();
-  assert.deepEqual(tpls.map((t) => t.id), ['default', 'fast', 'strict', 'docs', 'bugfix', 'parallel']);
+  assert.deepEqual(tpls.map((t) => t.id), ['default', 'human-approval', 'fast', 'strict', 'docs', 'bugfix', 'parallel']);
   for (const t of tpls) {
     const issues = validateWorkflow(t.graph, 'ws-s');
     const errs = issues.filter((i) => i.level === 'error').map((i) => i.message);

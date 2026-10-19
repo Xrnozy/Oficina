@@ -6,6 +6,7 @@ import { ChevronRight, FileQuestion, GitBranch, GitMerge, Pause, Pencil, Play, T
 import { DeleteTaskModal } from './Tasks';
 import { TaskChanges, TaskRecord } from './TaskRecord';
 import { TaskFiles } from '../attachments';
+import { HumanDecisions } from '../humanReview';
 import { useOffice, useOfficeAgents } from '../office';
 
 const PROMPT_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'info'> = { drafting: 'info', revising: 'warn', 'pm-review': 'warn', approved: 'ok', escalated: 'bad' };
@@ -84,6 +85,12 @@ export default function TaskDetail() {
                   </li>
                 ))}
               </ol>
+            </Panel>
+          )}
+
+          {(t.meta?.humanDecisions ?? []).length > 0 && (
+            <Panel title="Human review" action={<span className="text-2xs text-fg-4">your decisions on this task</span>}>
+              <HumanDecisions decisions={t.meta.humanDecisions} />
             </Panel>
           )}
 

@@ -325,6 +325,7 @@ export function renderPrompt(opts: {
     case 'prompt-review': stable.push(PROMPT_REVIEW_CONTRACT); break;
     case 'diagnose': stable.push(DIAGNOSE_CONTRACT); break;
   }
+  if (extra.contract) stable.push(String(extra.contract));     // a node's own output contract (Human approval)
   if (!FILE_KINDS.includes(kind) && kind !== 'qa' && (opts.adapterId === 'cli' || opts.adapterId === 'devin')) stable.push(READ_ONLY);
   if (kind !== 'prompt-review' && kind !== 'prompt') stable.push(COLLAB);
   if (kind === 'plan') {

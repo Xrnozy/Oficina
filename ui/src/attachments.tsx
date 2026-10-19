@@ -439,34 +439,34 @@ export function UploadDock({ workspaceId, runId, mode, onClose, onDone }: { work
         </div>
         <button className="btn btn-ghost btn-icon btn-sm" aria-label="Close upload panel" onClick={onClose}><X size={14} /></button>
       </div>
-      <div className="p-4 grid gap-3 md:grid-cols-[minmax(0,15rem)_minmax(0,1fr)]">
-        <label className="block min-w-0">
-          <span className="field-label">{mode === 'task' ? 'Task' : 'Who should get it'}</span>
-          {mode === 'task'
-            ? (tasks.length ? <Select className="input input-sm w-full" value={taskId} onChange={(e) => setTaskId(e.target.value)}>{tasks.map((t: any) => <option key={t.id} value={t.id}>{t.title}</option>)}</Select> : <Muted>No open tasks yet.</Muted>)
-            : <AudiencePicker value={audience} onChange={setAudience} runId={runId} />}
-          <span className="block text-2xs text-fg-4 mt-1.5 leading-relaxed">
-            {mode === 'task' ? 'Only agents working that task see them.' : audience === 'all' ? 'Filed in documents/all-agents/. Every agent is told it exists.' : audience === 'run' ? 'Filed under documents/runs/. Used by this run only.' : audience.startsWith('role:') ? `Filed in documents/${ROLE_DIR[audience.slice(5)] ?? audience.slice(5)}/. Agents acting in that role are told it exists.` : 'Only that agent is told it exists.'}
-          </span>
-        </label>
-        <div className="min-w-0">
-          {tab === 'files' ? (
-            <>
-              <DropZone onFiles={add} busy={busy} label="Drop files here, browse, or paste a screenshot (Ctrl+V)" />
-              {added.length > 0 && (
-                <ul className="mt-2 space-y-0.5">
-                  {added.map((a) => <li key={a.id} className="flex items-center gap-2 text-xs text-fg-2 min-w-0"><span className="text-ok">✓</span><span className="truncate">{a.name}</span>{a.location && <span className="mono text-fg-4 truncate">→ {a.location}</span>}</li>)}
-                </ul>
-              )}
-            </>
-          ) : (
-            <div className="space-y-2">
-              <input className="input input-sm w-full" placeholder="Name, e.g. coding-standards" aria-label="Note name" value={note.title} onChange={(e) => setNote({ ...note, title: e.target.value })} />
-              <textarea className="input w-full min-h-[6rem] font-mono text-xs" placeholder="Write or paste Markdown…" aria-label="Note text" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} />
-              <div className="flex justify-end"><button className="btn btn-primary btn-sm" disabled={!note.text.trim() || busy} onClick={async () => { await add([noteFile(note.title, note.text)]); setNote({ title: '', text: '' }); }}>Add note</button></div>
-            </div>
-          )}
+      <div className="p-4 space-y-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="field-label !mb-0 shrink-0">{mode === 'task' ? 'Task' : 'Who should get it'}</span>
+          <div className="flex-1 min-w-0">
+            {mode === 'task'
+              ? (tasks.length ? <Select className="input input-sm w-full" value={taskId} onChange={(e) => setTaskId(e.target.value)} aria-label="Task">{tasks.map((t: any) => <option key={t.id} value={t.id}>{t.title}</option>)}</Select> : <Muted>No open tasks yet.</Muted>)
+              : <AudiencePicker value={audience} onChange={setAudience} runId={runId} />}
+          </div>
         </div>
+        <p className="text-2xs text-fg-4 leading-relaxed -mt-1">
+          {mode === 'task' ? 'Only agents working that task see them.' : audience === 'all' ? 'Filed in documents/all-agents/ of the repository. Every agent is told it exists.' : audience === 'run' ? 'Filed under documents/runs/. Used by this run only.' : audience.startsWith('role:') ? `Filed in documents/${ROLE_DIR[audience.slice(5)] ?? audience.slice(5)}/. Agents acting in that role are told it exists.` : 'Only that agent is told it exists.'}
+        </p>
+        {tab === 'files' ? (
+          <>
+            <DropZone compact onFiles={add} busy={busy} label="Drop files here, browse, or paste a screenshot (Ctrl+V)" />
+            {added.length > 0 && (
+              <ul className="space-y-0.5">
+                {added.map((a) => <li key={a.id} className="flex items-center gap-2 text-xs text-fg-2 min-w-0"><span className="text-ok">✓</span><span className="truncate">{a.name}</span>{a.location && <span className="mono text-fg-4 truncate">→ {a.location}</span>}</li>)}
+              </ul>
+            )}
+          </>
+        ) : (
+          <div className="space-y-2">
+            <input className="input input-sm w-full" placeholder="Name, e.g. coding-standards" aria-label="Note name" value={note.title} onChange={(e) => setNote({ ...note, title: e.target.value })} />
+            <textarea className="input w-full min-h-[6rem] font-mono text-xs" placeholder="Write or paste Markdown…" aria-label="Note text" value={note.text} onChange={(e) => setNote({ ...note, text: e.target.value })} />
+            <div className="flex justify-end"><button className="btn btn-primary btn-sm" disabled={!note.text.trim() || busy} onClick={async () => { await add([noteFile(note.title, note.text)]); setNote({ title: '', text: '' }); }}>Add note</button></div>
+          </div>
+        )}
       </div>
     </section>
   );

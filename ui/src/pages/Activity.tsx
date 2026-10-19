@@ -9,7 +9,7 @@ import { RunWorkflow } from '../workflowPicker';
 import { AddMenu, UploadDock } from '../attachments';
 import {
   AlertTriangle, ArrowDown, CheckCircle2, ChevronDown, ChevronRight, CircleDot, FileEdit, FileSearch, FileText, Globe,
-  ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Users, Wrench, XCircle,
+  ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Trash2, UserCheck, Users, Wrench, XCircle,
 } from 'lucide-react';
 
 // Live activity: what each agent is actually doing, from what its CLI or API
@@ -21,7 +21,7 @@ import {
 const READABLE = new Set(['agent.activity', 'workitem.started', 'workitem.delivered', 'workitem.failed', 'agent.msg', 'checkrun.completed',
   'task.status', 'review.decided', 'qa.decided', 'accept.decided', 'error.reported', 'error.resolved', 'merge.completed', 'prompt.drafted',
   'prompt.reviewed', 'model.switched', 'skill.applied', 'readonly.violation', 'commit.created', 'agent.stuck', 'checkpoint.error', 'prompt.retry', 'run.blocked', 'plan.started', 'plan.validated',
-  'cache.hit', 'scope.violation', 'dod.flagged', 'lessons.injected']);
+  'cache.hit', 'scope.violation', 'dod.flagged', 'lessons.injected', 'human.prepared', 'human.decided', 'approval.app', 'task.deleted']);
 const TECHNICAL = new Set(['agent.output', 'agent.heartbeat', 'agent.thinking', 'agent.status', 'model.routed', 'checkpoint.created', 'checkpoint.completed', 'quota.blocked', 'adapter.failed', 'engine.reconciled']);
 const ALL = new Set([...READABLE, ...TECHNICAL, 'agent.diff']);
 const ACTIVE_RUN = ['draft', 'dod-review', 'running', 'pausing', 'paused', 'verifying'];
@@ -381,6 +381,10 @@ function ActivityRow({ e, wide }: { e: OfficeEvent; wide: boolean }) {
     case 'scope.violation': return line(AlertTriangle, 'text-warn', <>Scope check: {(p.files ?? []).slice(0, 5).join(', ')} outside the declared paths — asked the PM</>);
     case 'dod.flagged': return line(AlertTriangle, 'text-warn', <>{(p.items ?? []).length} DoD item(s) have no runnable check — judged at review</>);
     case 'lessons.injected': return line(Sparkles, 'text-info', <>Lessons from this repo: {p.count} injected into the prompt</>);
+    case 'human.prepared': return line(UserCheck, 'text-warn', <>Report ready for your review — app {String(p.appStatus)}{Number(p.issues) ? `, ${p.issues} issue(s)` : ''}; {String(p.routes)} screen(s) to test</>);
+    case 'human.decided': return line(p.decision === 'approved' ? CheckCircle2 : XCircle, p.decision === 'approved' ? 'text-ok' : 'text-bad', <>You {String(p.decision)} “{String(p.nodeLabel)}”{p.feedback ? <> — {String(p.feedback)}</> : null}</>);
+    case 'approval.app': return line(CircleDot, 'text-fg-4', <>App for review: {String(p.state)}{p.url ? ` on ${p.url}` : ''}{p.restarted ? ' (restarted by you)' : ''}</>);
+    case 'task.deleted': return line(Trash2, 'text-fg-4', <>Task “{String(p.title)}” deleted</>);
     case 'error.reported': return line(AlertTriangle, 'text-bad', <>{p.errorId} [{p.severity}] {p.title}</>);
     case 'error.resolved': return line(CheckCircle2, 'text-ok', <>{p.errorId} resolved</>);
     case 'merge.completed': return line(CheckCircle2, 'text-ok', 'Merged');

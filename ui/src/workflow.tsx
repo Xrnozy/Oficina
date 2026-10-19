@@ -1,7 +1,7 @@
 // Shared types + pure helpers for the Workflow page — mirrors
 // daemon/src/services/workflow.ts. Keep the shapes identical.
 
-export type WfNodeType = 'start' | 'agent' | 'condition' | 'merge' | 'human' | 'end';
+export type WfNodeType = 'start' | 'agent' | 'condition' | 'merge' | 'human' | 'approval' | 'end';
 export type WfEdgeKind = 'next' | 'on-success' | 'on-failure' | 'on-reject' | 'message';
 
 export interface WfCondition {
@@ -11,7 +11,13 @@ export interface WfCondition {
   and?: WfCondition[]; or?: WfCondition[]; not?: WfCondition;
 }
 
+// Human approval: an agent starts the app and writes a report, then you approve or reject it.
+export interface WfApprovalConfig {
+  command?: string; cwd?: string; url?: string; readyTimeoutSec?: number; openBrowser?: boolean; routes?: string[];
+}
+
 export interface WfNodeConfig {
+  approval?: WfApprovalConfig;
   purpose?: string;
   scope?: 'task' | 'run';
   instructions?: string;
@@ -277,7 +283,7 @@ export function nearestEdge(g: WfGraph, p: { x: number; y: number }, radius = 70
 }
 
 export const NODE_TYPE_LABEL: Record<WfNodeType, string> = {
-  start: 'Start', agent: 'Agent', condition: 'Condition', merge: 'Merge', human: 'Human gate', end: 'End',
+  start: 'Start', agent: 'Agent', condition: 'Condition', merge: 'Merge', human: 'Owner gate', approval: 'Human approval', end: 'End',
 };
 
 export const PURPOSE_LABEL: Record<string, string> = {

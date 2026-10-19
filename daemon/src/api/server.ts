@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, updateSession } from '../services/cli-sessions.ts';
 import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
+import { appInfo, appLog } from '../services/app-launcher.ts';
 import { addAttachment, fileOf, getAttachment, listAttachments, removeAttachment, replaceAttachment, MAX_FILE_BYTES } from '../services/attachments.ts';
 import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -15,7 +16,7 @@ import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
 import {
-  approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
+  approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, reviewAppControl, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
   pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
@@ -349,10 +350,27 @@ export function createServer(port: number, uiDir: string): http.Server {
 
   app.post('/api/approvals/:id/decide', (req, res) => {
     const { approve, reason, alwaysAllowForAgent } = req.body ?? {};
-    if (!approve && !reason) return err(res, 400, 'a reason is required to reject');
+    const cur = q1('SELECT status, action FROM approvals WHERE id = ?', req.params.id);
+    if (!cur) return err(res, 404, 'not found');
+    if (cur.status !== 'pending') return err(res, 409, `already ${String(cur.status)} — a decision is recorded once`);
+    if (!approve && !String(reason ?? '').trim()) return err(res, 400, cur.action === 'human.approval' ? 'describe what needs to be fixed — the agents work from your feedback' : 'a reason is required to reject');
     const a = decideApproval(req.params.id, !!approve, reason ?? '', alwaysAllowForAgent);
     if (!a) return err(res, 404, 'not found');
     ok(res, a);
+  });
+
+  // the app a Human approval review launched: status + log, and restart / stop / open
+  app.get('/api/approvals/:id/app', (req, res) => {
+    const a = q1('SELECT task_id, action FROM approvals WHERE id = ?', req.params.id);
+    if (!a || a.action !== 'human.approval' || !a.task_id) return err(res, 404, 'not an approval with an app to review');
+    ok(res, { app: appInfo(a.task_id as string), log: appLog(a.task_id as string, 150) });
+  });
+  app.post('/api/approvals/:id/app', async (req, res) => {
+    const action = String(req.body?.action ?? '');
+    if (!['restart', 'stop', 'open'].includes(action)) return err(res, 400, 'action must be restart, stop or open');
+    const r = await reviewAppControl(req.params.id, action as 'restart' | 'stop' | 'open', req.body?.url ? String(req.body.url) : undefined);
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r);
   });
 
   // Batch approve every pending low-risk item (optionally within one run).

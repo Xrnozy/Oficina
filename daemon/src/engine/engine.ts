@@ -1,5 +1,6 @@
 import { DATA_DIR, q, q1, run, tx } from '../db.ts';
 import { bindToRun, manifestFingerprint, manifestSection, removeAttachment } from '../services/attachments.ts';
+import { appInfo, appLog, diagnose, openBrowser, probeRoutes, safeRoutePath, startApp, stopApp, type AppInfo, type Diagnostics } from '../services/app-launcher.ts';
 import { emit, onEvent } from '../bus.ts';
 import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
@@ -100,7 +101,7 @@ function setRunStatus(runId: string, status: Run['status'], extra: Record<string
 
 function setTaskStatus(taskId: string, status: TaskStatus, actor = 'engine', extra: Record<string, unknown> = {}): void {
   run('UPDATE tasks SET status = ? WHERE id = ?', status, taskId);
-  if (['done', 'failed', 'cancelled', 'blocked'].includes(status)) closeTaskCheckpoint(taskId);
+  if (['done', 'failed', 'cancelled', 'blocked'].includes(status)) { closeTaskCheckpoint(taskId); stopApp(taskId); }
   const t = getTask(taskId);
   emit('task.status', actor, { taskId, status, title: t?.title, ...extra }, t?.runId ?? null, taskId);
 }
@@ -397,9 +398,10 @@ export function deleteTask(taskId: string): { ok: true; title: string } | { erro
   const t = getTask(taskId);
   if (!t) return { error: 'task not found', status: 404 };
   const live = q1(`SELECT COUNT(*) c FROM work_items WHERE task_id = ? AND status IN ('queued','running','waiting')`, t.id)?.c as number;
-  if (live > 0 || holdsRepo(t) || ['in-progress', 'verifying', 'in-review'].includes(t.status)) {
+  if (live > 0 || ['in-progress', 'verifying', 'in-review'].includes(t.status)) {
     return { error: 'an agent is working on this task right now — wait for it to finish, or stop the run, then delete it', status: 409 };
   }
+  closeTaskCheckpoint(t.id);        // a task waiting on the owner still holds the repository; release it (its changes stay in the working tree)
   tx(() => {
     for (const other of runTasks(t.runId)) {
       if (other.dependsOn.includes(t.id)) run('UPDATE tasks SET depends_on = ? WHERE id = ?', JSON.stringify(other.dependsOn.filter((d) => d !== t.id)), other.id);
@@ -415,6 +417,7 @@ export function deleteTask(taskId: string): { ok: true; title: string } | { erro
     run('DELETE FROM tasks WHERE id = ?', t.id);
   });
   try { fs.rmSync(path.join(DATA_DIR, 'handoff', `${t.id}.md`), { force: true }); } catch { /* notes are a courtesy */ }
+  stopApp(t.id);
   emit('task.deleted', 'owner', { taskId: t.id, title: t.title, status: t.status }, t.runId, t.id);
   void maybeAdvanceRun(t.runId);
   return { ok: true, title: t.title };
@@ -467,6 +470,7 @@ export function resumeRun(runId: string): void {
 export function stopRun(runId: string, reason = 'OWNER'): void {
   setRunStatus(runId, 'stopped', { stopReason: reason });
   killCliChildrenForRun(runId);
+  for (const t of q('SELECT id FROM tasks WHERE run_id = ?', runId)) stopApp(t.id as string);
   for (const wi of q(`SELECT id FROM work_items WHERE run_id = ? AND status IN ('queued','running','waiting')`, runId)) {
     run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
   }
@@ -756,7 +760,9 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   scheduleTimer(wi.runId, stuckMin, 'heartbeat.missed', { workItemId: wi.id });
 
   try {
-    if (!roleMayDo(candidate.role.name, wi.kind)) {
+    // a Human approval node's agent was chosen by the owner for this: any hands-on role may do it, but not the PM or the Prompt Creator
+    const mayDo = wfN?.type === 'approval' ? !['pm', 'prompt-creator'].includes(candidate.role.name) : roleMayDo(candidate.role.name, wi.kind);
+    if (!mayDo) {
       emit('role.violation', 'engine', { agent: candidate.agent.name, role: candidate.role.name, kind: wi.kind }, wi.runId, wi.id);
       throw new Error(`role '${candidate.role.name}' may not do '${wi.kind}' work`);
     }
@@ -2931,7 +2937,7 @@ function wfGateGuardrail(r: Run, task: Task, node: WfNode, why: string): void {
   }
 }
 
-function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
+function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null, overrides?: { contract?: string; facts?: string }): void {
   task = getTask(task.id)!;                       // fresh: sibling edges may have saved state
   const s = wfState(task);
   // bypassed node: no dispatch, no message edges — it passes the last outcome
@@ -2976,7 +2982,8 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
     kind, agent: candidate.agent, role: candidate.role, task, goal: r.goal, pack, adapterId: candidate.provider?.adapterId,
     extra: {
       handoff: wfInputsText(r, task, node),
-      nodeInstructions: node.config?.instructions,
+      nodeInstructions: [node.config?.instructions, overrides?.facts].filter(Boolean).join('\n\n') || undefined,
+      contract: overrides?.contract,
       approvedPrompt: approvedPromptFor(task.id),
       changeNotes: writable ? undefined : changeNotes(task).slice(0, 3000),
       checkResults: lastReport,
@@ -3049,6 +3056,233 @@ function wfFireMessageEdges(r: Run, task: Task, node: WfNode, fromAgentId: strin
   return { waiting: !!s.awaiting, s };
 }
 
+// ---------------------------------------------------------------------------
+// Human approval node. Code gathers the facts, an agent writes the report, the owner decides.
+//   1. the engine starts the project's app (services/app-launcher) and watches it;
+//   2. the node's connected agent reads the request, the changes and those facts, picks the screens worth testing and
+//      writes a report (summary, changes, testing, issues, app status);
+//   3. the engine probes every proposed screen itself, so a page that answers 500 can't be reported as fine, opens the
+//      first one in the owner's browser and raises a Needs-you item with the whole report;
+//   4. the owner approves (the task follows the approve edge) or rejects with feedback (the reject edge; the feedback and
+//      the app's own log go to the agents that investigate and fix it, and the task comes back here for another review).
+// Every decision is recorded on the task and as a human.decided event.
+// ---------------------------------------------------------------------------
+
+const APPROVAL_CONTRACT = `
+You are preparing a HUMAN APPROVAL review: the owner will test the running application by hand, then approve or reject it.
+The engine has already started the app and gathered the facts below (DATA blocks): trust them over assumptions.
+Your job:
+1. From the original request and the changes, decide which screens, pages or features the owner should open to test this work.
+2. Read the app's state, its log tail and its error lines (open the log file if you need more) and look for runtime errors, crashed or
+   missing background processes, failing routes and warnings that matter.
+3. Write the report the owner reads before testing.
+
+OUTPUT CONTRACT (mandatory): respond with ONE json code block:
+\`\`\`json
+{"summary":"2-3 sentences: what changed and what state the app is in",
+ "changes":["what was changed, in plain words"],
+ "testing":[{"what":"what you actually checked","result":"pass|fail|unknown","notes":"..."}],
+ "issues":[{"severity":"low|medium|high","message":"what you saw, and where"}],
+ "appStatus":"ready|degraded|failed",
+ "routes":[{"label":"Login page","path":"/login","why":"the request was about the login form"}],
+ "howToTest":["step the owner should take"]}
+\`\`\`
+Rules:
+- "routes": paths on the app (they start with "/"), the most relevant first, at most 6. If the work has no screen, use "/" and say so in "why".
+- "testing" lists only what you really checked (the log, the engine's facts, the changed files). Never claim a test you did not do.
+- "issues" lists only what you really saw. An empty list is a valid answer. Never invent a problem to look thorough.
+- Do not edit any file and do not start or stop the app.
+`.trim();
+
+type ApprovalRoute = { label: string; path: string; why: string };
+
+function approvalFacts(r: Run, task: Task, repo: Repo, info: AppInfo, diag: Diagnostics): string {
+  const prior = ((task.meta?.humanDecisions as { decision: string; feedback: string }[] | undefined) ?? []).filter((d) => d.decision === 'rejected').slice(-3);
+  // what the developers delivered, from their work items (no new snapshot of the repository while others may be taking one)
+  const files = [...new Set(q(`SELECT result FROM work_items WHERE task_id = ? AND kind IN ('implement','fix','doc','test') AND status = 'delivered' ORDER BY rowid`, task.id)
+    .flatMap((w) => (parseJson<{ filesChanged?: string[] }>(w.result as string, {}).filesChanged ?? []))
+    .filter((f) => f !== 'HANDOFF.md' && !f.startsWith('.office/')))];
+  return [
+    `ORIGINAL REQUEST: ${r.goal}`,
+    `TASK: ${task.title}${task.description ? `\n${task.description.slice(0, 1500)}` : ''}`,
+    task.acceptanceCriteria.length ? `ACCEPTANCE CRITERIA:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}` : '',
+    prior.length ? `EARLIER REJECTIONS BY THE OWNER (this is a re-review — check they were addressed):\n${prior.map((d, i) => `${i + 1}. ${d.feedback}`).join('\n')}` : '',
+    `FILES CHANGED (${files.length}): ${files.slice(0, 40).join(', ') || 'none recorded'}`,
+    `(You work in the repository folder: \`git status\` and \`git diff\` show the details.)`,
+    `APP (started by the engine): ${diag.summary}`,
+    `  command: ${info.command ?? 'none'}   folder: ${info.cwd}   log file: ${info.logFile}`,
+    info.note ? `  note: ${info.note}` : '',
+    diag.errorLines.length ? `ERROR-LOOKING LOG LINES:\n${diag.errorLines.join('\n')}` : 'ERROR-LOOKING LOG LINES: none',
+    `LOG TAIL (last ${diag.logTail.length} lines):\n${diag.logTail.join('\n') || '(no output yet)'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+// a node that was in flight when the daemon restarted, or a retried dead end: agent nodes dispatch, approval nodes start over
+function dispatchNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
+  if (node.type === 'approval') approvalEnter(r, task, node, viaEdge); else dispatchAgentNode(r, task, node, viaEdge);
+}
+
+function approvalEnter(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
+  task = getTask(task.id)!;
+  const difficulty = node.config?.modelTier === 'strong' ? 5 : node.config?.modelTier === 'fast' ? 1 : task.difficulty;
+  // no agent to write the report: dispatchAgentNode raises the usual dead-end Needs-you item — and no app is started for nothing
+  if (!wfCandidate(r, task, node, 'custom', difficulty)) { dispatchAgentNode(r, task, node, viaEdge); return; }
+  const s = wfState(task);
+  s.nodes = [...new Set([...s.nodes.filter((id) => id !== node.id), node.id])];
+  saveWfState(task, s);
+  emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, human: true, approval: true }, r.id, task.id);
+  setTaskStatus(task.id, 'verifying', 'engine', { reason: `starting the app for your review: ${node.label}`, node: node.label });
+  void approvalPrepare(r, task.id, node, viaEdge).catch((e) => {
+    emit('approval.failed', 'engine', { taskId: task.id, nodeId: node.id, error: String(e).slice(0, 300) }, r.id, task.id);
+    stopApp(task.id);
+    const t = getTask(task.id);
+    if (t && !TERMINAL_TASK.includes(t.status)) {
+      setTaskStatus(task.id, 'blocked', 'engine', { reason: `could not prepare the approval step: ${String(e).slice(0, 160)}` });
+      requestApproval({ action: 'workflow.deadend', taskId: task.id, runId: r.id, requestedBy: 'engine', payload: { summary: `"${node.label}" could not be prepared (${String(e).slice(0, 160)}). Approve to retry.` } });
+    }
+  });
+}
+
+async function approvalPrepare(r: Run, taskId: string, node: WfNode, viaEdge: WfEdge | null): Promise<void> {
+  const repo = getRepo(r.repoId);
+  if (!repo) throw new Error('the run has no repository');
+  const cfg = node.config?.approval ?? {};
+  emit('approval.preparing', 'engine', { taskId, nodeId: node.id, command: cfg.command || 'detect' }, r.id, taskId);
+  const info = await startApp(taskId, cfg, repo.path);
+  const diag = await diagnose(taskId);
+  emit('approval.app', 'engine', { taskId, nodeId: node.id, state: info.state, url: info.url, note: info.note, summary: diag.summary }, r.id, taskId);
+  const fresh = getTask(taskId);
+  const live = getRun(r.id);
+  if (!fresh || TERMINAL_TASK.includes(fresh.status) || !live || ['done', 'stopped', 'failed'].includes(live.status)) { stopApp(taskId); return; }   // deleted, finished or stopped while the app was starting
+  setTaskMeta(taskId, 'approvalApp', { state: info.state, url: info.url, command: info.command, note: info.note, logFile: info.logFile, startedAt: info.startedAt });
+  dispatchAgentNode(live, fresh, node, viaEdge, { contract: APPROVAL_CONTRACT, facts: approvalFacts(live, fresh, repo, info, diag) });
+}
+
+const asStr = (x: unknown, n = 600): string => String(x ?? '').trim().slice(0, n);
+
+async function approvalReported(wi: WorkItem, result: NonNullable<WorkItem['result']>, usedAgentId: string, r: Run, task: Task, node: WfNode): Promise<void> {
+  const raw = (result.raw ?? {}) as Record<string, any>;
+  const j = (raw.json ?? raw) as Record<string, any>;
+  const cfg = node.config?.approval ?? {};
+  const info = appInfo(task.id);
+
+  // the screens to offer: the owner's own list first, then the agent's picks — plain paths only, never another site
+  const routes: ApprovalRoute[] = [];
+  const addRoute = (p: unknown, label: unknown, why: unknown) => {
+    const path = safeRoutePath(p);
+    if (path && !routes.some((x) => x.path === path) && routes.length < 8) routes.push({ path, label: asStr(label, 80) || path, why: asStr(why, 200) });
+  };
+  for (const p of cfg.routes ?? []) addRoute(p, p, 'always offered for this workflow');
+  for (const x of Array.isArray(j.routes) ? j.routes : []) addRoute(x?.path, x?.label, x?.why);
+  if (!routes.length) addRoute('/', 'Home', 'the work has no specific screen');
+
+  // facts beat claims: every offered screen is requested by the engine itself
+  const base = info && (info.state === 'ready' || info.state === 'starting') ? info.url : null;
+  const probes = base ? await probeRoutes(base, routes.map((x) => x.path)) : [];
+  if (probes.length) await new Promise((res) => setTimeout(res, 300));   // let the app write what those requests made it log
+  const diag = await diagnose(task.id);
+  const issues: { severity: string; message: string; source: 'agent' | 'engine' }[] = (Array.isArray(j.issues) ? j.issues : [])
+    .map((i: any) => ({ severity: ['low', 'medium', 'high'].includes(i?.severity) ? i.severity : 'medium', message: asStr(i?.message, 400), source: 'agent' as const })).filter((i) => i.message).slice(0, 12);
+  for (const p of probes) {
+    if (p.status == null) issues.push({ severity: 'high', message: `${p.path} did not answer: ${p.error ?? 'no response'}`, source: 'engine' });
+    else if (p.status >= 500) issues.push({ severity: 'high', message: `${p.path} answered with a server error (${p.status})`, source: 'engine' });
+    else if (p.status === 404) issues.push({ severity: 'medium', message: `${p.path} answered 404 (not found)`, source: 'engine' });
+  }
+  const running = !!info && (info.state === 'ready' || info.state === 'starting') && diag.listening === true;
+  if (!running) issues.unshift({ severity: 'high', message: info ? `The app is not running or not answering (${info.state}). ${info.note}`.trim() : 'The app was not started.', source: 'engine' });
+  const claimed = ['ready', 'degraded', 'failed'].includes(j.appStatus) ? j.appStatus : 'ready';
+  const appStatus = !running ? 'failed' : issues.some((i) => i.source === 'engine') || claimed === 'degraded' || claimed === 'failed' ? 'degraded' : 'ready';
+
+  const report = {
+    summary: asStr(j.summary || result.summary || raw.text, 1200) || 'No summary was written.',
+    changes: (Array.isArray(j.changes) ? j.changes : []).map((c: unknown) => asStr(c, 300)).filter(Boolean).slice(0, 15),
+    testing: (Array.isArray(j.testing) ? j.testing : []).map((t: any) => ({ what: asStr(t?.what, 300), result: ['pass', 'fail', 'unknown'].includes(t?.result) ? t.result : 'unknown', notes: asStr(t?.notes, 300) })).filter((t: { what: string }) => t.what).slice(0, 15),
+    issues, appStatus,
+    howToTest: (Array.isArray(j.howToTest) ? j.howToTest : []).map((c: unknown) => asStr(c, 300)).filter(Boolean).slice(0, 10),
+    agent: getAgent(usedAgentId)?.name ?? usedAgentId,
+  };
+  const offered = routes.map((x, i) => ({ ...x, url: base ? `${base}${x.path}` : null, probe: probes[i] ? { status: probes[i].status, ms: probes[i].ms, error: probes[i].error } : null }));
+  const app = { state: info?.state ?? 'none', url: base, command: info?.command ?? null, pid: info?.pid ?? null, note: info?.note ?? '', logFile: info?.logFile ?? null, listening: diag.listening };
+  setTaskMeta(task.id, 'approvalReview', { at: now(), report, routes: offered, app, errorLines: diag.errorLines.slice(-8), logFile: info?.logFile ?? null });
+
+  const s = wfState(getTask(task.id)!);
+  s.nodes = s.nodes.filter((id) => id !== node.id);
+  s.awaiting = { kind: 'human', nodeId: node.id, at: now() };
+  saveWfState(task, s);
+  emit('human.prepared', report.agent, { taskId: task.id, nodeId: node.id, appStatus, issues: issues.length, routes: offered.length }, r.id, task.id);
+  const a = requestApproval({
+    action: 'human.approval', taskId: task.id, runId: r.id, requestedBy: usedAgentId,
+    payload: { summary: `Review "${task.title}": ${report.summary.slice(0, 200)}`, nodeId: node.id, nodeLabel: node.label, taskTitle: task.title, report, app, routes: offered, logTail: diag.logTail.slice(-30), errorLines: diag.errorLines.slice(-8) },
+  });
+  const after = getTask(task.id)!;
+  const s2 = wfState(after);
+  if (s2.awaiting?.nodeId === node.id) {
+    s2.awaiting = { ...s2.awaiting, approvalId: a.id };
+    saveWfState(after, s2);
+    setTaskStatus(task.id, 'waiting-input', 'engine', { reason: `waiting for your approval: ${node.label}` });
+  }
+  if (cfg.openBrowser !== false && offered[0]?.url) openBrowser(offered[0].url);
+}
+
+// What the owner can do with the app while reviewing: start it again (after a crash, or to reset its state), stop it, or open a
+// screen in the browser. Only while the review is still pending, and only the app's own address.
+export async function reviewAppControl(approvalId: string, action: 'restart' | 'stop' | 'open', url?: string): Promise<{ ok: true; app: AppInfo | null; log: string[] } | { error: string; status: number }> {
+  const a = q1('SELECT * FROM approvals WHERE id = ?', approvalId);
+  if (!a || a.action !== 'human.approval' || !a.task_id) return { error: 'not an approval with an app to review', status: 404 };
+  const taskId = a.task_id as string;
+  if (action === 'stop') { stopApp(taskId); return { ok: true, app: appInfo(taskId), log: appLogLines(taskId) }; }
+  if (a.status !== 'pending') return { error: 'this review has already been decided — the app was stopped', status: 409 };
+  const task = getTask(taskId);
+  const r = task ? getRun(task.runId) : null;
+  const repo = r ? getRepo(r.repoId) : null;
+  if (!task || !r || !repo) return { error: 'the task or its repository no longer exists', status: 404 };
+  if (action === 'open') {
+    const info = appInfo(taskId);
+    if (!info?.url) return { error: 'the app has no address — restart it first', status: 409 };
+    const target = url ? url : info.url;
+    if (target !== info.url && !target.startsWith(info.url + '/')) return { error: "that address is not part of the app under review", status: 400 };
+    if (!openBrowser(target)) return { error: 'could not open the browser from here — use the link instead', status: 409 };
+    return { ok: true, app: info, log: appLogLines(taskId) };
+  }
+  const node = wfNode(graphFor(r)?.graph ?? { nodes: [], edges: [] }, (parseJson<Record<string, unknown>>(a.payload as string, {}).nodeId as string) ?? '');
+  const info = await startApp(taskId, node?.config?.approval ?? {}, repo.path);
+  setTaskMeta(taskId, 'approvalApp', { state: info.state, url: info.url, command: info.command, note: info.note, logFile: info.logFile, startedAt: info.startedAt });
+  emit('approval.app', 'owner', { taskId, nodeId: node?.id, state: info.state, url: info.url, note: info.note, restarted: true }, r.id, taskId);
+  return { ok: true, app: info, log: appLogLines(taskId) };
+}
+const appLogLines = (taskId: string): string[] => appLog(taskId, 120);
+
+// The owner's answer. Approve follows the approve edge; reject follows the reject edge carrying the feedback and what the
+// app's own log showed, so the agents that investigate start from facts, not just from "it's broken".
+function humanApprovalResume(r: Run, task: Task, approved: boolean, awaiting: WfState['awaiting'], approvalId: string, feedback: string): void {
+  const node = wfNode(graphFor(r)!.graph, awaiting?.nodeId ?? '');
+  const review = (task.meta?.approvalReview ?? {}) as { report?: { summary?: string; issues?: { message: string }[] }; errorLines?: string[]; logFile?: string | null; routes?: { path: string }[] };
+  const prior = (task.meta?.humanDecisions as unknown[] | undefined) ?? [];
+  const entry = { at: now(), nodeId: node?.id ?? awaiting?.nodeId ?? '', nodeLabel: node?.label ?? 'Human approval', decision: approved ? 'approved' : 'rejected', feedback, approvalId, round: prior.length + 1 };
+  setTaskMeta(task.id, 'humanDecisions', [...prior, entry]);
+  emit('human.decided', 'owner', { taskId: task.id, nodeId: entry.nodeId, nodeLabel: entry.nodeLabel, decision: entry.decision, feedback, approvalId, round: entry.round }, r.id, task.id);
+  stopApp(task.id);
+  const s = wfState(getTask(task.id)!);
+  s.awaiting = undefined;
+  saveWfState(task, s);
+  setTaskStatus(task.id, 'assigned', 'owner', { reason: approved ? 'approved by the owner' : 'rejected by the owner — sent back with feedback' });
+  if (approved) {
+    graphAdvanceFrom(r, task, node, { status: 'success', verdict: 'approve', report: `HUMAN REVIEW: APPROVED by the owner${feedback ? ` — ${feedback}` : ''}.` }, null);
+    return;
+  }
+  const report = [
+    'HUMAN REVIEW: REJECTED by the owner, who tested the running app. Investigate this before changing anything.',
+    `OWNER FEEDBACK: ${feedback}`,
+    review.report?.summary ? `WHAT WAS REVIEWED: ${review.report.summary}` : '',
+    review.report?.issues?.length ? `ISSUES ALREADY FLAGGED: ${review.report.issues.map((i) => i.message).slice(0, 6).join(' | ')}` : '',
+    review.errorLines?.length ? `ERRORS IN THE APP LOG WHEN IT WAS REVIEWED:\n${review.errorLines.join('\n')}` : '',
+    review.logFile ? `FULL APP LOG: ${review.logFile}` : '',
+  ].filter(Boolean).join('\n');
+  // everyone working this task hears it, wherever the reject edge sends the task
+  if (task.ownerAgentId) postMessage({ runId: r.id, taskId: task.id, from: 'owner', to: task.ownerAgentId, kind: 'finding', text: `The owner rejected "${task.title}" after testing it: ${feedback}` });
+  graphAdvanceFrom(r, task, node, { status: 'reject', verdict: 'reject', report }, null);
+}
+
 function graphEnter(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
   task = getTask(task.id)!;
   const s = wfState(task);
@@ -3078,6 +3312,7 @@ function graphEnter(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): v
       }
       return;
     }
+    case 'approval': approvalEnter(r, task, node, viaEdge); return;
     case 'merge': {
       const arrived = s.arrived[node.id] ?? [];
       if (viaEdge && !arrived.includes(viaEdge.id)) s.arrived[node.id] = [...arrived, viaEdge.id];
@@ -3198,7 +3433,7 @@ export function wfEntryNodes(g: WfGraph, ctx: { outcome: WfOutcome; task: Task }
     if (seen.has(n.id)) continue;
     seen.add(n.id);
     if (n.type === 'agent' && (n.config?.scope ?? 'task') === 'task') { out.push(n); continue; }
-    if (n.type === 'human' || n.type === 'end' || n.type === 'merge') { out.push(n); continue; }
+    if (n.type === 'human' || n.type === 'approval' || n.type === 'end' || n.type === 'merge') { out.push(n); continue; }
     // start / condition / run-scope agent: walk its outgoing edges
     const { take, elseEdge } = wfMatchingEdges(g, n.id, ctx);
     for (const e of [...take, ...(elseEdge && !take.length ? [elseEdge] : [])]) {
@@ -3218,19 +3453,19 @@ export function graphTaskEntry(r: Run, task: Task): void {
   if (s.awaiting) return;                                    // human/reply gates resume elsewhere
   if (s.held) {                                              // parked writer: retry the tree
     const node = wfNode(g.graph, s.held);
-    if (node) { s.held = undefined; saveWfState(task, s); dispatchAgentNode(r, getTask(task.id)!, node, null); }
+    if (node) { s.held = undefined; saveWfState(task, s); dispatchNode(r, getTask(task.id)!, node, null); }
     return;
   }
   if (s.deadEndNode) {                                       // owner approved a retry of the stalled step
     const node = wfNode(g.graph, s.deadEndNode);
     s.deadEndNode = undefined;
     saveWfState(task, s);
-    if (node) { dispatchAgentNode(r, getTask(task.id)!, node, null); return; }
+    if (node) { dispatchNode(r, getTask(task.id)!, node, null); return; }
   }
   if (s.nodes.length) {                                      // resume in-flight nodes (retry path)
     for (const id of [...s.nodes]) {
       const node = wfNode(g.graph, id);
-      if (node) dispatchAgentNode(r, getTask(task.id)!, node, null);
+      if (node) dispatchNode(r, getTask(task.id)!, node, null);
     }
     return;
   }
@@ -3325,6 +3560,15 @@ export function simulateWorkflow(graph: WfGraph, opts: {
       }
       case 'condition': step(node, viaEdgeId); advance(node, lastOutcome); break;
       case 'human': humanGates++; step(node, viaEdgeId, 'owner gate — simulated approve'); advance(node, { status: 'success', verdict: 'approve' }); break;
+      case 'approval': {
+        calls++; humanGates++;
+        const o = scripted(node.id);
+        fired.add(node.id);
+        step(node, viaEdgeId, o.status === 'reject' ? 'owner rejects (mocked) — feedback goes to the reject edge' : 'agent prepares the app, owner approves (simulated)');
+        lastOutcome = o.status === 'reject' ? o : { status: 'success', verdict: 'approve' };
+        advance(node, lastOutcome);
+        break;
+      }
       case 'merge': {
         const ins = graph.edges.filter((e) => e.to === node.id && e.kind !== 'message');
         const a = arrived[node.id] ?? (arrived[node.id] = new Set());
@@ -3375,6 +3619,9 @@ async function graphDelivered(wi: WorkItem, result: NonNullable<WorkItem['result
   const node = wfNode(g.graph, wi.workflowNodeId) ?? wfNode(g.graph, wfState(task).nodes[0]);
   const raw = (result.raw ?? {}) as Record<string, any>;
   const j = (raw.json ?? raw) as Record<string, any>;
+
+  // a Human approval node's agent wrote the review report: the engine verifies it and asks the owner
+  if (node?.type === 'approval') { await approvalReported(wi, result, usedAgentId, r, task, node); return; }
 
   switch (wi.kind) {
     case 'implement': case 'fix': case 'test': case 'doc': case 'custom': {
@@ -3463,9 +3710,10 @@ async function graphDelivered(wi: WorkItem, result: NonNullable<WorkItem['result
 
 // Resume a task parked at a human gate or a spent loop after the owner
 // decides. Called from the approval.decided wiring.
-function graphResume(r: Run, task: Task, approved: boolean, approval?: { action: string; payload: Record<string, unknown> }): void {
+function graphResume(r: Run, task: Task, approved: boolean, approval?: { action: string; payload: Record<string, unknown>; id?: string }, feedback = ''): void {
   const s = wfState(task);
   const awaiting = s.awaiting;
+  if (approval?.action === 'human.approval') { humanApprovalResume(r, task, approved, awaiting, approval.id ?? awaiting?.approvalId ?? '', feedback); return; }
   s.awaiting = undefined;
   // loop approval: approving allows one more pass on that edge — replay the
   // outcome that exhausted it so the same edge matches again
@@ -3536,13 +3784,13 @@ export function wireEngineEvents(): void {
       return;
     }
     // workflow gates: human nodes, exhausted loops, dead ends, guardrails
-    if (['workflow.human', 'workflow.loop', 'workflow.deadend', 'workflow.guardrail'].includes(decided.action as string) && decided.task_id) {
+    if (['workflow.human', 'human.approval', 'workflow.loop', 'workflow.deadend', 'workflow.guardrail'].includes(decided.action as string) && decided.task_id) {
       const task = getTask(decided.task_id as string);
       const rr = task ? getRun(task.runId) : null;
       if (!task || !rr || !graphFor(rr)) return;
       const s = wfState(task);
       if (s.awaiting?.kind === 'guard') { graphGuardResume(rr, task, !!e.payload.approved); void maybeAdvanceRun(rr.id); return; }
-      if (s.awaiting) { graphResume(rr, task, !!e.payload.approved, { action: decided.action as string, payload: parseJson(decided.payload as string, {}) }); void maybeAdvanceRun(rr.id); return; }
+      if (s.awaiting) { graphResume(rr, task, !!e.payload.approved, { action: decided.action as string, payload: parseJson(decided.payload as string, {}), id: decided.id as string }, reason); void maybeAdvanceRun(rr.id); return; }
       if (s.deadEndNode && e.payload.approved) { setTaskStatus(task.id, 'ready', 'owner', { reason: 'dead-end retry approved' }); void maybeAdvanceRun(rr.id); return; }
       if (e.payload.approved && task.status === 'blocked') { setTaskStatus(task.id, 'ready', 'owner'); void maybeAdvanceRun(rr.id); }
       return;
@@ -3551,7 +3799,7 @@ export function wireEngineEvents(): void {
   onEvent((e) => {
     if (e.type === 'approval.decided' && e.payload.approved) {
       const approval = q1('SELECT * FROM approvals WHERE id = ?', e.payload.approvalId as string);
-      if (!approval || approval.action === 'agent.question' || approval.action === 'prompt.escalate') return;
+      if (!approval || approval.action === 'agent.question' || approval.action === 'prompt.escalate' || approval.action === 'human.approval') return;
       if (approval.action === 'commit.task' && approval.task_id) {
         const p = parseJson<{ message?: string }>(approval.payload as string, {});
         commitTask(approval.task_id as string, p.message ?? '', true);
@@ -3587,7 +3835,7 @@ export function wireEngineEvents(): void {
     }
     if (e.type === 'approval.decided' && !e.payload.approved) {
       const approval = q1('SELECT * FROM approvals WHERE id = ?', e.payload.approvalId as string);
-      if (approval?.action === 'agent.question' || approval?.action === 'prompt.escalate') return;
+      if (approval?.action === 'agent.question' || approval?.action === 'prompt.escalate' || approval?.action === 'human.approval') return;
       if (approval?.action === 'commit.task') {
         if (approval.task_id) emit('commit.skipped', 'owner', { taskId: approval.task_id, reason: String(e.payload.reason ?? 'declined') }, approval.run_id as string, approval.task_id as string);
         return;

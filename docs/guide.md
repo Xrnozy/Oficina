@@ -73,7 +73,8 @@ The **Workflow** page draws the pipeline above as an editable graph — and lets
 | `agent` | a desk: role (or a pinned agent), purpose (plan/implement/qa/review/accept/analyse/doc/custom), scope (`run` — once per run — or `task`), instructions, budget, timeout, writable vs read-only, skill refs |
 | `condition` | deterministic branch on outcome/task fields — no model call |
 | `merge` | join parallel branches (`all` or `any` of its in-edges) |
-| `human` | pause for an owner decision, then continue |
+| `human` | *Owner gate*: a plain pause for an owner decision, then continue |
+| `approval` | *Human approval*: an agent launches your app and reports, then you approve (approve edge) or reject with feedback (reject edge) — see [Human approval](#human-approval) |
 
 Edges: `next` (positive outcomes), `on-success`, `on-failure`, `on-reject` (the only kinds allowed to close a cycle — they carry a `maxLoops` bound, default 3, after which you decide), `message` (a structured note to the target node's agent — no model call; optionally `waitForReply`). Condition-node edges get a condition builder with a plain-language preview and exactly one `else` edge.
 
@@ -143,7 +144,7 @@ By default (**Routing → Where agents work → direct**) agents work inside the
 
 - Code tasks run one at a time, so every change is attributed to exactly one task and one agent.
 - Uncommitted changes you already had are detected before a task starts (`repo.dirty`), preserved, and never included in the task's changes or commits.
-- Nothing is created inside your repository for the office's own use: no `.office` folder, no `integration` branch, no extra worktrees, and your `.gitignore` and `.git/info/exclude` are not edited. The developer's change notes live in the daemon's data folder (`data/handoff/<task>.md`), and checkpoints are Git objects pinned under `refs/officechain/`. (The worktree-per-task flow with its `integration` branch exists only in `isolated` mode.)
+- Nothing is created inside your repository for the office's own use: no `.office` folder, no `integration` branch, no extra worktrees, and your `.gitignore` and `.git/info/exclude` are not edited. The one thing you choose to put there is the `documents/` folder of reference files (see below). The developer's change notes live in the daemon's data folder (`data/handoff/<task>.md`), and checkpoints are Git objects pinned under `refs/officechain/`. (The worktree-per-task flow with its `integration` branch exists only in `isolated` mode.)
 - The office never runs `reset`, `checkout`, `clean`, history rewrites or force-pushes.
 
 ### Checkpoints, undo and redo
@@ -166,16 +167,48 @@ When the PM accepts a task, a commit containing **only that task's files** is pr
 
 ## Reference files and task attachments
 
-**Reference files** are documents every agent (or one agent) should follow: a `design.md`, a `spec.md`, coding standards, a screenshot of the target design. They are stored by the daemon (in its data folder, never in your repository) and handed to agents as a short list: name, kind, size, a one-line summary and the path. An agent opens only what its work needs, so a long document costs no tokens until it is read.
+**Reference files** are documents agents should follow: a `design.md`, a `spec.md`, coding standards, a screenshot of the target design. They are filed in your repository's **`documents/`** folder, arranged by who needs them, and handed to agents as a short list (name, kind, size, a one-line summary and the path). An agent opens only what its work needs, so a long document costs no tokens until it is read.
 
-- **Project-wide** files go to every agent in the office; **agent-specific** files only to that agent (Agents → open an agent → *Reference files*); **this run only** files disappear from prompts when the run ends. Add them on the Dashboard (*New run* form, or the *Reference files* panel), from the **+** menu on Live activity, or per agent. Re-adding a file with the same name updates it; the refresh button on a row replaces it with a newer version; the bin removes it.
-- A new or changed file is announced to the PM through the normal message inbox and appears in every prompt dispatched from then on. Nothing running is interrupted and no task is restarted.
+| Audience | Folder | Who is told about it |
+|---|---|---|
+| Every agent | `documents/all-agents/` | all agents in the office |
+| Project Manager | `documents/pm/` | agents acting as PM |
+| Developers | `documents/dev/` | agents acting as developer |
+| Reviewers, QA, analysts, docs, prompt creator | `documents/reviewer/`, `qa/`, `analyst/`, `docs/`, `prompt-creator/` | agents acting in that role |
+| One agent | `documents/agents/<name>/` | that agent only |
+| One run | `documents/runs/<run>/` | every agent, during that run only |
 
-**Task attachments** belong to one task and are seen only by the agents working it, so files never mix between tasks. Drop a file onto a task card, onto the **Ready** column (it starts a new task from the file), into *New task*, or on the task page's *Files* panel. A screenshot of a bug dropped into Ready becomes a task whose agent is given the image's path to open.
+Pick the audience when you add a file (Dashboard → *Reference files*, the *New run* form, Agents → an agent, or **+ → Upload documents** on Live activity); the folder is chosen for you. A file you already have in `documents/` is never overwritten (the new one gets `name (2).md`), re-adding a file with the same name in the same place updates it, and removing the last file removes the empty folders. These files are kept out of every task's changes, checkpoints, undo and commits; they show up in `git status` as untracked files, so you can commit them when you like. An office with no repository keeps them in the daemon's data folder instead. Files uploaded by an earlier version are moved into `documents/` on startup.
 
-**Creating tasks while a run is going.** *New task* (Tasks page, or **+** on Live activity) adds work to the run in progress. It enters as *ready*; the next assign sweep gives it to the eligible agent with capacity, through the same PM-reviewed prompt flow as planned work. The run is not marked done while such a task is still open. Before the Definition of Done is approved it waits like the planned tasks.
+**The PM and routing.** The PM is told about every new file (in its inbox), sees what the other audiences were given, and can point a task at a document with `"references": ["design.md"]` in its plan; that file then reaches the task's agent whatever audience it was filed under. Prompts are rebuilt for every dispatch, so a file added mid-run reaches the next prompt: nothing running is interrupted and no task restarts.
 
-**Limits and checks.** Markdown, text, JSON/YAML/CSV, source and script files, images, PDF and Office documents, up to 10 MB each, 30 files per task, 200 per office. Executables are refused, a file whose bytes are binary but whose name says text is refused, names are stripped of folders, and files are served back with a sandboxing Content-Security-Policy. API: `POST /api/attachments?workspaceId=&scope=project|agent|task&agentId=&taskId=&runId=&name=` (body = the file's bytes), `GET /api/attachments`, `PUT /api/attachments/:id` (replace), `DELETE /api/attachments/:id`, `POST /api/runs/:id/tasks { title, description, priority }`. Restart Oficina after updating so the daemon has these endpoints.
+**Task attachments** belong to one task (or one *work item* of it) and are seen only by the agents working it, so files never mix between tasks. They stay in the daemon's data folder, not in your repository. Drop a file onto a task card, into the **Ready** column (it starts a new task from the file), into *New task*, or on the task page's *Files* panel. A screenshot of a bug dropped into Ready becomes a task whose agent is given the image's path to open.
+
+**Adding files without a file picker.** **+ → Upload documents** opens a panel right under the Live activity chat: drop files, browse, paste a screenshot (Ctrl+V), or switch to *Write a note* and type or paste Markdown, which is saved as a `.md` file for the audience you chose.
+
+**Limits and checks.** Markdown, text, JSON/YAML/CSV, source and script files, images, PDF and Office documents, up to 10 MB each, 30 files per task, 200 per office. Executables are refused, a file whose bytes are binary but whose name says text is refused, names are stripped of folders, and files are served back with a sandboxing Content-Security-Policy. API: `POST /api/attachments?workspaceId=&scope=project|role|agent|task&role=&agentId=&taskId=&itemRef=&runId=&name=` (body = the file's bytes), `GET /api/attachments`, `PUT /api/attachments/:id` (replace), `DELETE /api/attachments/:id`.
+
+## The Tasks board
+
+Columns: **On hold**, **Ready**, **In progress**, **In review**, **Done**, **Failed / blocked**.
+
+- **Only two columns are yours.** Drag a card between *On hold* and *Ready* (or use the pause / play button on the card). *In progress, In review, Done* and *Failed* are facts the workflow produces from what the agents actually did, so they can't be dropped on, and the API refuses to set them (`POST /api/tasks/:id/move` accepts `ready` and `held` only). A task an agent has already started can't be put on hold.
+- **On hold** keeps a task on the board without any agent picking it up. A run can finish while tasks are on hold; if only held tasks remain, the run waits quietly (it never re-plans the work you parked) and a note tells you. A task that others wait for can't be held until they are.
+- **Delete** (trash button, or on the task page) removes a task with its attached files, prompts, check results and messages, and un-blocks tasks that waited for it. It is refused while an agent is working on it. The repository, commits and checkpoints are never touched; undo changes from Checkpoints.
+- **New task** (Tasks page or **+ → Create a task**) takes a title, background, **work items** and files. Each work item is a specific thing to do, with optional instructions and its own files; every item becomes an acceptance criterion the agents check and appears in every prompt for the task. *Put on hold* saves it without handing it to the agents.
+- A task you add during a run enters as *ready* and the next free, eligible agent takes it through the normal PM-reviewed prompt flow. The run isn't marked done while one is open.
+
+## Human approval
+
+A **Human approval** node (Workflow editor palette, or the *With human approval* template) puts you in the loop with the work actually running:
+
+1. The engine starts your app (the node's *Start command*, else `npm run dev` / `npm start` from `package.json`), reads its address from its output (or the *Address* you set) and watches it.
+2. The agent connected to the node (a QA, analyst, reviewer or developer; not the PM) reads your request, the files changed and the app's state and log, chooses the screens worth testing and writes a report: summary, what changed, what was tested, issues, app status.
+3. The engine verifies the report itself: every proposed screen is requested, a page that answers 500 or doesn't answer is raised as an issue no matter what the agent claimed, and an app that isn't running is reported as *failed*. Only plain paths on the app's own address are accepted, never another site. Your own *Always offer these screens* list is included.
+4. The first screen opens in your browser (turn it off in the node) and a **Needs you** item shows the report, an *Open* button per screen, the app log, and **Restart** / **Stop** for the app.
+5. **Approve** follows the approve edge. **Reject with feedback** (required) follows the reject edge: connect it to the agent that should investigate and fix. Your words and what the app's log showed go to the agents, who investigate before changing anything; the fixed work comes back through the rest of the flow to a fresh review (the app is restarted). Rejection loops are bounded like any other (3 by default, then it asks you).
+
+Every decision is recorded on the task (*Human review* panel, with round, decision and feedback), as a `human.decided` event and in Live activity. The app is stopped as soon as you decide, when the task is deleted or ends, when the run stops, and when the daemon exits; its full log is kept under the daemon's `app-logs` folder.
 
 ## Live activity
 

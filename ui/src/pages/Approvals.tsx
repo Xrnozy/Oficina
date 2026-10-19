@@ -2,7 +2,8 @@ import { useOfficeApprovals } from '../office';
 import React, { useState } from 'react';
 import { post, useQuery } from '../api';
 import { Avatar, Drawer, Empty, PageHeader, Skeleton, StatusChip, Tag, act, fmtAgo, toast } from '../components';
-import { Check, Inbox, ShieldQuestion, X } from 'lucide-react';
+import { Check, Inbox, ShieldQuestion, UserCheck, X } from 'lucide-react';
+import { HumanReview } from '../humanReview';
 
 // Approval inbox (spec §9, 6.5): batch approve/reject, decisions recorded
 // with a reason (required to reject, fed back to the agent); every request
@@ -95,7 +96,9 @@ export default function Approvals() {
                     const risk = a.payload?.risk;
                     return (
                       <div key={a.id} className={`flex items-center gap-3 px-4 py-3 transition-colors ${sel.has(a.id) ? 'bg-accent/[0.04]' : 'hover:bg-raised/60'}`}>
-                        <input type="checkbox" aria-label={`Select ${a.action}`} checked={sel.has(a.id)} onChange={() => toggle(a.id)} />
+                        {a.action === 'human.approval'
+                          ? <span className="w-[13px] shrink-0" title="Open it to review the app before deciding"><UserCheck size={13} className="text-fg-3" /></span>
+                          : <input type="checkbox" aria-label={`Select ${a.action}`} checked={sel.has(a.id)} onChange={() => toggle(a.id)} />}
                         <button className="flex items-center gap-3 flex-1 min-w-0 text-left" onClick={() => setDetail(a)}>
                           <Avatar agent={ag ?? { name: a.requested_by }} size="sm" />
                           <div className="flex-1 min-w-0">
@@ -144,23 +147,23 @@ export default function Approvals() {
         const ag = detail ? agentOf(detail.requested_by) : null;
         return (
           <Drawer onClose={close}
-            title={detail ? <><ShieldQuestion size={16} className="text-warn" /><span className="mono text-fg text-sm truncate">{detail.action}</span><BlastRadius p={detail.payload} /></> : <span className="text-sm font-medium text-fg">Reject {ids.length} requests</span>}
+            title={detail ? <><ShieldQuestion size={16} className="text-warn" /><span className="mono text-fg text-sm truncate">{detail.action === 'human.approval' ? 'Human approval' : detail.action}</span><BlastRadius p={detail.payload} /></> : <span className="text-sm font-medium text-fg">Reject {ids.length} requests</span>}
             footer={
               <div className="space-y-3">
                 <div>
-                  <label className="field-label" htmlFor="reason">Reason {detail && <span className="text-fg-4 font-normal">— required to reject</span>}</label>
-                  <textarea id="reason" className={`input w-full h-20 ${reasonErr ? '!border-bad' : ''}`} placeholder="What should the agent do differently?" value={reason}
+                  <label className="field-label" htmlFor="reason">{detail?.action === 'human.approval' ? 'Your feedback' : 'Reason'} {detail && <span className="text-fg-4 font-normal">— {detail.action === 'human.approval' ? 'required to reject: say what needs to be fixed' : 'required to reject'}</span>}</label>
+                  <textarea id="reason" className={`input w-full h-20 ${reasonErr ? '!border-bad' : ''}`} placeholder={detail?.action === 'human.approval' ? 'What did you see? What should be different?' : 'What should the agent do differently?'} value={reason}
                     onChange={(e) => { setReason(e.target.value); setReasonErr(false); }} />
-                  {reasonErr && <div className="text-xs text-bad mt-1">Add a reason so the agent knows what to change.</div>}
+                  {reasonErr && <div className="text-xs text-bad mt-1">{detail?.action === 'human.approval' ? 'Describe what needs to be fixed — the agents work from your feedback.' : 'Add a reason so the agent knows what to change.'}</div>}
                 </div>
-                {detail && ag && (
+                {detail && ag && detail.action !== 'human.approval' && (
                   <label className="flex items-start gap-2 text-xs text-fg-3 cursor-pointer">
                     <input type="checkbox" className="mt-0.5" checked={always} onChange={(e) => setAlways(e.target.checked)} />
                     <span>Always allow <span className="mono text-fg-2">{detail.action}</span> for {ag.name}. Creates a policy rule; future requests skip the inbox.</span>
                   </label>
                 )}
                 <div className="flex justify-end gap-2">
-                  <button className="btn btn-danger" onClick={() => decide(ids, false)}><X size={13} /> Reject</button>
+                  <button className="btn btn-danger" onClick={() => decide(ids, false)}><X size={13} /> {detail?.action === 'human.approval' ? 'Reject with feedback' : 'Reject'}</button>
                   {detail && <button className="btn btn-accent" onClick={() => {
                     if (always && !confirm(`Create a policy rule so ${ag?.name} can always ${detail.action} without asking?`)) return;
                     decide(ids, true, always ? detail.requested_by : undefined);
@@ -168,7 +171,8 @@ export default function Approvals() {
                 </div>
               </div>
             }>
-            {detail && (
+            {detail && detail.action === 'human.approval' && <HumanReview approval={detail} onChanged={reload} />}
+            {detail && detail.action !== 'human.approval' && (
               <div className="space-y-5">
                 <div>
                   <div className="text-[15px] text-fg leading-snug">{detail.payload?.summary}</div>
