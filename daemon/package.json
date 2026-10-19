@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/*.test.js",
-    "bench": "node --no-warnings scripts/bench.mjs"
+    "bench": "node --no-warnings scripts/bench.mjs",
+    "demo:workflow": "node --no-warnings scripts/demo-workflow.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",

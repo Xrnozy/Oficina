@@ -2591,6 +2591,7 @@ type WfState = {
   draft?: { text: string; approved: boolean; revision: number };
   lastOutcome?: WfOutcome;
   steps?: number;                      // agent dispatches this task has taken (guardrail counter)
+  nodeAttempts?: Record<string, number>; // per-node dispatch count — re-entry is a retry of that step
   guardOk?: string[];                  // guardrails the owner let pass for this task
 };
 
@@ -2845,14 +2846,20 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
     const body = s2.draft.text.includes('OUTPUT CONTRACT') ? s2.draft.text : `## Brief (approved)\n${s2.draft.text.trim()}\n\n${prompt.text}`;
     promptText = finalizeApprovedPrompt(body, kind, candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)), budget).text;
   }
+  // per-node attempt counting: re-entering a node that already delivered is
+  // a retry of that step (attempt 2, 3…), which attempt-based behaviour —
+  // scripted fail-once, retry policies — depends on. NULL the cache key too:
+  // the identical prompt must not replay the old verdict or loops can't
+  // make progress.
+  const reEntry = s2.fired.includes(node.id);
+  s2.nodeAttempts = { ...(s2.nodeAttempts ?? {}), [node.id]: (s2.nodeAttempts?.[node.id] ?? 0) + 1 };
+  const nodeAttempt = s2.nodeAttempts[node.id];
   const wi = createWorkItemRecord(r.id, task, kind, candidate, promptText, packHash);
+  if (wi.attempt !== nodeAttempt) { run('UPDATE work_items SET attempt = ? WHERE id = ?', nodeAttempt, wi.id); wi.attempt = nodeAttempt; }
   run('UPDATE work_items SET workflow_node_id = ?, workflow_edge_id = ? WHERE id = ?', node.id, viaEdge?.id ?? null, wi.id);
   wi.workflowNodeId = node.id;
   wi.workflowEdgeId = viaEdge?.id ?? null;
-  // re-entering a node that already delivered means a retry — the result
-  // cache would replay the identical verdict and the loop could never make
-  // progress, so the re-dispatch must really run
-  if (s2.fired.includes(node.id)) { run('UPDATE work_items SET cache_key = NULL WHERE id = ?', wi.id); wi.cacheKey = null; }
+  if (reEntry) { run('UPDATE work_items SET cache_key = NULL WHERE id = ?', wi.id); wi.cacheKey = null; }
   // an analyse step right after a check failure inherits the failing run —
   // its delivery files the analyst-informed report like the fixed pipeline
   if (kind === 'analyse' && s2.lastOutcome?.checkRunId) {

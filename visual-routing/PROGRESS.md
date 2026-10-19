@@ -77,3 +77,36 @@ Order: 1 → 2 → 3 → 3b → 4 → 5. Baseline before Phase 1: `npm run typec
 - **UI:** Templates picker on New; Guardrails fields (4 ceilings, blank=off) + worst-case estimate in the no-selection inspector; Dry-run button (all graphs incl. read-only) → outcome pickers per agent node → step list + taken-edge canvas highlight; version modal audit feed; Agents page unassign warning. Simulation decorations are separate from live-run ones — both can show.
 - **Tests `daemon/tests/workflow-safety.test.js` (10):** all templates validate; estimate counts loop bodies (2 agents + 2 passes × 2 = 6); sim happy-path/loop-script/loop-bound-dead-end/condition-vs-taskType-else/parallel-merge/step-cap; refs find pinned agents + role nodes in the effective graph; audit chain continuity + change summary; end-to-end `maxStepsPerTask=1` → one step dispatches, second pauses on `workflow.guardrail`, task `waiting-input`, approve → run completes `done`.
 - Results: 10/10 new pass; `npm run typecheck -w daemon` clean; `npm test -w daemon` **117/117**; `npm run build -w ui` clean.
+
+## Phase 5 — Tests, docs, final audit — DONE
+
+### Verification record
+
+- `npm run typecheck -w daemon` — clean. `npm test -w daemon` — **117/117**. `npm run build -w ui` — clean (existing >500 kB chunk warning only).
+- **E2E (a) default workflow** — `node scripts/bench.mjs`: `done` in 18s, 23 work items `[plan, prompt×6, prompt-review×6, implement×2, fix×2, analyse, qa×2, review, accept×2]`, all 6 DoD items pass — the fixed pipeline is byte-for-byte what it was.
+- **E2E (b) custom workflow** — `node scripts/demo-workflow.mjs` (new; `npm run demo:workflow`): validates clean (estimate 7–16 calls), dry-run simulates the failure loop without a model, then a real run reaches **`done` in ~13s**. Feature task: `pm-plan(run) → triage → kind → else → dev(checks fail) → e7 diagnose-loop → triage → dev → m1 message → qa → rev → accept → end`. Docs task: `triage → kind → e3 condition (task.type=docs) → doc → rev → accept → end`. Observed live: `workflow.parked` writer serialization, `workflow.message` ×2, a transient `workflow.deadend` (analyst busy) auto-approved → retried, `workflow.enter/branch/step` stamped per task, 2 real commits.
+- **DoD still guards custom graphs:** the first demo cut let the docs task merge unreviewed — `review:all-merged-approved` correctly failed it and paused the run for the owner. Routing `doc → rev` fixed the *graph*, not the check.
+- **A real retry-semantics bug the demo caught (fixed):** graph node re-entry never bumped attempts, so attempt-based behaviour (scripted `failFirst`, retry policies) saw every re-dispatch as attempt 1 — a check-failure loop could never succeed. `WfState.nodeAttempts[nodeId]` now counts per-node dispatches; the work item's `attempt` is stamped from it (first visit = 1 like before, re-entry = 2,3…). Regression assertion added to the exec loop test (`attempt [1,2]` on the retried node).
+
+### What works
+
+- Per-workspace versioned workflow graphs: full CRUD, immutable versions, activate/deactivate, builtin read-only+clone, run pins its version; no custom graph → the fixed pipeline runs unchanged (compat test).
+- The engine executes graphs: run-scope plan node, per-task entry walk, fan-out, merge `all`/`any`, deterministic conditions + exactly-one-else, bounded `on-failure`/`on-reject` cycles, message edges (fire-and-forget or `waitForReply`), writer serialization across sibling branches, `end` → task approved → merge/commit untouched.
+- Full editor on `/workflow`: ReactFlow canvas, role-grouped palette, drop/insert-between in three ways, edge/condition builders, node inspector (incl. per-node skills with budget meter), validation badges that block save/activate, undo/redo, copy/paste, autosave, import/export, versions, clone, live run overlay.
+- Safety: six templates, no-model dry-run with path highlight, worst-case estimates, step/cost/time guardrails pausing on Needs-you, workflow-reference warnings on agent/membership edits, hash-chained audit feed.
+- Recovery & limits: every gate (human, exhausted loop, dead end, no eligible agent, guardrail) is a Needs-you item with resume on decide; per-node retry attempts; re-entry bypasses the result cache; task-scoped cache prevents cross-task verdict replay.
+
+### Incomplete / known risks
+
+- `merge`-`any` + message `waitForReply` + multi-task fan-out are covered by unit tests but only lightly exercised e2e; very large graphs (>50 nodes) are unverified in the UI (memoized, but untested live).
+- The dead-end gate fires for a *transiently busy* agent as readily as a missing one — bounded recovery handles it, but a "busy, retrying" state would be quieter.
+- Condition eval is deterministic by design; owners wanting "branch on what the agent wrote" must expose it via `output.*`/`files` fields.
+- Guardrail `costCeilingUsd`/`timeCeilingMin` enforce on dispatch boundaries — a single long-running item can exceed the ceiling before the next check.
+- `workflow.guardrail` decisions are per-task-per-ceiling; a 30-task run hitting the same ceiling asks 30 times (deliberate: each grant is scoped).
+- The demo/bench run on scripted agents — real-provider latency, failover and token costs under graphs are unmeasured.
+
+### Three highest-value next steps
+
+1. **Per-agent busy/queued visibility on the canvas** — show in-flight work and parked nodes live (events exist; they just aren't decorated), so loops and writer-serialization are obvious without reading the event log.
+2. **Dry-run → promote loop** — let a dry run write its chosen path as the expected path, then diff it against the actual run (`workflow.step` sequence) — cheap regression for graph edits before activation.
+3. **Guardrail budget preview** — apply the worst-case estimate to the planned run up front ("this graph could take ~N calls per task — set a run ceiling?") instead of only pausing mid-run.

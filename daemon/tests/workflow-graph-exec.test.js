@@ -169,6 +169,11 @@ test('on-failure loop re-runs the writer until QA passes', { timeout: 180000 }, 
     const qas = items(r.id).filter((x) => x.kind === 'qa').length;
     assert.equal(impls, 2, 'qa failure should re-dispatch the developer');
     assert.equal(qas, 2);
+    // re-entering a node is a retry of that step — attempt must increment
+    // per node so attempt-based behaviour (fail-once scripts, retry
+    // policies) sees the retry
+    const attempts = q(`SELECT workflow_node_id n, attempt a FROM work_items WHERE run_id = ? AND kind = 'implement' ORDER BY rowid`, r.id).map((x) => [x.n, x.a]);
+    assert.deepEqual(attempts, [['dev', 1], ['dev', 2]]);
     const branch = q1(`SELECT payload FROM events WHERE run_id = ? AND type = 'workflow.branch' AND json_extract(payload,'$.from') = 'qa'`, r.id);
     assert.ok(branch && JSON.parse(branch.payload).edges.includes('e3'), 'the on-failure edge must be taken');
   } finally {

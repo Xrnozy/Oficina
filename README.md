@@ -61,6 +61,30 @@ Check failures (build/tests) also become a correction prompt. The approved promp
 
 **Prompt preparation** (Routing → Workflow): `pipeline` (default, as above; the PM drafts itself if there is no Prompt Creator), `handoffs` (PM writes only the task prompt; rework and check failures go straight to the developer — fewest calls), `all`, `off`.
 
+## Visual workflow
+
+The **Workflow** page draws the pipeline above as an editable graph — and lets you replace it. The built-in graph is a read-only mirror of the fixed pipeline; **Clone** makes your own copy, and **Set active** routes every new task in the workspace through it. Runs pin the workflow version they started on, so editing a graph never changes a run in flight. With no custom workflow active, nothing about the flow above changes (a suite test asserts the identical work-item sequence).
+
+**Concepts.** The canvas holds *nodes* connected by *edges*; the engine walks the graph per task instead of following the fixed sequence. Saving creates an immutable version; activation points the workspace at the latest one. Each node can carry extra instructions, a model tier, a budget and per-node **skill attachments** (they take budget priority over the agent's and role's skills, and are frozen into the version they were saved with).
+
+| Node | Purpose |
+|---|---|
+| `start` / `end` | entry and finish; every reachable path must reach an end |
+| `agent` | a desk: role (or a pinned agent), purpose (plan/implement/qa/review/accept/analyse/doc/custom), scope (`run` — once per run — or `task`), instructions, budget, timeout, writable vs read-only, skill refs |
+| `condition` | deterministic branch on outcome/task fields — no model call |
+| `merge` | join parallel branches (`all` or `any` of its in-edges) |
+| `human` | pause for an owner decision, then continue |
+
+Edges: `next` (positive outcomes), `on-success`, `on-failure`, `on-reject` (the only kinds allowed to close a cycle — they carry a `maxLoops` bound, default 3, after which you decide), `message` (a structured note to the target node's agent — no model call; optionally `waitForReply`). Condition-node edges get a condition builder with a plain-language preview and exactly one `else` edge.
+
+**Editing.** Drag agents (grouped by role) or Condition/Merge/Human/End from the palette onto the canvas. To insert an agent between two nodes, drop it onto the edge between them (or drag an existing node onto an edge, or click the edge's hover "+") — the edge splits and the first half keeps its kind and condition. Deleting a mid-chain node re-links its neighbours. Undo/redo, copy/paste, autosaved drafts, JSON import/export, version history with restore-as-draft. Validation badges mark the offending nodes; you can't save or activate a graph with errors.
+
+**Safety.** The inspector shows a worst-case estimate (agent calls incl. loop bodies, human gates, skill chars) and **guardrails** — step, cost and time ceilings that pause dispatching on a *Needs you* item when hit. **Dry run** simulates the draft with mocked per-node outcomes — no model, no tokens — and highlights the taken path on the canvas. Templates (default, fast, strict, docs, bug-fix, parallel-review) give you a working starting point. Firing, editing or moving an agent that a graph references warns which workflow nodes are affected, and every edit lands in the hash-chained audit log on the version's page.
+
+**While it runs.** Pick a run and the canvas lights up: rings show each node's step state and taken edges stay highlighted (from `workflow.step`/`branch` events, live over WebSocket or replayed for finished runs). Tasks record which node and edge produced each work item; a task stalled at a gate — human, exhausted loop, dead end, guardrail — appears under *Needs you* and resumes on your decision.
+
+**Limits.** One active workflow per workspace; a run pins its starting version; conditions are deterministic (fields/operators, no free-form code); a `message` edge delivers to the target's next prompt rather than interrupting it; the run-scope `plan` node still runs through the engine's planning cadence, so re-planning on DoD review is unchanged.
+
 ## Working in your repository (direct mode)
 
 By default (**Routing → Where agents work → direct**) agents work inside the repository you selected, on the branch you have checked out, like a coding CLI — no copies of the project. `isolated` keeps the older worktree-per-task flow.
@@ -115,8 +139,8 @@ Synced models get a tier from their name (haiku/mini/flash/lite → fast, opus/m
 
 ## Layout
 
-- `daemon/` — TypeScript daemon: SQLite state (`node:sqlite`, WAL), hash-chained event log, workflow engine (`src/engine/`), provider adapters (`src/adapters/` — scripted, openai-compatible, anthropic, cli, devin, manual), Git worktree manager, verification service, error-report KB, router (quota/circuit/SoD), approvals, usage accounting, REST + WebSocket API (`src/api/server.ts`).
-- `ui/` — React + Vite + Tailwind, styled after `spec/DESIGN-figma.md` (monochrome editorial frame, pastel color-block surfaces): Dashboard, Office (drag agents between role slots with permission-diff preview), Live Activity, Timeline & replay, Tasks kanban, DoD editor, Error Reports, Approvals, Agents, Skills, Providers.
+- `daemon/` — TypeScript daemon: SQLite state (`node:sqlite`, WAL), hash-chained event log, workflow engine (`src/engine/` — fixed pipeline + the graph executor), workflow graph service (`src/services/workflow.ts` — validation, versioning, templates, estimates, audit), provider adapters (`src/adapters/` — scripted, openai-compatible, anthropic, cli, devin, manual), Git worktree manager, verification service, error-report KB, router (quota/circuit/SoD), approvals, usage accounting, REST + WebSocket API (`src/api/server.ts`). E2E demos: `npm run bench` (default pipeline), `node scripts/demo-workflow.mjs` (custom graph).
+- `ui/` — React + Vite + Tailwind, styled after `spec/DESIGN-figma.md` (monochrome editorial frame, pastel color-block surfaces): Dashboard, Office (drag agents between role slots with permission-diff preview), Workflow (ReactFlow graph editor with live run overlay), Live Activity, Timeline & replay, Tasks kanban, DoD editor, Error Reports, Approvals, Agents, Skills, Providers.
 - `demo-repo/` — seeded git repository the demo run works on.
 - `.office/` — runtime data (SQLite db, blobs).
 
