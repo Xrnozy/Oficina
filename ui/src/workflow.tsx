@@ -169,11 +169,14 @@ export function insertOnEdge(g: WfGraph, edgeId: string, node: WfNode): WfGraph 
 // Delete a node; when it sat mid-chain (one flow edge in, one out) splice the
 // neighbours together so dragging a node out re-links the pipeline.
 export function spliceOut(g: WfGraph, nodeId: string): WfGraph {
-  const flowIn = g.edges.find((e) => e.to === nodeId && e.kind !== 'message');
-  const flowOut = g.edges.find((e) => e.from === nodeId && e.kind !== 'message');
+  const ins = g.edges.filter((e) => e.to === nodeId && e.kind !== 'message');
+  const outs = g.edges.filter((e) => e.from === nodeId && e.kind !== 'message');
   const others = g.edges.filter((e) => e.from !== nodeId && e.to !== nodeId);
-  const bridged = flowIn && flowOut
-    ? [...others, { id: uid('e'), from: flowIn.from, to: flowOut.to, kind: flowIn.kind, condition: flowIn.condition, else: flowIn.else, label: flowIn.label }]
+  // only a simple chain node (one in, one out) gets a bridge — for a node
+  // with several in/out edges any re-link is a guess, so neighbours are
+  // left disconnected for the owner (and validation) to see
+  const bridged = ins.length === 1 && outs.length === 1
+    ? [...others, { id: uid('e'), from: ins[0].from, to: outs[0].to, kind: ins[0].kind, condition: ins[0].condition, else: ins[0].else, label: ins[0].label }]
     : others;
   return { nodes: g.nodes.filter((n) => n.id !== nodeId), edges: bridged };
 }

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import ReactFlow, {
-  Background, BackgroundVariant, BaseEdge, Connection, ConnectionMode, Controls, Edge,
+  applyNodeChanges, Background, BackgroundVariant, BaseEdge, Connection, ConnectionMode, Controls, Edge,
   EdgeLabelRenderer, EdgeProps, Handle, MarkerType, MiniMap, Node, NodeProps, Panel,
   Position, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
 } from 'reactflow';
@@ -745,8 +745,15 @@ function WorkflowEditor() {
   const mutate = useCallback((f: (g: WfGraph) => WfGraph) => { pushHistory(); applyGraph(f(currentGraph())); }, [pushHistory, applyGraph, currentGraph]);
 
   // ---- load workflow detail into canvas ----
+  // detail refetches on every ws tick — re-applying the same graph would
+  // wipe selection and in-progress layout, so only re-apply when the
+  // graph content actually changed
+  const loadedGraph = useRef<string>('');
   useEffect(() => {
     if (!detail) return;
+    const json = JSON.stringify(detail.graph ?? emptyGraph());
+    if (json === loadedGraph.current) return;
+    loadedGraph.current = json;
     past.current = []; future.current = [];
     const draftKey = `wf-draft:${detail.workflow.id}`;
     const draft = !builtin ? localStorage.getItem(draftKey) : null;
@@ -767,11 +774,17 @@ function WorkflowEditor() {
   useEffect(() => {
     const wanted = searchParams.get('node');
     if (!wanted || !detail || !wflist) return;
-    if (nodes.some((n) => n.id === wanted)) { setSelNodes([wanted]); setSelEdges([]); setSearchParams({}, { replace: true }); return; }
+    if (!nodes.length) return;   // canvas still loading — wait for the next render
+    // apply a real select change — ReactFlow owns the selected flag, so a
+    // bare setSelNodes would be cleared by the next onSelectionChange
+    if (nodes.some((n) => n.id === wanted)) {
+      setNodes((ns) => applyNodeChanges([{ id: wanted, type: 'select', selected: true }], ns));
+      setSearchParams({}, { replace: true }); return;
+    }
     const activeWf = wflist.find((w) => w.active);
-    if (activeWf && activeWf.id !== wfId) setWfId(activeWf.id);
+    if (activeWf && activeWf.id !== wfId) setWfId(activeWf.id);   // keep the param — retry once it loads
     else setSearchParams({}, { replace: true });
-  }, [searchParams, detail, nodes, wflist, wfId, setSearchParams]);
+  }, [searchParams, detail, nodes, wflist, wfId, setSearchParams, setNodes]);
 
   // ---- live validation (debounced) ----
   useEffect(() => {
@@ -958,10 +971,19 @@ function WorkflowEditor() {
   const dragSnapshot = useRef<string | null>(null);
   const onNodeDragStart = useCallback(() => { dragSnapshot.current = snapshot(); }, [snapshot]);
   const onNodeDragStop = useCallback((_e: React.MouseEvent, node: Node<RfData>) => {
-    if (readOnly) return;
+    if (readOnly) { dragSnapshot.current = null; return; }
+    // a click reports as a drag with no real movement — without this guard a
+    // click near an edge splices the node out of the graph by accident
+    const before = dragSnapshot.current ? (JSON.parse(dragSnapshot.current) as { n: Node<RfData>[] }) : null;
+    const prev = before?.n.find((n) => n.id === node.id)?.position;
+    if (prev && Math.abs(prev.x - node.position.x) < 6 && Math.abs(prev.y - node.position.y) < 6) { dragSnapshot.current = null; return; }
     const g = currentGraph();
     const near = nearestEdge(g, { x: node.position.x + 88, y: node.position.y + 30 }, 70, node.id);
-    if (near) {
+    // splicing is only unambiguous on a chain node — a node with several
+    // in/out edges gets a plain move instead of losing its other links
+    const multiDegree = g.edges.filter((e) => e.to === node.id && e.kind !== 'message').length > 1
+      || g.edges.filter((e) => e.from === node.id && e.kind !== 'message').length > 1;
+    if (near && !multiDegree) {
       mutate((g2) => {
         const wn = g2.nodes.find((n) => n.id === node.id);
         return wn ? insertOnEdge(spliceOut(g2, node.id), near.id, { ...wn, position: node.position }) : g2;
