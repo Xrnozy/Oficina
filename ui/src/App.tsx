@@ -17,6 +17,7 @@ import Providers from './pages/Providers';
 import Team from './pages/Team';
 import Project from './pages/Project';
 import Routing from './pages/Routing';
+import Workflow from './pages/Workflow';
 import { Checkpoints, RepoTimeline } from './pages/History';
 import { Compass } from 'lucide-react';
 
@@ -48,6 +49,7 @@ export default function App() {
               <Route path="/skills" element={<Skills />} />
               <Route path="/providers" element={<Providers />} />
               <Route path="/routing" element={<Routing />} />
+              <Route path="/workflow" element={<Workflow />} />
               <Route path="/checkpoints" element={<Checkpoints />} />
               <Route path="/repo-timeline" element={<RepoTimeline />} />
               <Route path="*" element={

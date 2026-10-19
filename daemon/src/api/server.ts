@@ -387,12 +387,13 @@ export function createServer(port: number, uiDir: string): http.Server {
   });
   app.post('/api/workflows/validate', (req, res) => {
     const issues = validateWorkflow(req.body?.graph, req.body?.workspaceId);
-    ok(res, validationSummary(issues));
+    ok(res, { ...validationSummary(issues), issues });
   });
   app.get('/api/workflows/:id', (req, res) => {
     const w = getWorkflow(req.params.id);
     if (!w) return err(res, 404, 'not found');
-    ok(res, { ...w, issues: w.graph ? validationSummary(validateWorkflow(w.graph, w.workflow.workspaceId)) : null });
+    const issues = w.graph ? validateWorkflow(w.graph, w.workflow.workspaceId) : [];
+    ok(res, { ...w, issues: { ...validationSummary(issues), issues } });
   });
   app.get('/api/workflows/:id/versions/:n', (req, res) => {
     const v = q1('SELECT * FROM workflow_versions WHERE workflow_id = ? AND n = ?', req.params.id, Number(req.params.n));

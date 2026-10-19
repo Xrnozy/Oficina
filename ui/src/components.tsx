@@ -3,7 +3,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { post, useQuery, useWsConnected } from './api';
 import {
   Activity, Bookmark, Building2, ChevronRight, GitCommitHorizontal, Clock, Command, Cpu, FileText, Inbox, LayoutDashboard, MessagesSquare,
-  Library, ListChecks, Menu, Moon, Pause, Play, Plug, Route, Search, Square, Sun, TriangleAlert, X,
+  Library, ListChecks, Menu, Moon, Pause, Play, Plug, Route, Search, Square, Sun, TriangleAlert, Workflow, X,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -302,6 +302,7 @@ const NAV: { group: string; items: { to: string; label: string; icon: LucideIcon
   ] },
   { group: 'Setup', items: [
     { to: '/routing', label: 'Routing', icon: Route },
+    { to: '/workflow', label: 'Workflow', icon: Workflow },
     { to: '/providers', label: 'Providers', icon: Plug },
     { to: '/office', label: 'Roles', icon: Building2 },
     { to: '/agents', label: 'Agents', icon: Cpu },
