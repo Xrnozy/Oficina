@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { get, post, put, useQuery } from '../api';
 import { useProviderCatalog } from './Providers';
 import { TierPicker } from '../tier';
+import { AgentFiles } from '../attachments';
 import { DEFAULT_SESSION, SessionSettings, SessionsPanel, useCliSessions, type CliSessionSettings } from '../cliSessions';
 import { Avatar, Drawer, Empty, KV, Modal, ObsBadge, PageHeader, Segmented, Skeleton, StatusChip, Tag, act, fmtUsd, roleLabel, toast } from '../components';
 import { ArrowDown, ArrowUp, Cpu, Plus, Send, SlidersHorizontal, UserMinus, UserPlus, X } from 'lucide-react';
@@ -69,6 +70,7 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
   const prov = provOf(accountId);
   const sup = prov?.settingsSupport ?? {};
   const isCli = prov?.adapter_id === 'cli';
+  const { office: refOffice } = useOffice();
   const cliBackend = sessData?.backends.find((b) => b.accountId === accountId);
   const off = (k: string) => sup[k] === 'no';
   // models the backend itself says it offers (live, not a hardcoded list)
@@ -158,6 +160,14 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
           <TierPicker value={tier} onChange={setTier}
             note="Forces the tier for everything this agent does, in any workflow, including the default pipeline. A workflow step that sets its own tier still wins." />
         </section>
+
+        {refOffice && (
+          <section className="space-y-3">
+            <h3 className="eyebrow">Reference files</h3>
+            <p className="text-xs text-fg-3">Files only {agent.name} is told about, on top of the office-wide references. Listed in its prompts; opened only when relevant.</p>
+            <AgentFiles agentId={agent.id} workspaceId={refOffice.id} />
+          </section>
+        )}
 
         {isCli && <SessionSettings value={cliSession} onChange={setCliSession} backend={cliBackend} accountId={accountId} data={sessData} />}
 

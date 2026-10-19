@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, updateSession } from '../services/cli-sessions.ts';
 import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
+import { addAttachment, fileOf, getAttachment, listAttachments, removeAttachment, replaceAttachment, MAX_FILE_BYTES } from '../services/attachments.ts';
 import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'node:http';
@@ -14,7 +15,7 @@ import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
 import {
-  approveDod, assignSweep, createRun, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
+  approveDod, assignSweep, createRun, createUserTask, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
   pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
@@ -592,20 +593,63 @@ export function createServer(port: number, uiDir: string): http.Server {
   // ---------- commands ----------
   app.post('/api/runs', (req, res) => {
     try {
-      const { workspaceId, goal, budgetUsd, repoId, oneShot, limits, workflowId } = req.body ?? {};
+      const { workspaceId, goal, budgetUsd, repoId, oneShot, limits, workflowId, attachmentIds } = req.body ?? {};
       if (!workspaceId || !goal) return err(res, 400, 'workspaceId and goal required');
       const cleanLimits: Record<string, number> = {};
       for (const k of ['maxParallel', 'maxReadOnly', 'maxCycles', 'maxWallclockMin', 'sameErrorAttempts', 'noProgressCycles', 'maxTaskMinutes']) {
         const v = (limits as Record<string, unknown> | undefined)?.[k];
         if (v != null) { const n = Number(v); if (!Number.isFinite(n) || n < 0) return err(res, 400, `limits.${k} must be a non-negative number`); cleanLimits[k] = n; }
       }
-      const created = createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined });
+      const created = createRun({ workspaceId, goal, budgetUsd, repoId, oneShot: !!oneShot, limits: cleanLimits, workflowId: workflowId ? String(workflowId) : undefined, attachmentIds: Array.isArray(attachmentIds) ? attachmentIds.map(String).slice(0, 50) : undefined });
       if (req.body?.queueId) markStarted(String(req.body.queueId), created.id);
       ok(res, created);
     } catch (e) {
       if (/workflow not found/.test(String(e))) return err(res, 400, 'workflow not found or has no saved version');
       err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`);
     }
+  });
+
+  // ---------- reference files and task attachments ----------
+  app.get('/api/attachments', (req, res) => {
+    const s = (k: string) => (req.query[k] ? String(req.query[k]) : null);
+    ok(res, listAttachments({ workspaceId: s('workspaceId'), scope: s('scope'), agentId: s('agentId'), taskId: s('taskId'), runId: s('runId') }));
+  });
+  // the body is the file's bytes; everything else is in the query string, so nothing is base64-inflated
+  app.post('/api/attachments', express.raw({ type: () => true, limit: MAX_FILE_BYTES + 1024 }), (req, res) => {
+    const qs = req.query as Record<string, string | undefined>;
+    if (!qs.workspaceId) return err(res, 400, 'workspaceId required');
+    const r = addAttachment({
+      workspaceId: qs.workspaceId, scope: (qs.scope ?? 'project') as never, name: qs.name, data: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
+      agentId: qs.agentId, taskId: qs.taskId, runId: qs.runId,
+    });
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r);
+  });
+  app.put('/api/attachments/:id', express.raw({ type: () => true, limit: MAX_FILE_BYTES + 1024 }), (req, res) => {
+    const r = replaceAttachment(req.params.id, Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0));
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r);
+  });
+  app.get('/api/attachments/:id/file', (req, res) => {
+    const a = getAttachment(req.params.id);
+    const f = a ? fileOf(a) : '';
+    if (!a || !fs.existsSync(f)) return err(res, 404, 'file not found');
+    // stored files are the owner's, but they can be anything: never let the browser run one as a page
+    res.setHeader('Content-Type', a.kind === 'image' || a.kind === 'document' ? a.mime : 'text/plain; charset=utf-8');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="${a.name.replace(/["\r\n]/g, '')}"`);
+    res.sendFile(f);
+  });
+  app.delete('/api/attachments/:id', (req, res) => {
+    const r = removeAttachment(req.params.id);
+    if ('error' in r) return err(res, r.status, r.error);
+    ok(res, r);
+  });
+  app.post('/api/runs/:id/tasks', (req, res) => {
+    const t = createUserTask(req.params.id, { title: req.body?.title, description: req.body?.description, priority: req.body?.priority, difficulty: req.body?.difficulty });
+    if ('error' in t) return err(res, /not found/.test(t.error) ? 404 : 409, t.error);
+    ok(res, t);
   });
 
   app.post('/api/runs/:id/workflow', (req, res) => {

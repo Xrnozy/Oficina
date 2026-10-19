@@ -4,6 +4,8 @@ import { post, put, useQuery } from '../api';
 import { Empty, KV, Meter, Muted, PageHeader, Panel, Segmented, SevChip, Skeleton, StatusChip, Tag, act, fmtAgo, fmtTime, fmtUsd } from '../components';
 import { ChevronRight, FileQuestion, GitBranch, GitMerge, Pencil } from 'lucide-react';
 import { TaskChanges, TaskRecord } from './TaskRecord';
+import { TaskFiles } from '../attachments';
+import { useOffice, useOfficeAgents } from '../office';
 
 const PROMPT_TONE: Record<string, 'ok' | 'warn' | 'bad' | 'info'> = { drafting: 'info', revising: 'warn', 'pm-review': 'warn', approved: 'ok', escalated: 'bad' };
 const KIND_LABEL: Record<string, string> = { prompt: 'prompt draft', 'prompt-review': 'PM prompt review' };
@@ -14,6 +16,8 @@ export default function TaskDetail() {
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState<{ title?: string; priority?: number; description?: string }>({});
   const [mode, setMode] = useState<'finish' | 'abort' | 'handoff'>('finish');
+  const { office } = useOffice();
+  const { agents } = useOfficeAgents();
 
   if (loading) return <Skeleton rows={5} />;
   if (!t) return <Empty icon={FileQuestion} title="Task not found" text={error ?? 'This task does not exist.'}><Link to="/tasks" className="btn">Back to tasks</Link></Empty>;
@@ -58,6 +62,12 @@ export default function TaskDetail() {
               </ul>
             </>)}
           </Panel>
+
+          {office && (
+            <Panel title="Files" action={<span className="text-2xs text-fg-4 hidden sm:inline">only agents on this task see them</span>}>
+              <TaskFiles taskId={t.id} workspaceId={office.id} readOnly={['done', 'cancelled'].includes(t.status)} />
+            </Panel>
+          )}
         </div>
 
         <div className="space-y-5 min-w-0 lg:col-span-2">
@@ -95,6 +105,8 @@ export default function TaskDetail() {
         <div className="space-y-5 min-w-0">
           <Panel title="Details">
             <dl className="divide-line">
+              <KV k="Handled by">{t.ownerAgentId ? <span>{(agents ?? []).find((a: any) => a.id === t.ownerAgentId)?.name ?? t.ownerAgentId}</span> : <span className="text-fg-4">{t.meta?.createdBy === 'owner' ? 'waiting for a free agent' : 'not assigned yet'}</span>}</KV>
+              {t.meta?.createdBy === 'owner' && <KV k="Added by"><span>you</span></KV>}
               <KV k="Branch"><span className="mono flex items-center gap-1.5 min-w-0 break-all"><GitBranch size={12} className="text-fg-4 shrink-0" />{t.branch ?? '—'}</span></KV>
               <KV k="Result"><span className="flex items-center gap-1.5"><GitMerge size={12} className={t.status === 'done' ? 'text-ok' : 'text-fg-4'} />{t.meta?.committedSha ? `committed ${String(t.meta.committedSha).slice(0, 8)}` : t.meta?.generalCheckpointId ? (t.status === 'done' ? 'in the working tree (not committed)' : 'in progress') : t.status === 'done' ? 'merged to integration' : 'not merged'}</span></KV>
               <KV k="Budget"><div className="flex items-center gap-2 num"><Meter value={t.budgetUsd ? t.spentUsd / t.budgetUsd : 0} /><span className="text-xs whitespace-nowrap">{fmtUsd(t.spentUsd)} / {fmtUsd(t.budgetUsd)}</span></div></KV>

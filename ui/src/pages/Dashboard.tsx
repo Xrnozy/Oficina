@@ -8,7 +8,8 @@ import {
   Avatar, Meter, Muted, ObsBadge, PageHeader, Panel, ProgressBar, RunControls, Segmented, SevChip, Skeleton, Stat, StatusChip,
   Tag, act, fmtAgo, fmtIn, fmtNum, fmtUsd, pct, useCurrentRun,
 } from '../components';
-import { ArrowRight, CheckCircle2, Circle, ListPlus, Plus, Sparkles, X, XCircle, Zap } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Circle, ListPlus, Paperclip, Plus, Sparkles, X, XCircle, Zap } from 'lucide-react';
+import { DropZone, ReferencesPanel, fmtSize, precheck, uploadFiles, useFileDrop, type Attachment } from '../attachments';
 
 // Role colours match the Workflow canvas and the Routing flow.
 const ROLE_BAR: Record<string, string> = { pm: 'bg-lilac', 'prompt-creator': 'bg-cream', developer: 'bg-lime', qa: 'bg-mint', reviewer: 'bg-pink', analyst: 'bg-coral', docs: 'bg-cream' };
@@ -44,6 +45,8 @@ export default function Dashboard() {
       {run && <RunCard run={run} detail={detail} live={!!live} />}
 
       {office && <QueuePanel office={office} items={queue ?? []} reload={reloadQueue} onStart={(it) => { setPrefill({ goal: it.text, queueId: it.id }); setComposing(true); window.scrollTo?.({ top: 0 }); document.getElementById('main')?.scrollTo?.({ top: 0, behavior: 'smooth' }); }} />}
+
+      {office && <div id="references" className="scroll-mt-20"><ReferencesPanel workspaceId={office.id} runId={run && live ? run.id : null} officeName={office.name} /></div>}
 
       <DigestPanel />
 
@@ -266,23 +269,29 @@ function TokenReportPanel({ report }: { report: any }) {
 function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefill?: { goal: string; queueId: string } | null; onQueued?: () => void }) {
   const { office, offices } = useOffice();
   const { data: repos } = useQuery<any[]>('/repos');
+  const { data: refs } = useQuery<Attachment[]>(office ? `/attachments?workspaceId=${office.id}&scope=project` : null, [office?.id]);
   const [goal, setGoal] = useState(prefill?.goal ?? '');
   const [budget, setBudget] = useState('50');
   const [mode, setMode] = useState<'guided' | 'one-shot'>('guided');
   const [repoChoice, setRepoChoice] = useState('');
   const [repoPath, setRepoPath] = useState('');
   const [workflowId, setWorkflowId] = useState('');
+  const [files, setFiles] = useState<File[]>([]);
+  const [thisRunOnly, setThisRunOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
   const budgetNum = Number(budget);
   const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === office?.id);
   const custom = repoChoice === '__custom__' || (!repoChoice && wsRepos.length === 0);
+  const fileProblems = files.map(precheck).filter(Boolean) as string[];
   const invalid = !goal.trim() || !(budgetNum > 0) || !office
     || (custom ? !repoPath.trim() : !(repoChoice || wsRepos[0]?.id));
   const oneShot = mode === 'one-shot';
   const confirmPlan = !!office?.settings?.confirmPlan;
+  const existing = (refs ?? []).filter((r) => !r.runId).length;
+  const { over, props: drop } = useFileDrop((f) => setFiles((cur) => [...cur, ...f]));
   return (
-    <form className="pblock block-lilac animate-rise" onSubmit={async (e) => {
+    <form {...drop} className={`panel overflow-hidden animate-rise transition-shadow ${over ? 'ring-2 ring-fg/30' : ''}`} onSubmit={async (e) => {
       e.preventDefault();
       if (invalid) return;
       setBusy(true);
@@ -292,36 +301,102 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
         repoId = repo?.id;
         if (!repoId) { setBusy(false); return; }
       }
-      const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined, queueId: prefill?.queueId }),
+      // reference files first, so the PM's very first prompt already lists them
+      const sendable = files.filter((f) => !precheck(f));
+      const stored = sendable.length ? await uploadFiles(sendable, { workspaceId: office!.id, scope: 'project' }, { quiet: true }) : [];
+      const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined, queueId: prefill?.queueId,
+        attachmentIds: thisRunOnly ? stored.map((a) => a.id) : undefined }),
         oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
       setBusy(false);
-      if (r?.id) onCancel?.();
+      if (r?.id) { setFiles([]); onCancel?.(); }
       if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
     }}>
-      <div className="flex items-center gap-3 mb-1 flex-wrap">
-        <Sparkles size={15} className="text-fg" />
-        <h2 className="text-[15px] font-semibold">{oneShot ? 'Run it once' : 'New request'}{office && <span className="ml-2 text-xs font-normal text-fg-2">in {office.name}</span>}</h2>
-        <div className="ml-auto"><Segmented value={mode} options={['guided', 'one-shot'] as const} onChange={setMode} /></div>
+      <div className="flex items-center gap-3 px-5 py-3.5 border-b border-line flex-wrap">
+        <span className="w-7 h-7 rounded-lg bg-raised border border-line grid place-items-center"><Sparkles size={14} /></span>
+        <div className="min-w-0">
+          <h2 className="text-[15px] font-semibold leading-tight">New run{office && <span className="ml-2 text-xs font-normal text-fg-3">in {office.name}</span>}</h2>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <Segmented value={mode} options={['guided', 'one-shot'] as const} onChange={setMode} />
+          {onCancel && <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={onCancel} aria-label="Cancel"><X size={15} /></button>}
+        </div>
       </div>
-      <p className="text-sm text-fg-2 mb-5 max-w-[64ch]">
-        {oneShot
-          ? 'Say what you want in plain words — the PM interprets it, plans the work, and the Office executes a single pass. No approval gate, no fix loop; you get the result and a report.'
-          : `Send a feature request to the PM. It writes the requirements and the developer's prompt; the developer implements and documents the change; the tester reviews and validates it; the PM accepts it or sends it back — every hand-off automatic${confirmPlan ? ', after you confirm the plan' : ''}. See Routing for which models each step uses.`}
-      </p>
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_auto] gap-x-3 gap-y-4 items-end">
-        <label className="block">
-          <span className="field-label">What do you want?</span>
-          <textarea className="input w-full min-h-[3.25rem] resize-y" rows={2} autoFocus placeholder="e.g. Add a --toc flag to the markdown converter, with tests and docs" value={goal} onChange={(e) => setGoal(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit(); } }} />
-        </label>
-        <label className="block">
-          <span className="field-label whitespace-nowrap">Budget (USD)</span>
-          <input className="input w-full num" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} aria-invalid={!(budgetNum > 0)} />
-        </label>
-        <div className="flex gap-2">
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] [&>*]:min-w-0">
+        <div className="p-5 space-y-5">
+          <label className="block">
+            <span className="field-label">What do you want built or fixed?</span>
+            <textarea className="input w-full min-h-[7.5rem] resize-y text-[14px]" rows={5} autoFocus placeholder="e.g. Add a --toc flag to the markdown converter, with tests and docs" value={goal} onChange={(e) => setGoal(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement | null)?.requestSubmit(); } }} />
+            <span className="block text-2xs text-fg-4 mt-1.5">
+              {oneShot
+                ? 'One-shot: the PM plans and the office does a single pass — no approval gate, no fix loop.'
+                : `The PM writes the requirements and the developer's prompt, the work is implemented and tested, and the PM accepts it — every hand-off automatic${confirmPlan ? ', after you confirm the plan' : ''}.`}
+              {' '}<kbd className="mono">Ctrl</kbd>+<kbd className="mono">Enter</kbd> to send.
+            </span>
+          </label>
+
+          <div>
+            <div className="flex items-baseline gap-2 mb-1.5">
+              <span className="field-label !mb-0">Reference files</span>
+              <span className="text-2xs text-fg-4">optional — specs, design guidelines, coding standards (.md) or anything the agents should follow</span>
+            </div>
+            {files.length > 0 && (
+              <ul className="mb-2 grid sm:grid-cols-2 gap-1.5">
+                {files.map((f, i) => (
+                  <li key={`${f.name}-${i}`} className="flex items-center gap-2 text-sm rounded-lg border border-line bg-surface px-2.5 py-1.5 min-w-0">
+                    <Paperclip size={13} className="text-fg-3 shrink-0" /><span className="truncate flex-1" title={f.name}>{f.name}</span>
+                    <span className="text-2xs text-fg-4 shrink-0">{fmtSize(f.size)}</span>
+                    <button type="button" className="text-fg-4 hover:text-fg shrink-0" aria-label={`Remove ${f.name}`} onClick={() => setFiles(files.filter((_, j) => j !== i))}><X size={13} /></button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <DropZone compact onFiles={(f) => setFiles((cur) => [...cur, ...f])} label={files.length ? 'Add more files' : undefined} />
+            {fileProblems.map((p) => <div key={p} className="text-xs text-bad mt-1.5">{p} — it will be skipped.</div>)}
+            <div className="mt-2 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-fg-3">
+              {files.length > 0 && (
+                <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={thisRunOnly} onChange={(e) => setThisRunOnly(e.target.checked)} /> Use for this run only <span className="text-fg-4">(otherwise they stay as the office's references)</span></label>
+              )}
+              {existing > 0 && <span className="text-fg-4">{existing} office-wide reference{existing === 1 ? '' : 's'} already apply — <a href="#references" className="underline underline-offset-2 hover:text-fg" onClick={(e) => { e.preventDefault(); document.getElementById('references')?.scrollIntoView({ behavior: 'smooth' }); }}>manage</a></span>}
+            </div>
+          </div>
+        </div>
+
+        <aside className="p-5 space-y-4 bg-raised/40 border-t lg:border-t-0 lg:border-l border-line">
+          <label className="block">
+            <span className="field-label">Repository</span>
+            <Select className="input input-sm w-full font-mono" value={repoChoice || wsRepos[0]?.id || '__custom__'} onChange={(e) => setRepoChoice(e.target.value)}>
+              {wsRepos.map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
+              <option value="__custom__">A different folder on this machine…</option>
+            </Select>
+          </label>
+          {custom && (
+            <label className="block">
+              <span className="field-label">Folder path</span>
+              <input className="input input-sm w-full font-mono" placeholder="C:\path\to\repo" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} />
+              <span className="block text-2xs text-fg-4 mt-1">Git-init'd if it isn't a repo yet. Agents work in this folder directly, with checkpoints you can undo.</span>
+            </label>
+          )}
+          <label className="block">
+            <span className="field-label">Workflow</span>
+            <WorkflowSelect wsId={office?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
+          </label>
+          <label className="block">
+            <span className="field-label whitespace-nowrap">Budget (USD)</span>
+            <input className="input input-sm w-full num" inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} aria-invalid={!(budgetNum > 0)} />
+            {!(budgetNum > 0) && <span className="block text-2xs text-bad mt-1">Budget must be a positive number.</span>}
+          </label>
+        </aside>
+      </div>
+
+      <div className="flex items-center gap-2 px-5 py-3 border-t border-line bg-raised/40 flex-wrap">
+        {offices && !offices.length && <span className="text-xs text-bad">No workspace exists yet — run <span className="mono">npm run seed</span> first.</span>}
+        <div className="ml-auto flex gap-2">
           {onCancel && <button type="button" className="btn btn-ghost" onClick={onCancel}>Cancel</button>}
           {!prefill && (
-            <button type="button" className="btn" disabled={!goal.trim() || !office || busy} title="Keep it in this office's queue to start later"
+            <button type="button" className="btn" disabled={!goal.trim() || !office || busy || files.length > 0}
+              title={files.length ? 'Reference files can\'t wait in the queue — start the run, or add them under Reference files first' : "Keep it in this office's queue to start later"}
               onClick={async () => {
                 const r = await act(post('/queue', { text: goal, workspaceId: office!.id, source: 'app' }), 'Added to the queue');
                 if (r) { setGoal(''); onQueued?.(); }
@@ -330,28 +405,6 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
           <button className="btn btn-primary" disabled={invalid || busy}>{busy ? 'Starting…' : oneShot ? <><Zap size={13} /> Run once</> : <>{confirmPlan ? 'Draft plan' : 'Send to PM'} <ArrowRight size={14} /></>}</button>
         </div>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-4 items-start mt-4">
-        <label className="block">
-          <span className="field-label">Repository</span>
-          <Select className="input w-full font-mono" value={repoChoice || wsRepos[0]?.id || '__custom__'} onChange={(e) => setRepoChoice(e.target.value)}>
-            {wsRepos.map((r: any) => <option key={r.id} value={r.id}>{r.path}</option>)}
-            <option value="__custom__">A different folder on this machine…</option>
-          </Select>
-        </label>
-        <label className="block">
-          <span className="field-label">Workflow</span>
-          <WorkflowSelect wsId={office?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
-        </label>
-        {custom && (
-          <label className="block">
-            <span className="field-label">Folder path</span>
-            <input className="input w-full font-mono" placeholder="C:\path\to\repo" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} />
-          </label>
-        )}
-      </div>
-      {custom && <p className="text-xs text-fg-4 mt-2">Git-init'd if it isn't a repo yet. Task branches, worktrees, and the integration branch all live inside it.</p>}
-      {!(budgetNum > 0) && <div className="text-xs text-bad mt-2">Budget must be a positive number.</div>}
-      {offices && !offices.length && <div className="text-xs text-bad mt-2">No workspace exists yet — run <span className="mono">npm run seed</span> first.</div>}
     </form>
   );
 }

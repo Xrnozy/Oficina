@@ -203,6 +203,13 @@ CREATE TABLE IF NOT EXISTS cli_sessions (
   busy_item TEXT, uses INTEGER DEFAULT 0, created_at TEXT, last_used_at TEXT, last_item_id TEXT, note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_cli_sessions_agent ON cli_sessions(agent_id, status);
+-- Reference files and task attachments (the files live under DATA_DIR/attachments, never in a repository).
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, run_id TEXT, scope TEXT NOT NULL, agent_id TEXT, task_id TEXT,
+  name TEXT NOT NULL, mime TEXT, size INTEGER, sha256 TEXT, kind TEXT, summary TEXT DEFAULT '', created_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attach_ws ON attachments(workspace_id, scope);
+CREATE INDEX IF NOT EXISTS idx_attach_task ON attachments(task_id);
 `);
 
 // Columns added after the first release — added in place, data kept.

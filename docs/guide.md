@@ -135,7 +135,7 @@ Prompts typed somewhere quick wait in a **per-office queue** that the whole app 
 
 **Starting.** Nothing runs just because it was queued. **Start…** on the Dashboard opens the New request form with the text filled in, so the repository, budget and workflow are chosen as usual; sending it consumes the queue item. Alternatively tick *Start the next one automatically when <office> is idle*: the daemon then starts the oldest queued request whenever the office has no run in progress (draft, DoD review, running, paused…), one at a time, using the office's first repository and the budget shown next to the checkbox (default $50). It is off by default. An office with no repository keeps its queue and waits, and with *confirm plan* on, a started run waits at DoD review, so the office counts as busy until you act.
 
-**Tray.** The tray reads the daemon port from `daemon/office.yaml`, remembers the last office you queued into, keeps an unsent draft if you click away, and shows "<n> queued" in its status line and tooltip. The tray menu and popup follow the Windows light/dark theme by default; **Appearance** in the right-click menu switches them to Light or Dark and remembers the choice (stored in `%LOCALAPPDATA%Oficina	ray.json` with the last office you queued into). The tray's code is in `office-tray.ps1` (the icon and daemon) and `office-tray-ui.ps1` (the menu and popup). Restart Oficina after updating so the daemon has the queue endpoints; an older daemon answers a quick request with a message saying so.
+**Tray.** The tray reads the daemon port from `daemon/office.yaml`, remembers the last office you queued into, keeps an unsent draft if you click away, and shows "<n> queued" in its status line and tooltip. The tray menu and popup follow the Windows light/dark theme by default; **Appearance** in the right-click menu switches them to Light or Dark and remembers the choice (stored in `%LOCALAPPDATA%\Oficina\tray.json` with the last office you queued into). The tray's code is in `office-tray.ps1` (the icon and daemon) and `office-tray-ui.ps1` (the menu and popup). Restart Oficina after updating so the daemon has the queue endpoints; an older daemon answers a quick request with a message saying so.
 
 ## Working in your repository (direct mode)
 
@@ -143,7 +143,7 @@ By default (**Routing → Where agents work → direct**) agents work inside the
 
 - Code tasks run one at a time, so every change is attributed to exactly one task and one agent.
 - Uncommitted changes you already had are detected before a task starts (`repo.dirty`), preserved, and never included in the task's changes or commits.
-- The developer's change notes go to `.office/handoff/<task>.md`; `.office/` is ignored through `.git/info/exclude` (your `.gitignore` is not edited).
+- Nothing is created inside your repository for the office's own use: no `.office` folder, no `integration` branch, no extra worktrees, and your `.gitignore` and `.git/info/exclude` are not edited. The developer's change notes live in the daemon's data folder (`data/handoff/<task>.md`), and checkpoints are Git objects pinned under `refs/officechain/`. (The worktree-per-task flow with its `integration` branch exists only in `isolated` mode.)
 - The office never runs `reset`, `checkout`, `clean`, history rewrites or force-pushes.
 
 ### Checkpoints, undo and redo
@@ -163,6 +163,19 @@ Undo / Redo / Restore apply the recorded change to the current working tree as a
 When the PM accepts a task, a commit containing **only that task's files** is prepared (`git commit --only -- <paths>`, so your hooks, signing and identity apply and anything you have staged stays staged). The message comes from the developer's `Commit:` line or the PM's acceptance — no extra model call. Generic titles are replaced with one derived from the task. Conventional Commits are used when the repository's history does. A trailer states only the verification that actually ran (`Checks: unit:all pass`, or `NOT VERIFIED` when something failed).
 
 **Routing → Commits**: `approve` (default — the proposal waits under **Needs you**; edit the message on the task page), `auto` (committed when checks and review passed and only the task's files are involved; otherwise it asks), `manual`. A file you had already modified before the task, or edited after it finished, is never committed without your decision.
+
+## Reference files and task attachments
+
+**Reference files** are documents every agent (or one agent) should follow: a `design.md`, a `spec.md`, coding standards, a screenshot of the target design. They are stored by the daemon (in its data folder, never in your repository) and handed to agents as a short list: name, kind, size, a one-line summary and the path. An agent opens only what its work needs, so a long document costs no tokens until it is read.
+
+- **Project-wide** files go to every agent in the office; **agent-specific** files only to that agent (Agents → open an agent → *Reference files*); **this run only** files disappear from prompts when the run ends. Add them on the Dashboard (*New run* form, or the *Reference files* panel), from the **+** menu on Live activity, or per agent. Re-adding a file with the same name updates it; the refresh button on a row replaces it with a newer version; the bin removes it.
+- A new or changed file is announced to the PM through the normal message inbox and appears in every prompt dispatched from then on. Nothing running is interrupted and no task is restarted.
+
+**Task attachments** belong to one task and are seen only by the agents working it, so files never mix between tasks. Drop a file onto a task card, onto the **Ready** column (it starts a new task from the file), into *New task*, or on the task page's *Files* panel. A screenshot of a bug dropped into Ready becomes a task whose agent is given the image's path to open.
+
+**Creating tasks while a run is going.** *New task* (Tasks page, or **+** on Live activity) adds work to the run in progress. It enters as *ready*; the next assign sweep gives it to the eligible agent with capacity, through the same PM-reviewed prompt flow as planned work. The run is not marked done while such a task is still open. Before the Definition of Done is approved it waits like the planned tasks.
+
+**Limits and checks.** Markdown, text, JSON/YAML/CSV, source and script files, images, PDF and Office documents, up to 10 MB each, 30 files per task, 200 per office. Executables are refused, a file whose bytes are binary but whose name says text is refused, names are stripped of folders, and files are served back with a sandboxing Content-Security-Policy. API: `POST /api/attachments?workspaceId=&scope=project|agent|task&agentId=&taskId=&runId=&name=` (body = the file's bytes), `GET /api/attachments`, `PUT /api/attachments/:id` (replace), `DELETE /api/attachments/:id`, `POST /api/runs/:id/tasks { title, description, priority }`. Restart Oficina after updating so the daemon has these endpoints.
 
 ## Live activity
 

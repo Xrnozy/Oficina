@@ -6,6 +6,7 @@ import { get, post, useEvents, useFetch, useQuery, type OfficeEvent } from '../a
 import { Avatar, Empty, PageHeader, StatusChip, Tag, act, fmtAgo, fmtTime } from '../components';
 import { DiffStat, DiffView } from '../diff';
 import { RunWorkflow } from '../workflowPicker';
+import { AddMenu } from '../attachments';
 import {
   AlertTriangle, ArrowDown, CheckCircle2, ChevronDown, ChevronRight, CircleDot, FileEdit, FileSearch, FileText, Globe,
   ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Users, Wrench, XCircle,
@@ -102,6 +103,7 @@ export default function Activity() {
     <div className="flex flex-col h-[calc(100dvh-3.5rem-4rem)] min-h-[560px]">
       <PageHeader title="Live activity" sub={`What each agent is doing, as its CLI reports it — across ${active.length || 'no'} active run${active.length === 1 ? '' : 's'}.`}>
         {(active[0] ?? runs?.[0]) && <RunWorkflow run={active[0] ?? runs![0]} onChanged={reloadRuns} />}
+        {office && <AddMenu workspaceId={office.id} runId={active[0]?.id ?? null} onChanged={reloadRuns} />}
       </PageHeader>
       {!members.length && <Empty icon={Radio} title="No active agents" text="Agents appear here once they hold a role. Assign one under Roles." />}
       {members.length > 0 && (

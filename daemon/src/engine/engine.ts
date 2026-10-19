@@ -1,4 +1,5 @@
 import { DATA_DIR, q, q1, run, tx } from '../db.ts';
+import { bindToRun, manifestFingerprint, manifestSection } from '../services/attachments.ts';
 import { emit, onEvent } from '../bus.ts';
 import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
@@ -258,7 +259,7 @@ function runTasks(runId: string, statuses?: TaskStatus[]): Task[] {
 // Run lifecycle
 // ---------------------------------------------------------------------------
 
-export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean; limits?: Partial<StopLimits>; workflowId?: string | null }): Run {
+export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?: number; repoId?: string; oneShot?: boolean; limits?: Partial<StopLimits>; workflowId?: string | null; attachmentIds?: string[] }): Run {
   const ws = getWorkspace(opts.workspaceId);
   if (!ws) throw new Error('workspace not found');
   const repoId = opts.repoId ?? ws.repoIds[0];
@@ -285,6 +286,7 @@ export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?:
   });
   emit('run.created', 'owner', { goal: opts.goal }, runId, runId);
   if (wf) emit('workflow.run', 'engine', { workflowId: wf.workflowId, versionId: wf.versionId, v: q1('SELECT n FROM workflow_versions WHERE id = ?', wf.versionId)?.n ?? null }, runId);
+  if (opts.attachmentIds?.length) bindToRun(opts.attachmentIds, runId, ws.id);
   // Bootstrap phase: PM drafts DoD + initial task graph
   void dispatchPlan(runId, true);
   return getRun(runId)!;
@@ -309,6 +311,28 @@ export function setRunWorkflow(runId: string, workflowId: string): { ok: true } 
   wfGraphCache.delete(runId);
   emit('workflow.run', 'owner', { workflowId, versionId, switched: true }, runId);
   return { ok: true };
+}
+
+// A task the owner adds while a run is going (Live activity, the Tasks board): it enters as ready, and the next assign
+// sweep hands it to whichever eligible agent is free, exactly like a planned task. Nothing in flight is touched.
+export function createUserTask(runId: string, spec: { title: string; description?: string; priority?: number; difficulty?: number }): Task | { error: string } {
+  const r = getRun(runId);
+  if (!r) return { error: 'run not found' };
+  if (['done', 'stopped', 'failed'].includes(r.status)) return { error: `this run is ${r.status} — start a new run to add work` };
+  const title = String(spec.title ?? '').replace(/\s+/g, ' ').trim();
+  if (!title) return { error: 'the task needs a title' };
+  if (title.length > 200) return { error: 'the title is too long (200 characters at most)' };
+  const description = String(spec.description ?? '').trim().slice(0, 8000);
+  const id = `T-${shortId('')}u`.replace('T--', 'T-');
+  const criteria = [`${title} works as described`, 'Existing behaviour keeps working'];
+  const status: TaskStatus = r.status === 'running' ? 'ready' : 'backlog';   // before the DoD is approved it waits like planned tasks
+  run(`INSERT INTO tasks (id, run_id, title, description, type, status, priority, depends_on, acceptance_criteria, deliverables, planned_by, difficulty, budget_usd, dod_item_ids, affected_paths, meta)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    id, runId, title, description, 'feature', status, Math.max(0, Math.min(9, Number(spec.priority ?? 1) || 1)),
+    '[]', JSON.stringify(criteria), '[]', 'owner', Math.max(1, Math.min(5, Number(spec.difficulty ?? 2) || 2)), 5, '[]', '[]', JSON.stringify({ createdBy: 'owner' }));
+  emit('task.created', 'owner', { taskId: id, title, by: 'owner' }, runId, id);
+  void maybeAdvanceRun(runId);
+  return getTask(id)!;
 }
 
 export function approveDod(runId: string): void {
@@ -569,7 +593,9 @@ export function createWorkItemRecord(runId: string, task: Task | null, kind: Wor
   if (dropped.length) emit('prompt.trimmed', 'engine', { workItemId: wiId, taskId: task?.id, kind, dropped }, runId, wiId);
   // result cache key (spec 6.2): same kind + prompt + context pack + model ⇒
   // the same work — a later dispatch may reuse the delivered result
-  const cacheKey = sha256(`${kind}\n${text}\n${packHash}\n${candidate.model?.id ?? ''}`);
+  // …and the reference files the agent can see: adding or changing one must not reuse an older result
+  const wsId = getRun(runId)?.workspaceId ?? '';
+  const cacheKey = sha256(`${kind}\n${text}\n${packHash}\n${candidate.model?.id ?? ''}\n${manifestFingerprint({ workspaceId: wsId, runId, taskId: task?.id, agentId: candidate.agent.id })}`);
   run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, cache_key, status, started_at, heartbeat_at, attempt)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wiId, task?.id ?? null, runId, kind, candidate.agent.id, candidate.account?.id ?? null, candidate.model?.id ?? null,
@@ -609,8 +635,12 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   const pvRow = wi.promptVersionId ? q1('SELECT budget_chars, dropped FROM prompt_versions WHERE id = ?', wi.promptVersionId) : null;
   const budget = (pvRow?.budget_chars as number | null) ?? contextBudget(candidate.agent.settings, candidate.model, 16000) * 4;
   let prompt = approvedPrompt;
+  // reference files + this task's attachments: a short manifest (paths, not contents), recomputed for every dispatch so
+  // a file added mid-run reaches the next work item without restarting anything
+  const att = manifestSection({ workspaceId: r.workspaceId, runId: r.id, taskId: task?.id, agentId: candidate.agent.id });
+  if (att.section) prompt = `${approvedPrompt}\n\n${att.section}`;
   if (sk.section) {
-    if (prompt.length + sk.section.length + 2 <= budget) prompt = `${approvedPrompt}\n\n${sk.section}`;
+    if (prompt.length + sk.section.length + 2 <= budget) prompt = `${prompt}\n\n${sk.section}`;
     else {
       const prev = parseJson<string[]>(pvRow?.dropped as string, []);
       run('UPDATE prompt_versions SET dropped = ? WHERE id = ?', JSON.stringify([...prev, 'skills']), wi.promptVersionId);
@@ -2227,7 +2257,9 @@ export async function maybeAdvanceRun(runId: string): Promise<void> {
 
   const items = dodItems(r);
   const required = items.filter((i) => !i.optional);
-  if (required.length && required.every((i) => i.status === 'pass')) {
+  // work the owner added mid-run is outside the DoD, but the run is not finished while it is still open
+  const ownerWorkOpen = runTasks(runId).some((t) => t.meta?.createdBy === 'owner' && !['done', 'cancelled', 'failed', 'blocked'].includes(t.status));
+  if (!ownerWorkOpen && required.length && required.every((i) => i.status === 'pass')) {
     setRunStatus(runId, 'verifying');
     const res = await evaluateDodOnIntegration(runId);
     const freshRequired = res.items.filter((i) => !i.optional);
