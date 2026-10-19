@@ -313,6 +313,7 @@ export function renderPrompt(opts: {
 
   // ---- volatile data blocks (fixed order)
   if (pack.repoSummary) data.push({ key: 'repo-summary', text: dataBlock('REPO_SUMMARY', pack.repoSummary) });
+  if (extra.handoff) data.push({ key: 'handoff', text: dataBlock('HANDOFF', String(extra.handoff)) });
   for (const f of pack.files) data.push({ key: `file:${f.path}`, text: dataBlock(`FILE ${f.path}`, f.excerpt) });
   for (const e of pack.errors) data.push({ key: `error:${e.id}`, text: dataBlock(`ERROR ${e.id}`, `${e.title}\n${e.excerpt}`) });
   if (extra.diff) data.push({ key: 'diff', text: dataBlock('DIFF', capDiff(String(extra.diff))) });

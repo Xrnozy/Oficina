@@ -53,6 +53,12 @@ Send a feature request from **Requests**; every hand-off after that is automatic
 
 Check failures (build/tests) also become a correction prompt. The approved prompt stays the authoritative requirements: every correction, review and acceptance gets it, and it changes only when you edit the requirements. Loops are bounded (3 attempts, then you decide). The PM runs only when a decision is needed — planning, prompt approval, acceptance — never continuously. Each task keeps its full record (request → drafts → PM reviews → approved prompt → work → findings → corrections → checks → result) on its task page.
 
+**Hand-offs are typed.** On every stage transition the engine writes a hand-off envelope (`{ fromRole, toRole, taskId, status, summary, filesChanged, checksRun, openQuestions, decisions, blockers }`, stored in `handoffs` and shown as `task.handoff` in Live activity). The next agent's prompt carries the envelope — not the previous agent's whole output. Full output is attached only when the recipient needs it (a fixer gets the findings; a reviewer gets the QA report when QA could not run or the accept step needs it).
+
+**Decision roles answer in strict JSON.** The pm, prompt-creator, reviewer and qa replies are validated before they are acted on; a reply that fails validation gets exactly one automatic repair retry that sends back only the validation error and the bad output (the retry is a normal work item, so it shows up in the token report).
+
+**Messages are delivered, not repeated.** Broadcasts reach each agent at most once (per-agent delivery tracking), messages on finished tasks are never delivered, and a message that is ≥90% the same as an unread one to the same recipient is dropped instead of re-sent.
+
 **Prompt preparation** (Routing → Workflow): `pipeline` (default, as above; the PM drafts itself if there is no Prompt Creator), `handoffs` (PM writes only the task prompt; rework and check failures go straight to the developer — fewest calls), `all`, `off`.
 
 ## Working in your repository (direct mode)

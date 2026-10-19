@@ -34,6 +34,19 @@ function resolveRecipient(to: string): { toAgent: string | null; toRole: string 
   return { toAgent: null, toRole: 'all' };
 }
 
+// Normalized token-set similarity — used to drop a new message that nearly
+// repeats an unread one from the same sender to the same recipient.
+function normTokens(s: string): Set<string> {
+  return new Set(s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean));
+}
+function similarity(a: string, b: string): number {
+  const ta = normTokens(a), tb = normTokens(b);
+  if (!ta.size || !tb.size) return 0;
+  let hit = 0;
+  for (const t of ta) if (tb.has(t)) hit++;
+  return hit / Math.max(ta.size, tb.size);
+}
+
 export function postMessage(m: {
   runId: string | null; taskId?: string | null; workItemId?: string | null;
   from: string; to: string; kind: MessageKind; text: string;
@@ -42,6 +55,17 @@ export function postMessage(m: {
   if (!text) return null;
   const { toAgent, toRole } = resolveRecipient(m.to);
   const kind = KINDS.includes(m.kind) ? m.kind : 'note';
+  // dedupe: drop near-identical unread messages to the same recipient
+  const pending = q(`SELECT text FROM agent_messages
+                     WHERE run_id IS ? AND from_agent = ? AND read_at IS NULL
+                       AND to_agent IS ? AND to_role IS ?
+                     ORDER BY created_at DESC LIMIT 30`, m.runId, m.from, toAgent, toRole);
+  for (const p of pending) {
+    if (similarity(text, String(p.text)) >= 0.9) {
+      emit('agent.msg.dropped', 'engine', { from: m.from, to: toAgent ?? toRole, kind, reason: 'duplicate of an unread message' }, m.runId);
+      return null;
+    }
+  }
   const id = ulid();
   run(`INSERT INTO agent_messages (id, run_id, task_id, work_item_id, from_agent, to_agent, to_role, kind, text, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?)`, id, m.runId, m.taskId ?? null, m.workItemId ?? null, m.from, toAgent, toRole, kind, text, now());
@@ -51,21 +75,31 @@ export function postMessage(m: {
   return rowToMessage(q1('SELECT * FROM agent_messages WHERE id = ?', id)!);
 }
 
-// Unread messages for an agent (direct, by role, or to everyone on the run),
-// plus recent shared findings so agents reuse what teammates already found.
-// Delivered messages are marked read so they are not re-sent.
+// Messages not yet delivered to this agent: direct/role mail it has not read,
+// and broadcasts this agent has never received (per-agent delivery tracking in
+// message_deliveries — every agent gets each broadcast at most once instead
+// of re-sending the latest 8 into every prompt). Messages belonging to
+// finished tasks are never delivered.
 export function takeInbox(agentId: string, roleName: string | null, runId: string, taskId: string | null): AgentMessage[] {
-  const rows = q(`SELECT * FROM agent_messages
-                  WHERE run_id = ? AND read_at IS NULL AND from_agent != ?
-                    AND (to_agent = ? OR (to_agent IS NULL AND (to_role = ? OR to_role = 'all')))
-                    AND (task_id IS NULL OR ? IS NULL OR task_id = ? OR to_agent = ?)
-                  ORDER BY created_at LIMIT 20`, runId, agentId, agentId, roleName ?? '', taskId, taskId, agentId).map(rowToMessage);
-  const direct = rows.filter((r) => r.toAgent === agentId || r.toRole === roleName);
-  for (const r of direct) run('UPDATE agent_messages SET read_at = ? WHERE id = ?', now(), r.id);
-  // broadcasts stay unread for other recipients; include the latest few findings
-  const findings = q(`SELECT * FROM agent_messages WHERE run_id = ? AND to_role = 'all' AND from_agent != ? ORDER BY created_at DESC LIMIT 8`, runId, agentId).map(rowToMessage);
-  const seen = new Set(direct.map((d) => d.id));
-  return [...direct, ...findings.reverse().filter((f) => !seen.has(f.id))];
+  const rows = q(`SELECT m.* FROM agent_messages m
+                  LEFT JOIN tasks t ON t.id = m.task_id
+                  WHERE m.run_id = ? AND m.from_agent != ?
+                    AND (m.task_id IS NULL OR t.status NOT IN ('done','failed','cancelled'))
+                    AND (
+                      (m.to_agent = ? AND m.read_at IS NULL)
+                      OR ((m.task_id IS NULL OR ? IS NULL OR m.task_id = ?) AND (
+                        (m.to_agent IS NULL AND m.to_role = ? AND m.read_at IS NULL)
+                        OR (m.to_agent IS NULL AND m.to_role = 'all' AND NOT EXISTS
+                            (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.agent_id = ?))
+                      ))
+                    )
+                  ORDER BY m.created_at LIMIT 20`, runId, agentId, agentId, taskId, taskId, roleName ?? '', agentId).map(rowToMessage);
+  const ts = now();
+  for (const r of rows) {
+    if (r.toRole === 'all') run('INSERT OR IGNORE INTO message_deliveries (message_id, agent_id, delivered_at) VALUES (?,?,?)', r.id, agentId, ts);
+    else run('UPDATE agent_messages SET read_at = ? WHERE id = ?', ts, r.id);
+  }
+  return rows;
 }
 
 export function formatInbox(msgs: AgentMessage[]): string {

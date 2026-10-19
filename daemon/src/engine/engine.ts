@@ -20,6 +20,7 @@ import {
 } from '../services/router.ts';
 import { contextBudget } from '../services/models.ts';
 import { extractMessages, formatInbox, postMessage, takeInbox } from '../services/messages.ts';
+import { envelopeText, handoffEnvelope, STRICT_REPLY_KINDS, validateReply } from '../services/handoffs.ts';
 import { getAdapter } from '../adapters/index.ts';
 import { requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
 import { AdapterError } from '../adapters/types.ts';
@@ -822,10 +823,48 @@ async function handleWorkItemFailure(wi: WorkItem, msg: string): Promise<void> {
 // Delivered work item routing
 // ---------------------------------------------------------------------------
 
+// One repair retry per (task, kind): the repair prompt carries only the
+// validation error and the bad output — never the whole prompt again.
+const repairRetries = new Map<string, number>();
+
+function repairReply(wi: WorkItem, err: string, raw: Record<string, any>, usedAgentId: string, r: Run, task: Task | null): boolean {
+  const key = `${wi.taskId ?? wi.runId}:${wi.kind}`;
+  const used = repairRetries.get(key) ?? 0;
+  if (used >= 1) {
+    emit('repair.exhausted', 'engine', { kind: wi.kind, taskId: wi.taskId, error: err.slice(0, 200) }, r.id, wi.id);
+    return false;
+  }
+  const role = roleNameFor(wi.kind, task);
+  const cand = candidatesForRole(r.workspaceId, role).find((c) => c.agent.id === usedAgentId && !c.blocked)
+    ?? candidatesForRole(r.workspaceId, role).find((c) => !c.blocked);
+  if (!cand) return false;
+  repairRetries.set(key, used + 1);
+  const job = promptJobs.get(wi.id);
+  if (job) promptJobs.delete(wi.id);
+  const bad = typeof raw.text === 'string' && raw.text.trim() ? raw.text : JSON.stringify(raw).slice(0, 6000);
+  const prompt = finalizeApprovedPrompt(
+    `Your previous reply failed validation.\n\nError: ${err}\n\nYour reply (truncated):\n${bad.slice(0, 6000) || '(empty)'}\n\nSend only the corrected reply.`,
+    wi.kind, cand.provider?.adapterId, '', cand.role, 'HANDOFF.md', deskPack(cand, 8000).budgetChars);
+  const nwi = createWorkItemRecord(r.id, task, wi.kind, cand, prompt, 'repair');
+  if (job) promptJobs.set(nwi.id, job);
+  emit('workitem.repair', 'engine', { kind: wi.kind, taskId: wi.taskId, retryOf: wi.id, error: err.slice(0, 200) }, r.id, nwi.id);
+  void executeWorkItem(nwi, cand, prompt.text, null);
+  return true;
+}
+
 async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['result']>, usedAgentId: string): Promise<void> {
   const task = wi.taskId ? getTask(wi.taskId) : null;
   const r = getRun(wi.runId);
   if (!r) return;
+
+  // Strict JSON for the decision roles: an unusable reply gets one repair
+  // retry carrying only the error and the bad output; it is a normal work
+  // item so the token report counts it.
+  if (STRICT_REPLY_KINDS.includes(wi.kind)) {
+    const raw = (result.raw ?? {}) as Record<string, unknown>;
+    const err = validateReply(wi.kind, (raw.json ?? raw) as Record<string, any>);
+    if (err && repairReply(wi, err, raw, usedAgentId, r, task ?? null)) return;
+  }
 
   switch (wi.kind) {
     case 'plan': {
@@ -1234,7 +1273,8 @@ function dispatchFix(task: Task, reason: string, fromError: boolean, pmPrompt?: 
   const reviewed = pmWritesPrompt(r, 'fix') && fixCount >= 1;
   const prompt = renderPrompt({
     kind: 'fix', agent: candidate.agent, role: candidate.role, task, pack, adapterId: candidate.provider?.adapterId,
-    extra: { checkResults: reason, requirementsChanged: takeRequirementNote(task), inbox: reviewed ? '' : inboxText(candidate, r.id, task.id), handoffPath: handoffPath(task, isDirect(r)), approvedPrompt: approvedPromptFor(task.id) },
+    extra: { handoff: envelopeText(handoffEnvelope(task, 'developer', { blockers: [reason.split('\n')[0].slice(0, 300)] })),
+      checkResults: reason, requirementsChanged: takeRequirementNote(task), inbox: reviewed ? '' : inboxText(candidate, r.id, task.id), handoffPath: handoffPath(task, isDirect(r)), approvedPrompt: approvedPromptFor(task.id) },
   });
   setTaskStatus(task.id, 'assigned', 'analyst', { fixer: candidate.agent.name, route: reviewed ? 'correction prompt' : 'direct' });
   dispatchWork(r, task, 'fix', candidate, prompt, pack.hash, task.worktree, reviewed, reason);
@@ -1273,6 +1313,7 @@ function dispatchQa(task: Task, results: CheckOutcome[]): boolean {
   const prompt = renderPrompt({
     kind: 'qa', agent: tester.agent, role: tester.role, task, pack, adapterId: tester.provider?.adapterId,
     extra: {
+      handoff: envelopeText(handoffEnvelope(task, 'qa')),
       changeNotes: changeNotes(task),
       approvedPrompt: approvedPromptFor(task.id),
       diff,
@@ -1310,7 +1351,8 @@ function dispatchReview(task: Task, results: CheckOutcome[], qaReport?: string):
   const reviewed = pmWritesPrompt(r, 'review');
   const prompt = renderPrompt({
     kind: 'review', agent: candidate.agent, role: candidate.role, task, pack, adapterId: candidate.provider?.adapterId,
-    extra: { diff, changeNotes: changeNotes(task), approvedPrompt: approvedPromptFor(task.id), checkResults: qaReport ? `${checkSummary}\n\nQA REPORT:\n${qaReport}` : checkSummary, inbox: reviewed ? '' : inboxText(candidate, r.id, task.id) },
+    extra: { handoff: envelopeText(handoffEnvelope(task, 'reviewer', { blockers: qaReport ? [qaReport.slice(0, 300)] : [] })),
+      diff, changeNotes: changeNotes(task), approvedPrompt: approvedPromptFor(task.id), checkResults: qaReport ? `${checkSummary}\n\nQA REPORT:\n${qaReport}` : checkSummary, inbox: reviewed ? '' : inboxText(candidate, r.id, task.id) },
   });
   dispatchWork(r, task, 'review', candidate, prompt, pack.hash, null, reviewed);
 }
@@ -1431,7 +1473,8 @@ function dispatchAccept(task: Task, qaReport: string, qaFailed: boolean): boolea
   const pack = deskPack(pm, 12000, 'accept');
   const prompt = renderPrompt({
     kind: 'accept', agent: pm.agent, role: pm.role, task, goal: r.goal, pack, adapterId: pm.provider?.adapterId,
-    extra: { changeNotes: changeNotes(task).slice(0, 3000), qaReport: qaReport.slice(0, 4000), approvedPrompt: approvedPromptFor(task.id), inbox: inboxText(pm, r.id, task.id) },
+    extra: { handoff: envelopeText(handoffEnvelope(task, 'pm', { blockers: qaFailed ? [qaReport.slice(0, 300)] : [] })),
+      changeNotes: changeNotes(task).slice(0, 3000), qaReport: qaReport.slice(0, 4000), approvedPrompt: approvedPromptFor(task.id), inbox: inboxText(pm, r.id, task.id) },
   });
   setTaskStatus(task.id, 'in-review', 'engine', { stage: 'accept', pm: pm.agent.name, qa: qaFailed ? 'fail' : 'pass' });
   const wi = createWorkItemRecord(r.id, task, 'accept', pm, prompt, pack.hash);
@@ -1698,7 +1741,8 @@ export function assignSweep(runId: string): void {
     const prompt = renderPrompt({
       kind: 'implement', agent: candidate.agent, role: candidate.role, task: fresh, goal: r.goal, pack, adapterId: candidate.provider?.adapterId,
       // the target's inbox is attached at approval time when the prompt is reviewed
-      extra: { requirementsChanged: takeRequirementNote(fresh), inbox: reviewed ? '' : inboxText(candidate, runId, fresh.id), handoffPath: handoffPath(fresh, direct) },
+      extra: { handoff: envelopeText(handoffEnvelope(fresh, roleNameFor('implement', fresh))),
+        requirementsChanged: takeRequirementNote(fresh), inbox: reviewed ? '' : inboxText(candidate, runId, fresh.id), handoffPath: handoffPath(fresh, direct) },
     });
     inFlight.push(fresh);
     dispatchWork(r, fresh, 'implement', candidate, prompt, pack.hash, wt.worktree, reviewed);

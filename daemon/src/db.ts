@@ -174,6 +174,10 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   to_agent TEXT, to_role TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT, read_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_msg_run ON agent_messages(run_id, created_at);
+CREATE TABLE IF NOT EXISTS message_deliveries (
+  message_id TEXT NOT NULL, agent_id TEXT NOT NULL, delivered_at TEXT NOT NULL,
+  PRIMARY KEY (message_id, agent_id)
+);
 CREATE TABLE IF NOT EXISTS provider_tombstones (id TEXT PRIMARY KEY, removed_at TEXT);
 `);
 
