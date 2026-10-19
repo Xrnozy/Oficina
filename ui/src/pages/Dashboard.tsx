@@ -15,6 +15,7 @@ export default function Dashboard() {
   const { data: approvals } = useQuery<any[]>('/approvals');
   const { data: providers } = useQuery<any>('/providers');
   const { data: usage } = useQuery<any>('/usage');
+  const { data: tokenReport } = useQuery<any>(run ? `/runs/${run.id}/token-report` : null, [run?.id]);
   const [composing, setComposing] = useState(false);
 
   const openErrors = errors?.filter((e) => !['resolved', 'wontfix'].includes(e.status)) ?? [];
@@ -111,7 +112,59 @@ export default function Dashboard() {
           })}
         </Panel>
       </div>
+
+      {run && <TokenReportPanel report={tokenReport} />}
     </div>
+  );
+}
+
+// Per-stage token accounting for the run (prompt size is always known;
+// reported tokens are 0 for unmetered backends like the scripted demo).
+function TokenReportPanel({ report }: { report: any }) {
+  const rows = report?.byKind ?? [];
+  const top = report?.top ?? [];
+  if (!report || (!rows.length && !top.length)) return null;
+  return (
+    <Panel title="Token report" action={<span className="text-2xs text-fg-4">prompt chars are exact · reported tokens come from the provider</span>}>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-2xs text-fg-4 border-b border-line">
+            <th className="font-medium py-2 pr-3">Stage</th>
+            <th className="font-medium px-3 text-right">Calls</th>
+            <th className="font-medium px-3 text-right">Prompt chars</th>
+            <th className="font-medium px-3 text-right">Reported tokens</th>
+            <th className="font-medium px-3 text-right">Avg / call</th>
+            <th className="font-medium pl-3 text-right">Cost</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-line">
+          {rows.map((r: any) => (
+            <tr key={r.kind}>
+              <td className="py-2 pr-3"><Tag mono>{r.kind}</Tag></td>
+              <td className="px-3 py-2 text-right num text-fg-2">{r.calls}</td>
+              <td className="px-3 py-2 text-right num text-fg-2">{fmtNum(r.promptChars)}</td>
+              <td className="px-3 py-2 text-right num text-fg-2">{r.reportedTokens ? fmtNum(r.reportedTokens) : '—'}</td>
+              <td className="px-3 py-2 text-right num text-fg-3">{r.reportedTokens ? fmtNum(r.avgTokensPerCall) : '—'}</td>
+              <td className="pl-3 py-2 text-right num text-fg-2">{r.costUsd ? fmtUsd(r.costUsd) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {top.length > 0 && (
+        <div className="mt-4">
+          <div className="eyebrow mb-1">Most expensive work items</div>
+          <div className="divide-line">
+            {top.map((t: any) => (
+              <div key={t.id} className="flex items-center gap-3 py-1.5">
+                <Tag mono>{t.kind}</Tag>
+                <span className="text-sm text-fg-2 truncate flex-1">{t.taskTitle ?? t.id}</span>
+                <span className="mono text-xs text-fg-3">{t.reportedTokens ? `${fmtNum(t.reportedTokens)} tok · ` : ''}{fmtNum(t.promptChars)} chars{t.costUsd ? ` · ${fmtUsd(t.costUsd)}` : ''}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Panel>
   );
 }
 

@@ -195,3 +195,63 @@ export function circuitSuccess(accountId: string, modelId?: string | null): void
        ON CONFLICT(account_id, model_id) DO UPDATE SET state='closed', fails=0, opened_at=NULL, next_probe_at=NULL`,
     accountId, modelId ?? '');
 }
+
+// ---- per-kind token report ----
+
+export interface TokenReportRow {
+  kind: string; calls: number; promptChars: number;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number;
+  reportedTokens: number; avgTokensPerCall: number; costUsd: number;
+}
+export interface TokenReportTop {
+  id: string; kind: string; taskId: string | null; taskTitle: string | null;
+  agentId: string; modelId: string | null; promptChars: number;
+  reportedTokens: number; costUsd: number;
+}
+
+// Per-kind accounting for one run: prompt size comes from prompt_versions
+// (chars — always known), billed tokens from usage_records (0 for sources
+// that do not meter, e.g. the scripted adapter). Subqueries are grouped
+// before joining so neither side fans out the other.
+export function tokenReport(runId: string): { byKind: TokenReportRow[]; top: TokenReportTop[] } {
+  const perItem = `
+    LEFT JOIN (SELECT work_item_id, SUM(LENGTH(rendered_text)) chars FROM prompt_versions GROUP BY work_item_id) p
+      ON p.work_item_id = w.id
+    LEFT JOIN (SELECT work_item_id, SUM(input_tokens) in_t, SUM(output_tokens) out_t,
+                      SUM(cache_read_tokens) cache_t, SUM(cost_usd) cost
+               FROM usage_records GROUP BY work_item_id) u
+      ON u.work_item_id = w.id`;
+  const byKind = q(`SELECT w.kind, COUNT(*) calls,
+                     COALESCE(SUM(p.chars),0) prompt_chars,
+                     COALESCE(SUM(u.in_t),0) in_t, COALESCE(SUM(u.out_t),0) out_t,
+                     COALESCE(SUM(u.cache_t),0) cache_t, COALESCE(SUM(u.cost),0) cost
+                   FROM work_items w ${perItem}
+                   WHERE w.run_id = ? AND w.status != 'cancelled'
+                   GROUP BY w.kind
+                   ORDER BY prompt_chars DESC`, runId)
+    .map((r): TokenReportRow => {
+      const inT = r.in_t as number, outT = r.out_t as number, calls = r.calls as number;
+      return {
+        kind: r.kind as string, calls, promptChars: r.prompt_chars as number,
+        inputTokens: inT, outputTokens: outT, cacheReadTokens: r.cache_t as number,
+        reportedTokens: inT + outT, avgTokensPerCall: calls ? Math.round((inT + outT) / calls) : 0,
+        costUsd: r.cost as number,
+      };
+    });
+  const top = q(`SELECT w.id, w.kind, w.task_id, w.agent_id, w.model_id, t.title task_title,
+                   COALESCE(p.chars,0) prompt_chars,
+                   COALESCE(u.in_t,0) + COALESCE(u.out_t,0) reported_tokens,
+                   COALESCE(u.cost,0) cost
+                 FROM work_items w ${perItem}
+                 LEFT JOIN tasks t ON t.id = w.task_id
+                 WHERE w.run_id = ? AND w.status != 'cancelled'
+                 ORDER BY reported_tokens DESC, prompt_chars DESC, cost DESC
+                 LIMIT 5`, runId)
+    .map((r): TokenReportTop => ({
+      id: r.id as string, kind: r.kind as string, taskId: r.task_id as string | null,
+      taskTitle: r.task_title as string | null, agentId: r.agent_id as string,
+      modelId: r.model_id as string | null, promptChars: r.prompt_chars as number,
+      reportedTokens: r.reported_tokens as number, costUsd: r.cost as number,
+    }));
+  return { byKind, top };
+}

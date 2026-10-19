@@ -19,7 +19,7 @@ import { decideApproval, requestApproval } from '../services/policy.ts';
 import { ensureIntegration, ensureRepo, gitOk } from '../services/git.ts';
 import { getAgent, getAccount, getProvider } from '../services/router.ts';
 import { resolveManual } from '../adapters/manual.ts';
-import { estimatedWindows, spendTodayUsd, usageTotals } from '../services/usage.ts';
+import { estimatedWindows, spendTodayUsd, tokenReport, usageTotals } from '../services/usage.ts';
 import { deleteSecret, storeSecret } from '../config.ts';
 import { rowToAgent } from '../services/router.ts';
 import { execFileSync } from 'node:child_process';
@@ -145,6 +145,11 @@ export function createServer(port: number, uiDir: string): http.Server {
     const cycles = q('SELECT * FROM cycles WHERE run_id = ? ORDER BY n', r.id).map(rowToCycle);
     const agents = q(`SELECT DISTINCT a.* FROM agents a JOIN work_items w ON w.agent_id = a.id WHERE w.run_id = ?`, r.id).map(rowToAgent);
     ok(res, { ...r, dod: dod ? { ...dod, items: parseJson(dod.items as string, []) } : null, tasks, cycles, agents });
+  });
+
+  app.get('/api/runs/:id/token-report', (req, res) => {
+    if (!getRun(req.params.id)) return err(res, 404, 'run not found');
+    ok(res, tokenReport(req.params.id));
   });
 
   app.get('/api/runs/:id/events', (req, res) => {
