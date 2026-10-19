@@ -239,7 +239,8 @@ export function createServer(port: number, uiDir: string): http.Server {
       if (!ids.includes(repoId)) {
         run('UPDATE workspaces SET repo_ids = ? WHERE id = ?', JSON.stringify([...ids, repoId]), workspaceId);
       }
-      ensureIntegration(getRepo(repoId)!);
+      // direct mode (the default) works in this folder as it is; only isolated mode needs the integration branch
+      if (parseJson<Record<string, unknown>>(ws.settings as string, {}).workMode === 'isolated') ensureIntegration(getRepo(repoId)!);
       emit('repo.registered', 'owner', { repoId, path: abs, remote: repo.remote_url }, null, null);
       ok(res, rowToRepo(q1('SELECT * FROM repos WHERE id = ?', repoId)!));
     } catch (e) { err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`); }

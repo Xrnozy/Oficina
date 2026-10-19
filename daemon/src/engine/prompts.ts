@@ -17,7 +17,7 @@ import type { ContextPack as CP } from '../services/context.ts';
 // The developer documents its own delivery; the tester and the PM read this
 // instead of anyone copying notes between tools.
 // {{HANDOFF}} is replaced with the task's notes path (outside the tracked tree in direct mode).
-const CHANGE_NOTES = 'Write your change notes to {{HANDOFF}}. First line: `Commit: <type>(<scope>): <specific summary of the change>` (Conventional Commits; say what changed, never just "update" or "fix"). Then: what you changed and why, the files touched, how you validated it, and how to test it. The reviewer and the PM read it; it is not committed.';
+const CHANGE_NOTES = 'Write your change notes to `{{HANDOFF}}` (create the folder if needed). First line: `Commit: <type>(<scope>): <specific summary of the change>` (Conventional Commits; say what changed, never just "update" or "fix"). Then: what you changed and why, the files touched, how you validated it, and how to test it. The reviewer and the PM read it; it is not committed.';
 
 const FILE_CONTRACT = `
 OUTPUT CONTRACT (mandatory):

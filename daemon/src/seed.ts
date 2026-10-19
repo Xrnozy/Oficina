@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { q1, run } from './db.ts';
 import { now, ulid } from './util.ts';
-import { ensureIntegration, ensureRepo } from './services/git.ts';
+import { ensureRepo } from './services/git.ts';
 import type { OfficeConfig } from './config.ts';
 
 // Seeds the demo workspace: roles, policies, the scripted provider's account,
@@ -247,7 +247,6 @@ export function seedIfEmpty(_config: OfficeConfig): void {
   mkMembership('ag-an', 'role-analyst');
   mkMembership('ag-doc', 'role-docs');
 
-  ensureIntegration({ id: 'repo-demo', workspaceId: wsId, path: repoPath, remoteUrl: null, defaultBranch: 'main', integrationBranch: 'integration', buildCmd: '', testCmd: '', checkProfileId: null });
   console.log('[seed] demo workspace ready — repo at', repoPath);
 }
 

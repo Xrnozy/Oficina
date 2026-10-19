@@ -86,14 +86,14 @@ async function scriptedResult(ctx: AdapterCtx, script: Record<string, any>, kind
       }
       const changed = writeFiles(ctx.worktree, files);
       // change notes go where the prompt says (outside the tracked tree in direct mode)
-      const notesPath = ctx.prompt.match(/change notes to (\S+?\.md)/)?.[1] ?? 'HANDOFF.md';
+      const notesPath = ctx.prompt.match(/change notes to `?([^`\n]+?\.md)`?/)?.[1] ?? 'HANDOFF.md';
       const handoff = [
         `Commit: ${kind === 'fix' ? 'fix' : 'feat'}: ${ctx.task.title.charAt(0).toLowerCase()}${ctx.task.title.slice(1)}`, ``,
         `# HANDOFF`, ``, `Task: ${ctx.task.title}`, `Kind: ${kind} (attempt ${attempt})`, ``,
         `## Done`, ...changed.map((f) => `- wrote ${f}`), ``,
         `## Remaining`, `- none known`, ``,
       ].join('\n');
-      writeFileEnsured(path.join(ctx.worktree, notesPath), handoff);
+      writeFileEnsured(path.resolve(ctx.worktree, notesPath), handoff);
       if (notesPath === 'HANDOFF.md') changed.push('HANDOFF.md');
       await delay(script.stepLatencyMs ?? 150);
       ctx.emit('agent.output', { line: `[scripted] wrote ${changed.length} files` });

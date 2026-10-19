@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { q, q1, run } from '../db.ts';
+import { DATA_DIR, q, q1, run } from '../db.ts';
 import { emit } from '../bus.ts';
 import { parseJson } from '../util.ts';
 import {
@@ -219,10 +219,10 @@ export function registerHistoryRoutes(app: Express): void {
       .map((e) => ({ type: e.type, actor: e.actor, ts: e.ts, ...parseJson<Record<string, unknown>>(e.payload as string, {}) }));
     const repo = runRow ? q1('SELECT path FROM repos WHERE id = ?', runRow.repo_id) : null;
     let notes = '';
-    for (const p of [`.office/handoff/${task.id}.md`, 'HANDOFF.md']) {
+    for (const p of [path.join(DATA_DIR, 'handoff', `${task.id}.md`), `.office/handoff/${task.id}.md`, 'HANDOFF.md']) {
       const base = task.worktree ?? (repo?.path as string | undefined);
       if (!base) break;
-      try { notes = fs.readFileSync(path.join(base, p), 'utf8'); break; } catch { /* next */ }
+      try { notes = fs.readFileSync(path.resolve(base, p), 'utf8'); break; } catch { /* next */ }
     }
     ok(res, {
       request: runRow?.goal ?? null,

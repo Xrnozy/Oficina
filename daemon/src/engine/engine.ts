@@ -1,4 +1,4 @@
-import { q, q1, run, tx } from '../db.ts';
+import { DATA_DIR, q, q1, run, tx } from '../db.ts';
 import { emit, onEvent } from '../bus.ts';
 import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
@@ -190,24 +190,10 @@ function isDirect(r: Run | undefined): boolean {
   return !!r && getWorkspace(r.workspaceId)?.settings?.workMode !== 'isolated';
 }
 
-// The developer's change notes: outside the tracked tree in direct mode, so
-// they never land in the user's repository or a commit.
+// The developer's change notes: in direct mode they live in the daemon's own data
+// folder (absolute path), so nothing is ever created inside the user's repository.
 function handoffPath(task: Task, direct: boolean): string {
-  return direct ? `.office/handoff/${task.id}.md` : 'HANDOFF.md';
-}
-
-// .office/ (notes, scratch) is ignored locally via .git/info/exclude — the
-// user's own .gitignore is never edited.
-function ensureLocalExclude(repoPath: string): void {
-  try {
-    const rel = execGit(repoPath, ['rev-parse', '--git-path', 'info/exclude']).trim();
-    const file = path.isAbsolute(rel) ? rel : path.join(repoPath, rel);
-    const cur = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-    if (!/^\/?\.office\/?$/m.test(cur)) {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.appendFileSync(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}.office/\n`);
-    }
-  } catch { /* not fatal */ }
+  return direct ? path.join(DATA_DIR, 'handoff', `${task.id}.md`) : 'HANDOFF.md';
 }
 
 function taskCheckpoint(task: Task): Checkpoint | undefined {
@@ -223,7 +209,6 @@ function holdsRepo(task: Task): boolean {
 
 function openTaskCheckpoint(r: Run, repo: Repo, task: Task): void {
   if (holdsRepo(task)) return;
-  ensureLocalExclude(repo.path);
   const dirty = dirtyPaths(repo.path);
   if (dirty.length) {
     // the snapshot keeps them out of the task's changes; they are never committed with it
@@ -1562,7 +1547,7 @@ function rejectsBelowLimit(task: Task, r: Run): boolean {
 // The developer's own HANDOFF.md for this delivery, if it wrote one.
 function changeNotes(task: Task): string {
   const direct = isDirect(getRun(task.runId));
-  try { return task.worktree ? fs.readFileSync(path.join(task.worktree, handoffPath(task, direct)), 'utf8') : ''; } catch { return ''; }
+  try { return task.worktree ? fs.readFileSync(path.resolve(task.worktree, handoffPath(task, direct)), 'utf8') : ''; } catch { return ''; }
 }
 
 // Review & validation stage: the tester (Cursor) reviews the diff, runs the
