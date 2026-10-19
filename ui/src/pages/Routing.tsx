@@ -189,8 +189,31 @@ function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: Routing
   );
 }
 
+// Same palette as the Workflow canvas: a step is tinted by its role, falling back to its purpose.
+type Tint = { bg: string; bar: string; soft: string };
+const T = {
+  lilac: { bg: 'bg-lilac', bar: 'border-l-lilac', soft: 'bg-lilac/25' }, cream: { bg: 'bg-cream', bar: 'border-l-cream', soft: 'bg-cream/25' },
+  lime: { bg: 'bg-lime', bar: 'border-l-lime', soft: 'bg-lime/25' }, mint: { bg: 'bg-mint', bar: 'border-l-mint', soft: 'bg-mint/25' },
+  pink: { bg: 'bg-pink', bar: 'border-l-pink', soft: 'bg-pink/25' }, coral: { bg: 'bg-coral', bar: 'border-l-coral', soft: 'bg-coral/25' },
+  navy: { bg: 'bg-navy', bar: 'border-l-navy', soft: 'bg-navy/10' }, none: { bg: 'bg-raised', bar: 'border-l-line-strong', soft: 'bg-surface' },
+} satisfies Record<string, Tint>;
+const ROLE_TINT: Record<string, Tint> = { pm: T.lilac, 'prompt-creator': T.cream, developer: T.lime, qa: T.mint, reviewer: T.pink, analyst: T.coral, docs: T.cream };
+const PURPOSE_TINT: Record<string, Tint> = {
+  plan: T.lilac, accept: T.lilac, prompt: T.cream, 'prompt-review': T.lilac, doc: T.cream, implement: T.lime, fix: T.lime,
+  qa: T.mint, test: T.mint, review: T.pink, analyse: T.coral, diagnose: T.coral,
+};
+function stepTint(s: RoutingStep): Tint {
+  if (s.type === 'start') return T.mint;
+  if (s.type === 'end') return T.navy;
+  if (s.type === 'condition') return T.cream;
+  if (s.type === 'merge') return T.lilac;
+  if (s.type === 'human') return T.pink;
+  return ROLE_TINT[s.role ?? ''] ?? PURPOSE_TINT[s.purpose ?? ''] ?? T.none;
+}
+
 // One step on the flow rail — a workflow node. Click opens it in the editor.
 function StepCard({ s }: { s: RoutingStep }) {
+  const tint = stepTint(s);
   const what =
     s.type === 'start' ? 'the request enters here'
     : s.type === 'end' ? 'task completes here'
@@ -202,7 +225,7 @@ function StepCard({ s }: { s: RoutingStep }) {
   return (
     <Link
       to={`/workflow?node=${s.nodeId}`}
-      className={`block rounded-xl border bg-surface px-3.5 py-2 text-xs hover:border-line-strong transition-colors ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
+      className={`block rounded-xl border border-l-4 ${tint.soft} px-3.5 py-2 text-xs hover:brightness-95 transition ${tint.bar} ${s.disabled ? 'border-line/50 opacity-55' : 'border-line'} ${s.warnings.length ? 'border-warn/60' : ''}`}
       title={`${s.label}${s.warnings.length ? ` — ${s.warnings.join('; ')}` : ''}`}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -256,13 +279,14 @@ function FlowRows({ rows, nested = false }: { rows: RoutingRow[]; nested?: boole
     <ol>
       {rows.map((r, i) => {
         const last = i === rows.length - 1;
+        const tint = r.kind === 'step' ? stepTint(r.step) : null;
         const marker = r.kind === 'step' ? (nested ? null : ++n) : r.kind === 'back' ? 'back' : 'branch';
         return (
           <li key={i} className={`relative ${nested ? 'pl-6' : 'pl-10'} ${last ? '' : 'pb-3'}`}>
             {!last && <span aria-hidden className={`absolute w-px bg-line ${nested ? 'left-[3.5px] top-5 bottom-0' : 'left-[13.5px] top-8 bottom-0'}`} />}
-            {marker === null && <span aria-hidden className="absolute left-0 top-[16px] h-2 w-2 rounded-full border border-line-strong bg-surface" />}
+            {marker === null && <span aria-hidden className={`absolute left-0 top-[16px] h-2 w-2 rounded-full border border-line-strong ${tint?.bg ?? 'bg-surface'}`} />}
             {marker !== null && (
-              <span aria-hidden className={`absolute left-0 grid h-7 w-7 place-items-center rounded-full border border-line-strong bg-surface text-2xs font-mono text-fg-2 ${nested ? 'top-0.5' : 'top-1'}`}>
+              <span aria-hidden className={`absolute left-0 grid h-7 w-7 place-items-center rounded-full border border-line-strong ${tint?.bg ?? 'bg-surface'} text-2xs font-mono ${tint && tint.bg === 'bg-navy' ? 'text-white' : 'text-fg'} ${nested ? 'top-0.5' : 'top-1'}`}>
                 {marker === 'back' ? <CornerUpLeft size={12} /> : marker === 'branch' ? <GitBranch size={12} /> : marker}
               </span>
             )}
