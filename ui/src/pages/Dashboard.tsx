@@ -1,7 +1,7 @@
 import { Select } from '../Select';
 import { WorkflowSelect } from '../workflowPicker';
 import { useOffice, useOfficeAgents, useOfficeApprovals, useOfficeQueue } from '../office';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { del, post, put, useQuery } from '../api';
 import { IntakeReview, Steps, useIntakeAgents } from '../intake';
@@ -28,6 +28,9 @@ export default function Dashboard() {
   const [composing, setComposing] = useState(false);
   const [prefill, setPrefill] = useState<{ goal: string; queueId: string } | null>(null);
   const { data: queue, reload: reloadQueue } = useOfficeQueue();
+  // a request being analysed or reviewed lives on the server, so it is still here after the owner leaves this page
+  const { data: openDrafts } = useQuery<any[]>(office ? `/intake/drafts?workspaceId=${office.id}` : null, [office?.id]);
+  const hasDraft = (openDrafts ?? []).length > 0;
 
   const openErrors = errors?.filter((e) => !['resolved', 'wontfix'].includes(e.status)) ?? [];
   const pendingApprovals = approvals?.filter((a) => a.status === 'pending') ?? [];
@@ -41,7 +44,7 @@ export default function Dashboard() {
         {run && !composing && <button className="btn" onClick={() => { setPrefill(null); setComposing(true); }}><Plus size={14} /> New run</button>}
       </PageHeader>
 
-      {(!run || composing) && <NewRun key={prefill?.queueId ?? 'new'} prefill={prefill} onCancel={run ? () => { setComposing(false); setPrefill(null); } : undefined} onQueued={reloadQueue} />}
+      {(!run || composing || hasDraft) && <NewRun key={prefill?.queueId ?? 'new'} prefill={prefill} onCancel={run ? () => { setComposing(false); setPrefill(null); } : undefined} onQueued={reloadQueue} />}
 
       {run && <RunCard run={run} detail={detail} live={!!live} />}
 
@@ -286,6 +289,17 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
   const [analyst, setAnalyst] = useState<string | null>(null);        // null: not chosen by hand — follow the workflow's Request node
   const [draftId, setDraftId] = useState<string | null>(null);
   const [draftFiles, setDraftFiles] = useState<Attachment[]>([]);
+  const { data: openDrafts } = useQuery<any[]>(office ? `/intake/drafts?workspaceId=${office.id}` : null, [office?.id]);
+  const { data: projectFiles } = useQuery<Attachment[]>(office ? `/attachments?workspaceId=${office.id}&scope=project` : null, [office?.id]);
+  const ended = useRef<Set<string>>(new Set());
+  // come back to a request that was analysing when the owner left: its draft is still on the server
+  useEffect(() => {
+    if (draftId || prefill) return;
+    const d = (openDrafts ?? []).find((x) => !ended.current.has(x.id));
+    if (!d) return;
+    setDraftId(d.id);
+    setDraftFiles((projectFiles ?? []).filter((a) => (d.attachmentIds ?? []).includes(a.id)));
+  }, [openDrafts, projectFiles, draftId, prefill]);
   const nav = useNavigate();
   const budgetNum = Number(budget);
   const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === office?.id);
@@ -317,6 +331,7 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
     if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
   };
   if (draftId) {
+    const shownFiles = draftFiles.length ? draftFiles : (projectFiles ?? []).filter((a) => (openDrafts ?? []).find((d) => d.id === draftId)?.attachmentIds?.includes(a.id));
     const repoPathShown = custom ? repoPath : wsRepos.find((r: any) => r.id === (repoChoice || wsRepos[0]?.id))?.path ?? '';
     const runSettings = (
       <>
@@ -324,7 +339,7 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
           <div className="flex justify-between gap-2"><span>Repository</span><span className="mono truncate text-fg-2" title={repoPathShown}>{repoPathShown.split(/[\\/]/).filter(Boolean).pop()}</span></div>
           <div className="flex justify-between gap-2"><span>Budget</span><span className="num text-fg-2">${budgetNum || 0}</span></div>
         </div>
-        {draftFiles.length > 0 && (
+        {shownFiles.length > 0 && (
           <label className="flex items-start gap-2 text-xs text-fg-3 cursor-pointer"><input type="checkbox" className="mt-0.5" checked={thisRunOnly} onChange={(e) => setThisRunOnly(e.target.checked)} /> Use the files for this run only <span className="text-fg-4">(otherwise they stay as the office's references)</span></label>
         )}
       </>
@@ -336,8 +351,8 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
           <h2 className="text-[15px] font-semibold leading-tight">Review your request{office && <span className="ml-2 text-xs font-normal text-fg-3">in {office.name}</span>}</h2>
           <div className="ml-auto"><Steps at={2} /></div>
         </div>
-        <IntakeReview draftId={draftId} files={draftFiles} busy={busy} aside={runSettings} approveLabel={confirmPlan ? 'Approve and draft the plan' : 'Approve and start'}
-          onDiscard={() => { for (const a of draftFiles) void del(`/attachments/${a.id}`).catch(() => undefined); setDraftId(null); setDraftFiles([]); }}
+        <IntakeReview draftId={draftId} files={shownFiles} busy={busy} aside={runSettings} approveLabel={confirmPlan ? 'Approve and draft the plan' : 'Approve and start'}
+          onDiscard={() => { for (const a of shownFiles) void del(`/attachments/${a.id}`).catch(() => undefined); ended.current.add(draftId); setDraftId(null); setDraftFiles([]); }}
           onApprove={async () => {
             setBusy(true);
             const repoId = await resolveRepo();
@@ -345,7 +360,7 @@ function NewRun({ onCancel, prefill, onQueued }: { onCancel?: () => void; prefil
             const r = await act(post(`/intake/drafts/${draftId}/approve`, { budgetUsd: budgetNum, repoId, workflowId: workflowId || undefined, thisRunOnly, queueId: prefill?.queueId }),
               confirmPlan ? 'Approved — review the PM\'s plan' : 'Approved — sent to the PM');
             setBusy(false);
-            if (r?.id) afterStart(r);
+            if (r?.id) { ended.current.add(draftId); afterStart(r); }
           }} />
       </div>
     );
