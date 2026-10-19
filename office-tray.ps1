@@ -1,8 +1,8 @@
-# officeChain tray agent — hosts a system tray icon, runs the daemon hidden,
+# officeChain tray agent - hosts a system tray icon, runs the daemon hidden,
 # and kills it on Quit. Requires Windows PowerShell (STA).
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
-# single instance: kill any other tray agent first — a hung one would hold
+# single instance: kill any other tray agent first - a hung one would hold
 # the mutex forever and a zombie icon can't be quit from the menu anyway.
 # Double-clicking therefore always yields one fresh, working tray icon.
 $me = $PID
@@ -34,12 +34,12 @@ function Update-Notifications {
         }
         foreach ($n in $items) {
             $script:lastSeq = [Math]::Max($script:lastSeq, $n.seq)
-            $ni.ShowBalloonTip(6000, "officeChain — $($n.title)", $n.body, 'Info')
+            $ni.ShowBalloonTip(6000, "officeChain - $($n.title)", $n.body, 'Info')
         }
     } catch { }
 }
 
-# Fast non-blocking health probe — a TCP connect to the daemon port. Runs on
+# Fast non-blocking health probe - a TCP connect to the daemon port. Runs on
 # the WinForms UI thread every second, so it must never block: a refused or
 # instant localhost connect returns in milliseconds. (Invoke-WebRequest used
 # to hang the thread for up to 2s per tick, making the icon unclickable.)
@@ -96,7 +96,7 @@ $miOpen = $menu.Items.Add('Open officeChain')
 $miOpen.Add_Click({ Start-Process 'http://localhost:4780' })
 $miOpen.Font = New-Object System.Drawing.Font($miOpen.Font, [System.Drawing.FontStyle]::Bold)
 $menu.Items.Add('-') | Out-Null
-$miStatus = $menu.Items.Add('daemon: starting…')
+$miStatus = $menu.Items.Add('daemon: starting...')
 $miStatus.Enabled = $false
 $menu.Items.Add('-') | Out-Null
 $miQuit = $menu.Items.Add('Quit officeChain')
@@ -104,7 +104,7 @@ $miQuit.Add_Click({
     try { Stop-Daemon } catch {}
     $ni.Visible = $false
     $ni.Dispose()
-    # hard exit — Application.Exit() can no-op if the message loop is wedged,
+    # hard exit - Application.Exit() can no-op if the message loop is wedged,
     # which is exactly when you need Quit to work
     [Environment]::Exit(0)
 })
@@ -115,10 +115,10 @@ $already = Test-Daemon
 if ($already) {
     $ni.Text = 'officeChain (running)'
     $miStatus.Text = 'daemon: running on :4780'
-    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon already running — tray icon attached.', 'Info')
+    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon already running - tray icon attached.', 'Info')
 } else {
     Start-Daemon
-    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon starting…', 'Info')
+    $ni.ShowBalloonTip(2500, 'officeChain', 'Daemon starting...', 'Info')
 }
 
 # poll health once a second: update status line + open the browser when ready
