@@ -1,6 +1,6 @@
 import { q, q1, run, tx } from '../db.ts';
 import { emit, onEvent } from '../bus.ts';
-import { minutesFromNow, now, parseJson, shortId, ulid } from '../util.ts';
+import { compactLog, minutesFromNow, now, parseJson, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import type {
   Check, DodItem, PlanDiff, PlanTaskSpec, Repo, Run, StopLimits, Task,
@@ -13,7 +13,7 @@ import {
 import { checkByName, repoChecks, runCheck } from '../services/verify.ts';
 import { fileErrorReport, openErrorBySignature, resolveError, rowToError } from '../services/errors.ts';
 import { buildContextPack, type ContextPack } from '../services/context.ts';
-import { finalizeApprovedPrompt, renderPrompt } from './prompts.ts';
+import { finalizeApprovedPrompt, renderPrompt, type RenderedPrompt } from './prompts.ts';
 import {
   candidatesForRole, dispatchThroughAdapter, getAgent, getAccount, pickAgent,
   type Candidate,
@@ -93,17 +93,46 @@ function setTaskStatus(taskId: string, status: TaskStatus, actor = 'engine', ext
   emit('task.status', actor, { taskId, status, title: t?.title, ...extra }, t?.runId ?? null, taskId);
 }
 
+// A task's first items (plan, prompt drafting, implement) get the repo tour;
+// downstream stages get only what the task changed. Desk jobs (accept, prompt
+// pipeline) get no repository context at all.
+const TASK_SCOPE_KINDS: WorkItemKind[] = ['qa', 'review', 'fix', 'analyse'];
+
 // Context pack sized to the agent's configured context limit (spec 3).
-function packFor(repo: Repo | null | undefined, task: Task | null, c: Candidate, wanted: number): ContextPack {
-  const pack = buildContextPack({ repo: repo ?? null, task, tokenBudget: contextBudget(c.agent.settings, c.model, wanted) });
+function packFor(repo: Repo | null | undefined, task: Task | null, c: Candidate, wanted: number, kind?: WorkItemKind, opts: { diffChars?: number } = {}): ContextPack {
+  const scope = kind && TASK_SCOPE_KINDS.includes(kind) ? 'task' : 'repo';
+  const hasTools = ['cli', 'devin'].includes(c.provider?.adapterId ?? '');
+  const changed = scope === 'task' && repo && task ? taskFiles(repo, task).slice(0, 24) : [];
+  // reviewers/QA get the size-capped diff instead of full files when it is
+  // smaller; a fixer always gets excerpts (it edits those files); tool-less
+  // adapters are the only ones that need excerpts at all.
+  let excerpts = false;
+  if (scope === 'task' && !hasTools) {
+    if (kind === 'fix') excerpts = true;
+    else if (opts.diffChars != null && repo) {
+      const est = changed.slice(0, 8).reduce((s, f) => {
+        try { return s + Math.min(fs.statSync(path.join(repo.path, f)).size, 9600); } catch { return s; }
+      }, 0);
+      excerpts = opts.diffChars > est;
+    }
+  }
+  const pack = buildContextPack({
+    repo: repo ?? null, task, tokenBudget: contextBudget(c.agent.settings, c.model, wanted),
+    scope, changedFiles: changed, excerpts, basePath: task?.worktree ?? undefined,
+  });
   // CLI agents (Claude Code, Cursor, Devin) open files with their own tools —
   // pasting excerpts too made every prompt pay for the same files twice. They
   // get the paths; API models (no tools) still get the excerpts.
-  if (['cli', 'devin'].includes(c.provider?.adapterId ?? '') && pack.files.length) {
+  if (hasTools && pack.files.length) {
     const list = pack.files.map((f) => `- ${f.path}`).join('\n');
     return { ...pack, files: [], repoSummary: `${pack.repoSummary}\n\nRelevant files (open them yourself as needed):\n${list}`.trim() };
   }
   return pack;
+}
+
+// No repository context at all — the budget still applies to the prompt.
+function deskPack(c: Candidate, wanted: number, hash = 'desk'): ContextPack {
+  return { repoSummary: '', files: [], errors: [], kbNotes: [], hash, approxTokens: 0, budgetChars: contextBudget(c.agent.settings, c.model, wanted) * 4 };
 }
 
 // Unread team messages for this agent, rendered for its prompt.
@@ -341,7 +370,7 @@ async function dispatchPlan(runId: string, bootstrap: boolean): Promise<void> {
   });
   const wi = createWorkItemRecord(runId, null, 'plan', candidate, prompt, pack.hash);
   emit('plan.started', 'engine', { bootstrap, agent: candidate.agent.name }, runId, wi.id);
-  void executeWorkItem(wi, candidate, prompt, null);
+  void executeWorkItem(wi, candidate, prompt.text, null);
 }
 
 function lastCycleSummary(runId: string): string {
@@ -455,15 +484,19 @@ function applyPlanDiff(runId: string, diff: PlanDiff, plannedBy: string, dodItem
 // Work item records + dispatch
 // ---------------------------------------------------------------------------
 
-function createWorkItemRecord(runId: string, task: Task | null, kind: WorkItemKind, candidate: Candidate, prompt: string, packHash: string): WorkItem {
+function createWorkItemRecord(runId: string, task: Task | null, kind: WorkItemKind, candidate: Candidate, prompt: string | RenderedPrompt, packHash: string): WorkItem {
   const wiId = ulid();
   const pvId = ulid();
-  run(`INSERT INTO prompt_versions (id, work_item_id, template_id, version, rendered_text, context_pack_hash, created_at)
-       VALUES (?,?,?,?,?,?,?)`, pvId, wiId, `${kind}/${candidate.provider?.adapterId ?? 'none'}`, 1, prompt, packHash, now());
+  const text = typeof prompt === 'string' ? prompt : prompt.text;
+  const dropped = typeof prompt === 'string' ? [] : prompt.dropped;
+  const budgetChars = typeof prompt === 'string' ? null : prompt.budgetChars;
+  run(`INSERT INTO prompt_versions (id, work_item_id, template_id, version, rendered_text, context_pack_hash, dropped, budget_chars, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`, pvId, wiId, `${kind}/${candidate.provider?.adapterId ?? 'none'}`, 1, text, packHash, JSON.stringify(dropped), budgetChars, now());
+  if (dropped.length) emit('prompt.trimmed', 'engine', { workItemId: wiId, taskId: task?.id, kind, dropped }, runId, wiId);
   run(`INSERT INTO work_items (id, task_id, run_id, kind, agent_id, account_id, model_id, prompt_version_id, idempotency_key, status, started_at, heartbeat_at, attempt)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     wiId, task?.id ?? null, runId, kind, candidate.agent.id, candidate.account?.id ?? null, candidate.model?.id ?? null,
-    pvId, shaKey(task?.id ?? 'run', kind, prompt), 'queued', now(), now(), task ? task.attempts + 1 : 1);
+    pvId, shaKey(task?.id ?? 'run', kind, text), 'queued', now(), now(), task ? task.attempts + 1 : 1);
   emit('workitem.created', 'engine', { kind, agent: candidate.agent.name, taskId: task?.id }, runId, wiId);
   return getWorkItem(wiId)!;
 }
@@ -485,7 +518,19 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   // Skills attached to this agent or its role, relevant to this work, ride
   // along with the prompt. The stored (approved) prompt stays as it was.
   const sk = skillsFor({ agentId: candidate.agent.id, roleId: candidate.role?.id ?? null, kind: wi.kind, taskText: `${task?.title ?? ''}\n${task?.description ?? ''}\n${r.goal}` });
-  const prompt = sk.section ? `${approvedPrompt}\n\n${sk.section}` : approvedPrompt;
+  // lowest-value section: skills are the first thing dropped when the prompt
+  // would exceed the budget it was fitted to
+  const pvRow = wi.promptVersionId ? q1('SELECT budget_chars, dropped FROM prompt_versions WHERE id = ?', wi.promptVersionId) : null;
+  const budget = (pvRow?.budget_chars as number | null) ?? contextBudget(candidate.agent.settings, candidate.model, 16000) * 4;
+  let prompt = approvedPrompt;
+  if (sk.section) {
+    if (prompt.length + sk.section.length + 2 <= budget) prompt = `${approvedPrompt}\n\n${sk.section}`;
+    else {
+      const prev = parseJson<string[]>(pvRow?.dropped as string, []);
+      run('UPDATE prompt_versions SET dropped = ? WHERE id = ?', JSON.stringify([...prev, 'skills']), wi.promptVersionId);
+      emit('prompt.trimmed', 'engine', { workItemId: wi.id, taskId: task?.id, kind: wi.kind, dropped: [...prev, 'skills'] }, wi.runId, wi.id);
+    }
+  }
   if (sk.applied.length || sk.skipped.length) {
     emit('skill.applied', candidate.agent.name, { workItemId: wi.id, taskId: task?.id, kind: wi.kind, applied: sk.applied, skipped: sk.skipped }, wi.runId, wi.id);
   }
@@ -1066,7 +1111,7 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
   const first = failed[0];
   const analyst = pickAgent(r.workspaceId, 'analyst', task, 'analyse', 2);
   if (analyst) {
-    const pack = packFor(repo, task, analyst, 12000);
+    const pack = packFor(repo, task, analyst, 12000, 'analyse');
     const prompt = renderPrompt({
       kind: 'analyse', agent: analyst.agent, role: analyst.role, task, pack, adapterId: analyst.provider?.adapterId,
       extra: {
@@ -1076,7 +1121,7 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
     });
     const wiA = createWorkItemRecord(r.id, task, 'analyse', analyst, prompt, pack.hash);
     pendingAnalysis.set(wiA.id, { checkRunId: first.cr.id, taskId: task.id, checkName: first.check.name, files });
-    void executeWorkItem(wiA, analyst, prompt, null);
+    void executeWorkItem(wiA, analyst, prompt.text, null);
     return;
   }
 
@@ -1125,7 +1170,7 @@ function routeFixAfterReport(task: Task, reportId: string): void {
     postMessage({ runId: r.id, taskId: task.id, from: fromAgent, to: task.ownerAgentId, kind: 'finding',
       text: `${reportId}: ${report.title}. Suspected cause: ${report.suspectedCause?.summary ?? 'unknown'}. Suggested fix: ${report.suggestedFix?.approach ?? '—'}` });
   }
-  dispatchFix(task, `Fix ${reportId}: ${report.title}\n\nSuspected cause: ${report.suspectedCause?.summary ?? '?'}\n\nLog excerpt:\n${report.evidence?.logExcerpt ?? ''}`, true);
+  dispatchFix(task, `Fix ${reportId}: ${report.title}\n\nSuspected cause: ${report.suspectedCause?.summary ?? '?'}\n\nLog excerpt:\n${compactLog(report.evidence?.logExcerpt ?? '', 60)}`, true);
 }
 
 // pmPrompt: the PM's rework instructions from acceptance — sent as written
@@ -1160,7 +1205,7 @@ function dispatchFix(task: Task, reason: string, fromError: boolean, pmPrompt?: 
     return;
   }
   const repo = getRepo(r.repoId);
-  const pack = packFor(repo, task, candidate, 16000);
+  const pack = packFor(repo, task, candidate, 16000, 'fix');
   if (candidate.agent.id !== task.ownerAgentId) {
     pmHandoff(r, task, candidate, `Reassigning "${task.title}" to you (${candidate.role.name}) from ${getAgent(task.ownerAgentId)?.name ?? 'its previous owner'}. ${reason.split('\n')[0]}`.slice(0, 600));
   }
@@ -1178,7 +1223,7 @@ function dispatchFix(task: Task, reason: string, fromError: boolean, pmPrompt?: 
   if (pmPrompt) {
     const header = [`# Rework: ${task.title}`, task.description,
       task.acceptanceCriteria.length ? `Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
-    const prompt = finalizeApprovedPrompt(`${header}\n\n## Instructions from the PM\n${pmPrompt}`, 'fix', candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)));
+    const prompt = finalizeApprovedPrompt(`${header}\n\n## Instructions from the PM\n${pmPrompt}`, 'fix', candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)), pack.budgetChars);
     setTaskStatus(task.id, 'assigned', 'pm', { fixer: candidate.agent.name });
     dispatchWork(r, task, 'fix', candidate, prompt, pack.hash, task.worktree, false);
     return;
@@ -1218,7 +1263,8 @@ function dispatchQa(task: Task, results: CheckOutcome[]): boolean {
   const tester = pickAgent(r.workspaceId, 'qa', task, 'qa', task.difficulty);
   if (!tester || !task.worktree) return false;
   const repo = getRepo(r.repoId);
-  const pack = packFor(repo, task, tester, 12000);
+  const diff = repo && task.worktree ? taskDiff(repo, task) : '';
+  const pack = packFor(repo, task, tester, 12000, 'qa', { diffChars: diff.length });
   if (task.ownerAgentId && task.ownerAgentId !== tester.agent.id) {
     postMessage({ runId: r.id, taskId: task.id, from: task.ownerAgentId, to: tester.agent.id, kind: 'handoff',
       text: `"${task.title}" passed the engine checks (${results.map((x) => `${x.check.name} ${x.cr.status}`).join(', ') || 'none ran'}). My notes are in CHANGE_NOTES — please review and validate it.` });
@@ -1229,7 +1275,7 @@ function dispatchQa(task: Task, results: CheckOutcome[]): boolean {
     extra: {
       changeNotes: changeNotes(task),
       approvedPrompt: approvedPromptFor(task.id),
-      diff: repo ? taskDiff(repo, task) : '',
+      diff,
       checkResults: results.map((x) => `${x.check.name}: ${x.cr.status} — ${x.cr.summary}`).join('\n'),
       inbox: reviewed ? '' : inboxText(tester, r.id, task.id),
     },
@@ -1255,7 +1301,7 @@ function dispatchReview(task: Task, results: CheckOutcome[], qaReport?: string):
   }
   const repo = getRepo(r.repoId);
   const diff = task.worktree && repo ? taskDiff(repo, task) : '';
-  const pack = packFor(repo, task, candidate, 12000);
+  const pack = packFor(repo, task, candidate, 12000, 'review', { diffChars: diff.length });
   const checkSummary = results.map((x) => `${x.check.name}: ${x.cr.status} — ${x.cr.summary}`).join('\n');
   if (task.ownerAgentId && task.ownerAgentId !== candidate.agent.id) {
     postMessage({ runId: r.id, taskId: task.id, from: task.ownerAgentId, to: candidate.agent.id, kind: 'handoff',
@@ -1326,7 +1372,7 @@ export async function proceedMerge(taskId: string): Promise<void> {
 
 interface PromptJob {
   runId: string; taskId: string; kind: WorkItemKind; targetAgentId: string;
-  basePrompt: string; packHash: string; worktree: string | null;
+  basePrompt: string; packHash: string; worktree: string | null; budgetChars?: number;
   revision: number; draft?: string; notes?: string; creatorId?: string;
   drafter: 'prompt-creator' | 'pm';   // who writes the prompt
   findings?: string;                   // what a correction must address
@@ -1382,14 +1428,14 @@ function dispatchAccept(task: Task, qaReport: string, qaFailed: boolean): boolea
   const pm = pickHelper(r.workspaceId, 'pm', [task.ownerAgentId ?? undefined]);
   if (!pm) return false;
   // a short prompt: no repo files, no diff — the PM judges outcomes, not code
-  const emptyPack: ContextPack = { repoSummary: '', files: [], errors: [], kbNotes: [], hash: 'accept', approxTokens: 0 };
+  const pack = deskPack(pm, 12000, 'accept');
   const prompt = renderPrompt({
-    kind: 'accept', agent: pm.agent, role: pm.role, task, goal: r.goal, pack: emptyPack, adapterId: pm.provider?.adapterId,
+    kind: 'accept', agent: pm.agent, role: pm.role, task, goal: r.goal, pack, adapterId: pm.provider?.adapterId,
     extra: { changeNotes: changeNotes(task).slice(0, 3000), qaReport: qaReport.slice(0, 4000), approvedPrompt: approvedPromptFor(task.id), inbox: inboxText(pm, r.id, task.id) },
   });
   setTaskStatus(task.id, 'in-review', 'engine', { stage: 'accept', pm: pm.agent.name, qa: qaFailed ? 'fail' : 'pass' });
-  const wi = createWorkItemRecord(r.id, task, 'accept', pm, prompt, emptyPack.hash);
-  void executeWorkItem(wi, pm, prompt, null);
+  const wi = createWorkItemRecord(r.id, task, 'accept', pm, prompt, pack.hash);
+  void executeWorkItem(wi, pm, prompt.text, null);
   return true;
 }
 
@@ -1415,20 +1461,22 @@ function pipelineHalted(job: PromptJob): boolean {
   return true;
 }
 
-function dispatchWork(r: Run, task: Task, kind: WorkItemKind, target: Candidate, prompt: string, packHash: string, worktree: string | null, review: boolean, findings?: string): void {
+function dispatchWork(r: Run, task: Task, kind: WorkItemKind, target: Candidate, prompt: string | RenderedPrompt, packHash: string, worktree: string | null, review: boolean, findings?: string): void {
+  const promptText = typeof prompt === 'string' ? prompt : prompt.text;
+  const budgetChars = typeof prompt === 'string' ? undefined : prompt.budgetChars;
   if (review) {
     // pipeline: the Prompt Creator drafts and the PM reviews; without a
     // Prompt Creator the PM writes the prompt itself
     const pm = pickHelper(r.workspaceId, 'pm', [target.agent.id]);
     const creator = promptMode(r) !== 'handoffs' ? pickHelper(r.workspaceId, 'prompt-creator', [target.agent.id]) : null;
     if (pm) {
-      startPromptDraft({ runId: r.id, taskId: task.id, kind, targetAgentId: target.agent.id, basePrompt: prompt, packHash, worktree, revision: 0, drafter: creator ? 'prompt-creator' : 'pm', findings });
+      startPromptDraft({ runId: r.id, taskId: task.id, kind, targetAgentId: target.agent.id, basePrompt: promptText, packHash, worktree, budgetChars, revision: 0, drafter: creator ? 'prompt-creator' : 'pm', findings });
       return;
     }
     emit('prompt.review.skipped', 'engine', { taskId: task.id, reason: 'no PM available to write the prompt' }, r.id, task.id);
   }
   const wi = createWorkItemRecord(r.id, task, kind, target, prompt, packHash);
-  void executeWorkItem(wi, target, prompt, worktree);
+  void executeWorkItem(wi, target, promptText, worktree);
 }
 
 function startPromptDraft(job: PromptJob): void {
@@ -1444,9 +1492,10 @@ function startPromptDraft(job: PromptJob): void {
   }
   if (!creator) { escalatePrompt(job, `no ${job.drafter === 'pm' ? 'PM' : 'Prompt Creator'} is available to write the prompt`); return; }
   const target = getAgent(job.targetAgentId);
-  const emptyPack: ContextPack = { repoSummary: '', files: [], errors: [], kbNotes: [], hash: job.packHash, approxTokens: 0 };
+  // desk work: no repo tour — the brief plus the target's facts are the job
+  const pack = deskPack(creator, 12000, job.packHash);
   const prompt = renderPrompt({
-    kind: 'prompt', agent: creator.agent, role: creator.role, task, goal: r.goal, pack: emptyPack, adapterId: creator.provider?.adapterId,
+    kind: 'prompt', agent: creator.agent, role: creator.role, task, goal: r.goal, pack, adapterId: creator.provider?.adapterId,
     // the drafter writes a short brief from the facts; the engine attaches
     // repository context, criteria and contract itself when it dispatches
     extra: {
@@ -1458,7 +1507,7 @@ function startPromptDraft(job: PromptJob): void {
   const wi = createWorkItemRecord(r.id, task, 'prompt', creator, prompt, job.packHash);
   promptJobs.set(wi.id, { ...job, creatorId: creator.agent.id });
   setPromptStage(task, job.revision ? 'revising' : 'drafting', { revision: job.revision, agent: creator.agent.name });
-  void executeWorkItem(wi, creator, prompt, null);
+  void executeWorkItem(wi, creator, prompt.text, null);
 }
 
 function startPromptReview(job: PromptJob): void {
@@ -1469,15 +1518,15 @@ function startPromptReview(job: PromptJob): void {
   // the PM never reviews a prompt it drafted, nor one it will execute
   const pm = pickHelper(r.workspaceId, 'pm', [job.creatorId, job.targetAgentId]);
   if (!pm) { escalatePrompt(job, 'no PM is available to review the prompt'); return; }
-  const emptyPack: ContextPack = { repoSummary: '', files: [], errors: [], kbNotes: [], hash: job.packHash, approxTokens: 0 };
+  const pack = deskPack(pm, 12000, job.packHash);
   const prompt = renderPrompt({
-    kind: 'prompt-review', agent: pm.agent, role: pm.role, task, goal: r.goal, pack: emptyPack, adapterId: pm.provider?.adapterId,
+    kind: 'prompt-review', agent: pm.agent, role: pm.role, task, goal: r.goal, pack, adapterId: pm.provider?.adapterId,
     extra: { draft: job.draft, target: `${getAgent(job.targetAgentId)?.name ?? job.targetAgentId} (${job.kind})`, inbox: inboxText(pm, r.id, task.id) },
   });
   const wi = createWorkItemRecord(r.id, task, 'prompt-review', pm, prompt, job.packHash);
   promptJobs.set(wi.id, job);
   setPromptStage(task, 'pm-review', { revision: job.revision, agent: pm.agent.name });
-  void executeWorkItem(wi, pm, prompt, null);
+  void executeWorkItem(wi, pm, prompt.text, null);
 }
 
 function dispatchApprovedPrompt(job: PromptJob): void {
@@ -1495,13 +1544,13 @@ function dispatchApprovedPrompt(job: PromptJob): void {
   const draft = job.draft ?? job.basePrompt;
   const isBrief = !draft.includes('OUTPUT CONTRACT');
   const body = isBrief ? `## Brief (approved by the PM)\n${draft.trim()}\n\n${job.basePrompt}` : draft;
-  const prompt = finalizeApprovedPrompt(body, job.kind, target.provider?.adapterId, inboxText(target, r.id, task.id), target.role, handoffPath(task, isDirect(r)));
+  const prompt = finalizeApprovedPrompt(body, job.kind, target.provider?.adapterId, inboxText(target, r.id, task.id), target.role, handoffPath(task, isDirect(r)), job.budgetChars ?? 0);
   if (isBrief) setTaskMeta(task.id, job.kind === 'implement' ? 'approvedBrief' : 'lastCorrection', draft.trim().slice(0, 6000));
   setPromptStage(task, 'approved', { revision: job.revision });
   if (task.status === 'waiting-input') setTaskStatus(task.id, 'assigned', 'engine', { agent: target.agent.name });
   const wi = createWorkItemRecord(r.id, task, job.kind, target, prompt, job.packHash);
   run('UPDATE prompt_versions SET template_id = ?, version = ? WHERE id = ?', `${job.kind}/approved`, job.revision + 1, wi.promptVersionId);
-  void executeWorkItem(wi, target, prompt, job.worktree);
+  void executeWorkItem(wi, target, prompt.text, job.worktree);
 }
 
 function escalatePrompt(job: PromptJob, why: string): void {

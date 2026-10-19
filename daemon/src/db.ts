@@ -186,6 +186,8 @@ addColumn('skill_versions', 'content', `TEXT`);          // SKILL.md text the ag
 addColumn('skill_versions', 'source_dir', `TEXT`);       // where it was imported from
 addColumn('skills', 'category', `TEXT DEFAULT 'role'`);   // 'general' (reusable) | 'role' (role-specific)
 addColumn('skills', 'updated_at', `TEXT`);
+addColumn('prompt_versions', 'dropped', `TEXT DEFAULT '[]'`);      // sections cut to fit the context budget
+addColumn('prompt_versions', 'budget_chars', `INTEGER`);           // the budget the prompt was fitted to
 
 export default db;
 

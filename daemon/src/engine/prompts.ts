@@ -1,4 +1,4 @@
-import { sha256 } from '../util.ts';
+import { capDiff, compactLog, sha256 } from '../util.ts';
 import { redact } from '../config.ts';
 import type { Agent as A, Role, Task, WorkItemKind } from '../types.ts';
 import type { ContextPack as CP } from '../services/context.ts';
@@ -7,6 +7,12 @@ import type { ContextPack as CP } from '../services/context.ts';
 // kind; every render is stored as a PromptVersion. Untrusted content (repo
 // files, logs) is wrapped in delimited DATA blocks — prompt-injection
 // defence 10.3.
+//
+// Layout: everything stable for a (task, kind, agent) — header, role, goal,
+// the task brief, the output contract — comes first so providers with prompt
+// caching reuse the prefix. Volatile data blocks (repo summary, diffs, logs,
+// inbox) follow in a fixed order. When the total would exceed the pack's
+// char budget, low-value blocks are dropped first and the drops are recorded.
 
 // The developer documents its own delivery; the tester and the PM read this
 // instead of anyone copying notes between tools.
@@ -214,75 +220,132 @@ function roleSection(role: Role | undefined): string {
 
 const FILE_KINDS: WorkItemKind[] = ['implement', 'fix', 'test', 'doc'];
 
+// A rendered prompt plus what was cut to fit the budget (recorded on the
+// prompt_versions row so trimmed context is auditable).
+export interface RenderedPrompt { text: string; dropped: string[]; budgetChars: number }
+
+// Newest messages stay; older ones collapse to a count. (The inbox block is
+// also the third thing dropped when a prompt still exceeds its budget.)
+function capInbox(text: string, maxMessages = 4, maxChars = 3000): string {
+  const lines = text.split('\n').filter((l) => l.trim());
+  const kept = lines.slice(-maxMessages);
+  const body = kept.join('\n').slice(-maxChars);
+  const omitted = lines.length - kept.length;
+  return (omitted > 0 ? `(${omitted} older message${omitted === 1 ? '' : 's'} omitted)\n` : '') + body;
+}
+
+interface DataSection { key: string; text: string }
+
+// Over budget: drop in this order — repo tour, file excerpts (README first,
+// it is pushed first), team inbox (pre-capped to the newest messages above),
+// prior error excerpts. (Skills ride outside the stored prompt and drop even
+// earlier — see executeWorkItem.) Remaining oversize blocks get mid-truncated.
+const DROP_PREFIXES = ['repo-summary', 'file:', 'messages', 'error:'];
+
+function fitSections(data: DataSection[], fixedChars: number, tailChars: number, budgetChars: number): { sections: string[]; dropped: string[] } {
+  const dropped: string[] = [];
+  let total = fixedChars + tailChars + data.reduce((s, d) => s + d.text.length + 2, 0);
+  if (budgetChars > 0 && total > budgetChars) {
+    const keep = [...data];
+    for (const prefix of DROP_PREFIXES) {
+      for (let i = 0; i < keep.length && total > budgetChars; i++) {
+        if (!keep[i].key.startsWith(prefix)) continue;
+        total -= keep[i].text.length + 2;
+        dropped.push(keep[i].key.replace(/^(file|error):/, '$1 '));
+        keep.splice(i, 1); i--;
+      }
+      if (total <= budgetChars) break;
+    }
+    // still too big: mid-truncate the largest blocks, biggest first
+    for (const s of [...keep].sort((a, b) => b.text.length - a.text.length)) {
+      if (total <= budgetChars || s.text.length <= 3000) continue;
+      const cut = s.text.slice(0, 2000) + '\n… (section truncated to fit context budget)\n' + s.text.slice(-800);
+      total += cut.length - s.text.length;
+      s.text = cut;
+    }
+    return { sections: keep.map((k) => k.text), dropped };
+  }
+  return { sections: data.map((d) => d.text), dropped };
+}
+
 export function renderPrompt(opts: {
   kind: WorkItemKind; agent: A; task: Task | null; goal?: string;
   pack: CP; extra?: Record<string, unknown>; adapterId?: string; role?: Role;
-}): string {
+}): RenderedPrompt {
   const { kind, agent, task, goal, pack } = opts;
-  const sections: string[] = [];
-
-  sections.push(`# Office work item: ${kind}`);
-  const roleText = roleSection(opts.role);
-  if (roleText) sections.push(roleText);
-  if (goal) sections.push(`Run goal: ${goal}`);
-  if (task) {
-    sections.push(`\n## Task ${task.title}\n${task.description}`);
-    if (task.acceptanceCriteria.length)
-      sections.push(`Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`);
-  }
-
-  if (pack.repoSummary) sections.push(dataBlock('REPO_SUMMARY', pack.repoSummary));
-  for (const f of pack.files) sections.push(dataBlock(`FILE ${f.path}`, f.excerpt));
-  for (const e of pack.errors) sections.push(dataBlock(`ERROR ${e.id}`, `${e.title}\n${e.excerpt}`));
-
   const extra = opts.extra ?? {};
-  if (extra.diff) sections.push(dataBlock('DIFF', String(extra.diff).slice(0, 12000)));
-  if (extra.checkResults) sections.push(dataBlock('CHECK_RESULTS', String(extra.checkResults)));
-  if (extra.cycleSummary) sections.push(dataBlock('CYCLE_SUMMARY', String(extra.cycleSummary)));
-  if (extra.kbNotes) sections.push(dataBlock('KB_MATCHES', String(extra.kbNotes)));
-  if (kind === 'plan') {
-    sections.push(extra.bootstrap
-      ? 'This is the bootstrap plan: draft the Definition of Done and the initial task graph.'
-      : 'Re-plan for the next cycle: add only tasks needed for failing DoD items or open errors; do not redo finished work.');
-    if (extra.availableChecks) sections.push(dataBlock('AVAILABLE_CHECKS', String(extra.availableChecks)));
-    if (extra.dodStatus) sections.push(dataBlock('DOD_STATUS', String(extra.dodStatus)));
-    if (extra.existingTasks) sections.push(dataBlock('EXISTING_TASKS', String(extra.existingTasks)));
-    if (extra.openErrors) sections.push(dataBlock('OPEN_ERRORS', String(extra.openErrors)));
+  const stable: string[] = [];
+  const data: DataSection[] = [];
+
+  // ---- stable prefix (cacheable): identical for repeat calls of this kind on this task
+  stable.push(`# Office work item: ${kind}`);
+  const roleText = roleSection(opts.role);
+  if (roleText) stable.push(roleText);
+  if (goal) stable.push(`Run goal: ${goal}`);
+  if (task) {
+    const brief = [`## Task: ${task.title}`];
+    if (task.description) brief.push(task.description);
+    if (task.acceptanceCriteria.length)
+      brief.push(`Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join('\n')}`);
+    stable.push(brief.join('\n'));
   }
-  if (extra.approvedPrompt) sections.push(dataBlock('APPROVED_PROMPT', String(extra.approvedPrompt).slice(0, 16000)));
-  if (extra.relevantFiles) sections.push(dataBlock('RELEVANT_FILES', String(extra.relevantFiles)));
-  if (extra.changeNotes) sections.push(dataBlock('CHANGE_NOTES', String(extra.changeNotes).slice(0, 6000)));
-  if (extra.qaReport) sections.push(dataBlock('QA_REPORT', String(extra.qaReport)));
-  if (extra.requirementsChanged) sections.push(dataBlock('REQUIREMENT_CHANGES', String(extra.requirementsChanged)));
-  if (extra.target) sections.push(dataBlock('TARGET', String(extra.target)));
-  if (extra.basePrompt) sections.push(dataBlock('BASE_PROMPT', String(extra.basePrompt)));
-  if (extra.draft) sections.push(dataBlock('PROMPT_UNDER_REVIEW', String(extra.draft)));
-  if (extra.revisionNotes) sections.push(dataBlock('REVISION_NOTES', String(extra.revisionNotes)));
-  if (extra.inbox) sections.push(dataBlock('TEAM_MESSAGES', String(extra.inbox)));
+  if (extra.approvedPrompt) stable.push(dataBlock('APPROVED_PROMPT', String(extra.approvedPrompt).slice(0, 8000)));
 
   switch (kind) {
-    case 'plan': sections.push(PLAN_CONTRACT); break;
+    case 'plan': stable.push(PLAN_CONTRACT); break;
     case 'implement': case 'fix': case 'test': case 'doc':
-      sections.push(opts.adapterId === 'cli' || opts.adapterId === 'devin' ? AGENT_FILE_CONTRACT : FILE_CONTRACT);
+      stable.push(opts.adapterId === 'cli' || opts.adapterId === 'devin' ? AGENT_FILE_CONTRACT : FILE_CONTRACT);
       break;
-    case 'review': sections.push(REVIEW_CONTRACT); break;
-    case 'analyse': sections.push(ANALYSE_CONTRACT); break;
-    case 'qa': sections.push(QA_CONTRACT); break;
-    case 'accept': sections.push(ACCEPT_CONTRACT); break;
-    case 'prompt': sections.push(PROMPT_CONTRACT); break;
-    case 'prompt-review': sections.push(PROMPT_REVIEW_CONTRACT); break;
+    case 'review': stable.push(REVIEW_CONTRACT); break;
+    case 'analyse': stable.push(ANALYSE_CONTRACT); break;
+    case 'qa': stable.push(QA_CONTRACT); break;
+    case 'accept': stable.push(ACCEPT_CONTRACT); break;
+    case 'prompt': stable.push(PROMPT_CONTRACT); break;
+    case 'prompt-review': stable.push(PROMPT_REVIEW_CONTRACT); break;
   }
-  if (!FILE_KINDS.includes(kind) && kind !== 'qa' && (opts.adapterId === 'cli' || opts.adapterId === 'devin')) sections.push(READ_ONLY);
-  if (kind !== 'prompt-review' && kind !== 'prompt') sections.push(COLLAB);
+  if (!FILE_KINDS.includes(kind) && kind !== 'qa' && (opts.adapterId === 'cli' || opts.adapterId === 'devin')) stable.push(READ_ONLY);
+  if (kind !== 'prompt-review' && kind !== 'prompt') stable.push(COLLAB);
+  if (kind === 'plan') {
+    stable.push(extra.bootstrap
+      ? 'This is the bootstrap plan: draft the Definition of Done and the initial task graph.'
+      : 'Re-plan for the next cycle: add only tasks needed for failing DoD items or open errors; do not redo finished work.');
+  }
 
-  sections.push(`\nRemember: you are ${agent.name}. ${agent.instructions || ''}`.trim());
-  return redact(sections.join('\n\n').replaceAll('{{HANDOFF}}', String(extra.handoffPath ?? 'HANDOFF.md')));
+  // ---- volatile data blocks (fixed order)
+  if (pack.repoSummary) data.push({ key: 'repo-summary', text: dataBlock('REPO_SUMMARY', pack.repoSummary) });
+  for (const f of pack.files) data.push({ key: `file:${f.path}`, text: dataBlock(`FILE ${f.path}`, f.excerpt) });
+  for (const e of pack.errors) data.push({ key: `error:${e.id}`, text: dataBlock(`ERROR ${e.id}`, `${e.title}\n${e.excerpt}`) });
+  if (extra.diff) data.push({ key: 'diff', text: dataBlock('DIFF', capDiff(String(extra.diff))) });
+  if (extra.checkResults) data.push({ key: 'check-results', text: dataBlock('CHECK_RESULTS', compactLog(String(extra.checkResults), 60)) });
+  if (extra.cycleSummary) data.push({ key: 'cycle-summary', text: dataBlock('CYCLE_SUMMARY', String(extra.cycleSummary)) });
+  if (extra.kbNotes) data.push({ key: 'kb', text: dataBlock('KB_MATCHES', String(extra.kbNotes)) });
+  if (kind === 'plan') {
+    if (extra.availableChecks) data.push({ key: 'checks', text: dataBlock('AVAILABLE_CHECKS', String(extra.availableChecks)) });
+    if (extra.dodStatus) data.push({ key: 'dod', text: dataBlock('DOD_STATUS', String(extra.dodStatus)) });
+    if (extra.existingTasks) data.push({ key: 'tasks', text: dataBlock('EXISTING_TASKS', String(extra.existingTasks)) });
+    if (extra.openErrors) data.push({ key: 'open-errors', text: dataBlock('OPEN_ERRORS', String(extra.openErrors)) });
+  }
+  if (extra.relevantFiles) data.push({ key: 'relevant-files', text: dataBlock('RELEVANT_FILES', String(extra.relevantFiles)) });
+  if (extra.changeNotes) data.push({ key: 'change-notes', text: dataBlock('CHANGE_NOTES', String(extra.changeNotes).slice(0, 6000)) });
+  if (extra.qaReport) data.push({ key: 'qa-report', text: dataBlock('QA_REPORT', String(extra.qaReport)) });
+  if (extra.requirementsChanged) data.push({ key: 'req-changes', text: dataBlock('REQUIREMENT_CHANGES', String(extra.requirementsChanged)) });
+  if (extra.target) data.push({ key: 'target', text: dataBlock('TARGET', String(extra.target)) });
+  if (extra.basePrompt) data.push({ key: 'base-prompt', text: dataBlock('BASE_PROMPT', String(extra.basePrompt)) });
+  if (extra.draft) data.push({ key: 'draft', text: dataBlock('PROMPT_UNDER_REVIEW', String(extra.draft)) });
+  if (extra.revisionNotes) data.push({ key: 'revision-notes', text: dataBlock('REVISION_NOTES', String(extra.revisionNotes)) });
+  if (extra.inbox) data.push({ key: 'messages', text: dataBlock('TEAM_MESSAGES', capInbox(String(extra.inbox))) });
+
+  const tail = `Remember: you are ${agent.name}. ${agent.instructions || ''}`.trim();
+  const budgetChars = pack.budgetChars ?? 0;
+  const fitted = fitSections(data, stable.join('\n\n').length, tail.length + 2, budgetChars);
+  const text = [...stable, ...fitted.sections, tail].join('\n\n');
+  return { text: redact(text.replaceAll('{{HANDOFF}}', String(extra.handoffPath ?? 'HANDOFF.md'))), dropped: fitted.dropped, budgetChars };
 }
 
 // The approved prompt from the Prompt Creator replaces the template body but
 // the engine's own contract and team inbox are always re-attached, so a draft
 // can never drop the output format the engine parses.
-export function finalizeApprovedPrompt(draft: string, kind: WorkItemKind, adapterId: string | undefined, inbox: string, role?: Role, handoffPath = 'HANDOFF.md'): string {
+export function finalizeApprovedPrompt(draft: string, kind: WorkItemKind, adapterId: string | undefined, inbox: string, role?: Role, handoffPath = 'HANDOFF.md', budgetChars = 0): RenderedPrompt {
   const contract = kind === 'review' ? REVIEW_CONTRACT
     : kind === 'qa' ? QA_CONTRACT
       : adapterId === 'cli' || adapterId === 'devin' ? AGENT_FILE_CONTRACT : FILE_CONTRACT;
@@ -291,10 +354,15 @@ export function finalizeApprovedPrompt(draft: string, kind: WorkItemKind, adapte
   const roleText = roleSection(role);
   if (roleText && !draft.includes(`## Your role: ${role!.name}`)) parts.unshift(roleText);
   if (!FILE_KINDS.includes(kind) && kind !== 'qa' && (adapterId === 'cli' || adapterId === 'devin')) parts.push(READ_ONLY);
-  if (inbox) parts.push(dataBlock('TEAM_MESSAGES', inbox));
+  const dropped: string[] = [];
+  if (inbox) {
+    const block = dataBlock('TEAM_MESSAGES', capInbox(inbox));
+    if (budgetChars > 0 && parts.join('\n\n').length + block.length + 2 > budgetChars) dropped.push('messages');
+    else parts.push(block);
+  }
   if (!draft.includes('OUTPUT CONTRACT')) parts.push(contract);
   if (!draft.includes('TEAM MESSAGES')) parts.push(COLLAB);
-  return redact(parts.join('\n\n').replaceAll('{{HANDOFF}}', handoffPath));
+  return { text: redact(parts.join('\n\n').replaceAll('{{HANDOFF}}', handoffPath)), dropped, budgetChars };
 }
 
 export function promptHash(text: string, packHash: string): string {
