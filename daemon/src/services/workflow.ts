@@ -203,7 +203,10 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
   for (const n of graph.nodes) {
     if (n.agentId) {
       const a = q1('SELECT id, name FROM agents WHERE id = ?', n.agentId);
-      if (!a) err(`agent "${n.agentId}" does not exist`, n.id);
+      // a pinned agent that was deleted is a warning, not an error — the
+      // graph stays structurally valid so Routing can flag the broken step
+      // (the engine dead-ends on it and asks the owner at run time)
+      if (!a) warn(`agent "${n.agentId}" does not exist — was it deleted?`, n.id);
       else if (members && !members.has(n.agentId)) warn(`${a.name} is not a member of this workspace`, n.id);
     }
     if (n.role && !roles.has(n.role)) err(`role "${n.role}" does not exist`, n.id);

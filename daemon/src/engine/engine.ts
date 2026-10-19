@@ -2829,8 +2829,9 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
   if (!roleMayDo(candidate.role.name, kind)) emit('workflow.role.mismatch', 'engine', { taskId: task.id, nodeId: node.id, role: candidate.role.name, kind }, r.id, task.id);
   if (writable && !wfEnsureTree(r, task, node)) return;
   const repo = getRepo(r.repoId);
-  const budget = node.config?.budgetChars ?? (writable ? 16000 : 12000);
-  const pack = packFor(repo, task, candidate, budget, kind);
+  // node.config.budgetChars is a char budget; packFor's `wanted` is tokens
+  const budgetTokens = node.config?.budgetChars != null ? Math.ceil(node.config.budgetChars / 4) : (writable ? 16000 : 12000);
+  const pack = packFor(repo, task, candidate, budgetTokens, kind);
   const s2 = wfState(task);
   const lastReport = s2.lastOutcome?.report;
   const prompt = renderPrompt({
@@ -2852,12 +2853,13 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
     },
   });
   // an approved draft replaces the writer's prompt — like dispatchApprovedPrompt
-  let promptText = prompt.text;
+  let record: RenderedPrompt = prompt;
   const packHash = pack.hash;
   if (writable && s2.draft?.approved) {
     const body = s2.draft.text.includes('OUTPUT CONTRACT') ? s2.draft.text : `## Brief (approved)\n${s2.draft.text.trim()}\n\n${prompt.text}`;
-    promptText = finalizeApprovedPrompt(body, kind, candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)), budget).text;
+    record = finalizeApprovedPrompt(body, kind, candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)), prompt.budgetChars);
   }
+  const promptText = record.text;
   // per-node attempt counting: re-entering a node that already delivered is
   // a retry of that step (attempt 2, 3…), which attempt-based behaviour —
   // scripted fail-once, retry policies — depends on. NULL the cache key too:
@@ -2866,7 +2868,7 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
   const reEntry = s2.fired.includes(node.id);
   s2.nodeAttempts = { ...(s2.nodeAttempts ?? {}), [node.id]: (s2.nodeAttempts?.[node.id] ?? 0) + 1 };
   const nodeAttempt = s2.nodeAttempts[node.id];
-  const wi = createWorkItemRecord(r.id, task, kind, candidate, promptText, packHash);
+  const wi = createWorkItemRecord(r.id, task, kind, candidate, record, packHash);
   if (wi.attempt !== nodeAttempt) { run('UPDATE work_items SET attempt = ? WHERE id = ?', nodeAttempt, wi.id); wi.attempt = nodeAttempt; }
   run('UPDATE work_items SET workflow_node_id = ?, workflow_edge_id = ? WHERE id = ?', node.id, viaEdge?.id ?? null, wi.id);
   wi.workflowNodeId = node.id;

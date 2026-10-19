@@ -72,7 +72,11 @@ test('validation: referenced agents and roles must exist; unknown refs error', (
   const badRole = { nodes: [...g.nodes, { ...n('bad'), role: 'nope' }], edges: [...g.edges, e('eb', 'dev', 'bad')] };
   assert.match(errs(validateWorkflow(badRole, 'ws-wf')), /role "nope" does not exist/);
   const badAgent = { nodes: [...g.nodes, n('bad2', { agentId: 'ag-nope', role: undefined })], edges: [...g.edges, e('eb2', 'dev', 'bad2')] };
-  assert.match(errs(validateWorkflow(badAgent, 'ws-wf')), /does not exist/);
+  // a pinned agent that vanished is a warning, not an error — the graph is
+  // still structurally valid, so Routing renders the step flagged and the
+  // engine dead-ends on it rather than failing to load the graph
+  const warns = (issues) => issues.filter((i) => i.level === 'warning').map((i) => i.message).join(' | ');
+  assert.match(warns(validateWorkflow(badAgent, 'ws-wf')), /does not exist/);
 });
 
 test('validation: separation of duties — same pinned agent cannot write and review', () => {
