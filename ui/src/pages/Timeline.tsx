@@ -25,6 +25,7 @@ export default function Timeline() {
   const [text, setText] = useState('');
   const [actor, setActor] = useState('');
   const [sel, setSel] = useState<OfficeEvent | null>(null);
+  const [cap, setCap] = useState(600);
   const [replaySeq, setReplaySeq] = useState<number | null>(null);
   const [replayState, setReplayState] = useState<any>(null);
 
@@ -115,7 +116,13 @@ export default function Timeline() {
       {events.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-4 items-start">
           <div className="panel max-h-[62vh] overflow-auto divide-line">
-            {filtered.map((e) => (
+            {/* cap rendered rows — a long run mounts the latest 600, earlier on demand */}
+            {filtered.length > cap && (
+              <button className="w-full text-center py-2 text-2xs text-fg-3 hover:text-fg hover:bg-raised/60" onClick={() => setCap((n) => n + 800)}>
+                {filtered.length - cap} earlier events — show more
+              </button>
+            )}
+            {filtered.slice(-cap).map((e) => (
               <button key={e.seq} onClick={() => setSel(e)} className={`w-full text-left px-3.5 h-9 flex items-center gap-3 transition-colors ${sel?.seq === e.seq ? 'bg-raised' : 'hover:bg-raised/60'} ${e.seq > at ? 'opacity-35' : ''}`}>
                 <span className="mono text-2xs text-fg-4 w-10 shrink-0">#{e.seq}</span>
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${colorFor(e.type)}`} />

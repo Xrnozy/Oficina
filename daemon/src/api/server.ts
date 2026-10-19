@@ -55,8 +55,23 @@ export function createServer(port: number, uiDir: string): http.Server {
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
+  // Big event payloads (a prompt's `detail` can be 12k chars) go to every
+  // client on every event — the wire gets a capped copy; the full event stays
+  // in the DB and /api/events/:seq serves it on demand.
+  const WS_FIELD_CAP = 2000;
+  const slim = (p: Record<string, unknown>): Record<string, unknown> => {
+    let out: Record<string, unknown> | null = null;
+    for (const [k, v] of Object.entries(p)) {
+      if (typeof v === 'string' && v.length > WS_FIELD_CAP) {
+        out ??= { ...p };
+        out[k] = `${v.slice(0, WS_FIELD_CAP)}\n… truncated`;
+        out[`${k}Truncated`] = true;
+      }
+    }
+    return out ?? p;
+  };
   onEvent((e) => {
-    const msg = JSON.stringify({ type: 'event', event: e });
+    const msg = JSON.stringify({ type: 'event', event: { ...e, payload: slim(e.payload) } });
     for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(msg);
   });
   wss.on('connection', (ws) => {
@@ -346,6 +361,13 @@ export function createServer(port: number, uiDir: string): http.Server {
   });
 
   app.get('/api/events', (req, res) => ok(res, listEvents({ sinceSeq: req.query.sinceSeq ? Number(req.query.sinceSeq) : undefined, limit: 500 })));
+
+  // full event incl. fields the WS broadcast truncates — the UI lazy-loads it
+  app.get('/api/events/:seq', (req, res) => {
+    const r = q1('SELECT * FROM events WHERE seq = ?', Number(req.params.seq));
+    if (!r) return err(res, 404, 'not found');
+    ok(res, { seq: r.seq, runId: r.run_id, ts: r.ts, actor: r.actor, type: r.type, entityId: r.entity_id, payload: parseJson(r.payload as string, {}) });
+  });
 
   app.get('/api/blobs/:ref', (req, res) => {
     const content = readBlob(`blob:${req.params.ref}`);

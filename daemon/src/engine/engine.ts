@@ -27,7 +27,7 @@ import { killCliChildrenForRun } from '../adapters/cli.ts';
 import { classifyChangeRisk, requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
 import { AdapterError } from '../adapters/types.ts';
 import { beginCheckpoint, endCheckpoint, getCheckpoint, recoverInterruptedCheckpoints, setCheckpointCommit, type Checkpoint } from '../services/checkpoints.ts';
-import { changedFilesBetween, displayDiff, liveChanges, snapshotTree } from '../services/snapshot.ts';
+import { changedFilesBetween, displayDiff, liveChanges, snapshotTree, snapshotTreeAsync, snapshotTreeRecent } from '../services/snapshot.ts';
 import { buildCommitMessage, commitPaths, currentBranch, dirtyPaths, planTaskCommit } from '../services/commits.ts';
 import { skillsFor } from '../services/skills.ts';
 import { finalizeRunSummary } from '../services/summary.ts';
@@ -240,16 +240,18 @@ function closeTaskCheckpoint(taskId: string): void {
   if (cp?.status === 'open') { try { endCheckpoint(cp.id); } catch (e) { emit('checkpoint.error', 'engine', { taskId, error: String(e).slice(0, 300) }, t.runId, taskId); } }
 }
 
-// Files and diff of everything the task changed so far.
+// Files and diff of everything the task changed so far. These only feed
+// prompt context — a seconds-old tree is fine and halves the snapshots a
+// delivery takes (checkpoints themselves always snapshot exactly).
 function taskFiles(repo: Repo, task: Task): string[] {
   const cp = taskCheckpoint(task);
   if (!cp) return task.worktree ? changedFiles(task.worktree, repo.integrationBranch) : [];
-  return changedFilesBetween(repo.path, cp.beforeTree, snapshotTree(repo.path)).map((f) => f.path).filter((p) => !p.startsWith('.office/'));
+  return changedFilesBetween(repo.path, cp.beforeTree, snapshotTreeRecent(repo.path)).map((f) => f.path).filter((p) => !p.startsWith('.office/'));
 }
 function taskDiff(repo: Repo, task: Task): string {
   const cp = taskCheckpoint(task);
   if (!cp) return task.worktree ? diffText(task.worktree, repo.integrationBranch) : '';
-  return displayDiff(repo.path, cp.beforeTree, snapshotTree(repo.path));
+  return displayDiff(repo.path, cp.beforeTree, snapshotTreeRecent(repo.path));
 }
 
 function execGit(repoPath: string, args: string[]): string {
@@ -1772,7 +1774,7 @@ function startPromptReview(job: PromptJob): void {
 function dispatchApprovedPrompt(job: PromptJob): void {
   if (pipelineHalted(job)) return;
   const r = getRun(job.runId)!;
-  const task = getTask(job.taskId);
+  let task = getTask(job.taskId);
   if (!task) return;
   // read-only lane (direct mode): a task that drafted its prompt while another
   // task held the tree parks here — the write stage still needs the tree.
@@ -1801,11 +1803,19 @@ function dispatchApprovedPrompt(job: PromptJob): void {
   const prompt = finalizeApprovedPrompt(body, job.kind, target.provider?.adapterId, inboxText(target, r.id, task.id), target.role, handoffPath(task, isDirect(r)), job.budgetChars ?? 0);
   if (isBrief) setTaskMeta(task.id, job.kind === 'implement' ? 'approvedBrief' : 'lastCorrection', draft.trim().slice(0, 6000));
   setPromptStage(task, 'approved', { revision: job.revision });
+  // a parked read-only-lane job carries worktree=null — in direct mode the task
+  // never got its worktree assigned on the normal path. Set it now so delivery
+  // verification (task.worktree!) doesn't see null.
+  const repo = getRepo(r.repoId);
+  if (isDirect(r) && !task.worktree && repo) {
+    const branch = currentBranch(repo.path) ?? '(detached)';
+    run('UPDATE tasks SET worktree = ?, branch = ? WHERE id = ?', repo.path, branch, task.id);
+    task = { ...task, worktree: repo.path, branch };
+  }
   if (task.status === 'waiting-input') setTaskStatus(task.id, 'assigned', 'engine', { agent: target.agent.name });
   const wi = createWorkItemRecord(r.id, task, job.kind, target, prompt, job.packHash);
   run('UPDATE prompt_versions SET template_id = ?, version = ? WHERE id = ?', `${job.kind}/approved`, job.revision + 1, wi.promptVersionId);
-  // a parked lane job carried worktree=null — resolve the real cwd now
-  void executeWorkItem(wi, target, prompt.text, job.worktree ?? (isDirect(r) ? getRepo(r.repoId)?.path ?? null : task.worktree ?? null));
+  void executeWorkItem(wi, target, prompt.text, job.worktree ?? (isDirect(r) ? repo?.path ?? null : task.worktree ?? null));
 }
 
 function escalatePrompt(job: PromptJob, why: string): void {
@@ -2074,10 +2084,10 @@ const dodCacheSet = dodCache.set.bind(dodCache);
 dodCache.set = (k, v) => { if (dodCache.size > 500) dodCache.delete(dodCache.keys().next().value!); return dodCacheSet(k, v); };
 
 // Files this run changed: from its first task checkpoint to the working tree now.
-function runChangedFiles(r: Run, repo: Repo): string[] {
+async function runChangedFiles(r: Run, repo: Repo): Promise<string[]> {
   const first = q1(`SELECT before_tree FROM repo_checkpoints WHERE run_id = ? AND kind = 'general' ORDER BY created_at, rowid LIMIT 1`, r.id);
   if (!first) return [];
-  try { return changedFilesBetween(repo.path, first.before_tree as string, snapshotTree(repo.path)).map((f) => f.path).filter((p) => !p.startsWith('.office/')); }
+  try { return changedFilesBetween(repo.path, first.before_tree as string, await snapshotTreeAsync(repo.path)).map((f) => f.path).filter((p) => !p.startsWith('.office/')); }
   catch { return []; }
 }
 
@@ -2089,7 +2099,7 @@ export async function evaluateDodOnIntegration(runId: string): Promise<{ pass: n
   const ref = direct ? (currentBranch(repo.path) ?? 'HEAD') : repo.integrationBranch;
   const items = dodItems(r);
   // the repository state these results describe: unchanged state → reuse
-  const state = direct ? snapshotTree(repo.path) : (headSha(wt) ?? '');
+  const state = direct ? await snapshotTreeAsync(repo.path) : (headSha(wt) ?? '');
   let pass = 0, required = 0;
   for (const item of items) {
     let ok = item.checks.length > 0;
@@ -2099,7 +2109,7 @@ export async function evaluateDodOnIntegration(runId: string): Promise<{ pass: n
       // repository since the run started (comparing main...HEAD on main is
       // always empty — that check could never pass and re-planning looped)
       if (direct && checkRef === 'git:diff') {
-        const changed = runChangedFiles(r, repo);
+        const changed = await runChangedFiles(r, repo);
         evidence.push({ check: checkRef, status: changed.length ? 'pass' : 'fail', summary: changed.length ? `${changed.length} file(s) changed by this run` : 'no changes made by this run' });
         if (!changed.length) ok = false;
         continue;

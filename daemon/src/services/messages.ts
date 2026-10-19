@@ -104,7 +104,9 @@ export function takeInbox(agentId: string, roleName: string | null, runId: strin
 
 export function formatInbox(msgs: AgentMessage[]): string {
   if (!msgs.length) return '';
-  const name = (id: string) => (q1('SELECT name FROM agents WHERE id = ?', id)?.name as string) ?? id;
+  // one lookup per inbox, not per message (was an N+1 in every prompt render)
+  const names = new Map(q('SELECT id, name FROM agents').map((a) => [a.id as string, a.name as string]));
+  const name = (id: string) => names.get(id) ?? id;
   return msgs.map((m) => `[${m.kind}] from ${name(m.fromAgent)}${m.toRole === 'all' ? ' (to everyone)' : ''}: ${m.text}`).join('\n');
 }
 

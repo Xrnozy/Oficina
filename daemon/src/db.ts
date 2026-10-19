@@ -197,6 +197,11 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_cache ON work_items(cache_key, status
 addColumn('error_kb', 'repo_id', `TEXT`);                          // per-repo lessons (spec 6.5)
 addColumn('runs', 'summary_md', `TEXT`);                           // model-free end-of-run summary (spec 6.6)
 
+// Stage 7 indexes: the hot predicates that had only run_id indexes before
+db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_task ON work_items(task_id, status)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_msg_run_read ON agent_messages(run_id, read_at)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_events_run_ts ON events(run_id, ts)`);
+
 export default db;
 
 type Row = Record<string, unknown>;

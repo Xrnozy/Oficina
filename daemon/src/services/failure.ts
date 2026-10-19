@@ -16,6 +16,9 @@ const FATAL = [
   /\b401\b|\b403\b|unauthori[sz]ed|forbidden|invalid api.?key|api.?key (missing|invalid|expired)|permission denied|login required|not logged in|authentication/i,
   /not installed|enoent|cannot find|no such file|spawn \S+ failed|missing cli|command not found|executable .* not found/i,
   /repo.?conflict|checkout failed|worktree .*missing|not a git repo|dubious ownership/i,
+  // engine-side misuse (bad argument, null path) is deterministic — retrying
+  // can only loop, so it surfaces as fatal with a Needs-you, not a backoff
+  /\bmust be of type\b|argument must be|cannot read propert|is not a function|received (null|undefined)\b/i,
 ];
 const MODEL_QUALITY = [
   /^bad-response/i, /invalid (output|json|reply)|unparseable|failed validation|empty (output|reply|response)|malformed/i,

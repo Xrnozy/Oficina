@@ -139,6 +139,49 @@ export function snapshotTree(repo: string): string {
   }
 }
 
+// Async twin of snapshotTree for callers already on an async path (DoD
+// evaluation, delivery verification): identical steps via runAsync so the
+// HTTP/event loop is never held while git walks the working tree.
+export async function snapshotTreeAsync(repo: string): Promise<string> {
+  const env = { GIT_INDEX_FILE: indexFor(repo) };
+  const must = async (args: string[]) => {
+    const r = await runAsync(repo, args, { env });
+    if (!r.ok) throw new Error(r.err.trim() || 'git failed');
+    return r.out;
+  };
+  try {
+    const big = (await must([...cacheExcludes(), 'ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean)
+      .filter((f) => { try { return fs.statSync(path.join(repo, f)).size > MAX_SNAPSHOT_FILE; } catch { return false; } });
+    skippedLarge.set(repo, big);
+    const spec = path.join(os.tmpdir(), `oc-spec-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(spec, ['.', ...big.map((f) => `:(exclude,literal)${f}`)].join('\0'));
+    let res: { ok: boolean; out: string; err: string };
+    try { res = await runAsync(repo, [...cacheExcludes(), 'add', '-A', '--ignore-errors', `--pathspec-from-file=${spec}`, '--pathspec-file-nul'], { env }); }
+    finally { fs.rmSync(spec, { force: true }); }
+    const unaddable = [...res.err.matchAll(/(?:invalid path|unable to add|unable to index file) '([^']+)'/g)].map((m) => m[1]);
+    skippedBroken.set(repo, [...new Set(unaddable)]);
+    if (!res.ok && !unaddable.length) throw new Error(res.err.trim() || 'git add failed');
+    await must(['rm', '-r', '-q', '--cached', '--ignore-unmatch', '--', ...OWN]);
+    return (await must(['write-tree'])).trim();
+  } catch (e) {
+    const p = privateIndex.get(`${repo}\0`);
+    if (p) { fs.rmSync(p, { force: true }); privateIndex.delete(`${repo}\0`); }
+    throw e;
+  }
+}
+
+// A snapshot taken moments ago is good enough for *display* consumers (the
+// changed-file list and diff sent to QA/review prompts — never checkpoints).
+// One delivery path used to snapshot the same tree twice back-to-back.
+const recentTrees = new Map<string, { tree: string; at: number }>();
+export function snapshotTreeRecent(repo: string, ttlMs = 3000): string {
+  const hit = recentTrees.get(repo);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.tree;
+  const tree = snapshotTree(repo);
+  recentTrees.set(repo, { tree, at: Date.now() });
+  return tree;
+}
+
 /** Live view of an agent's changes: snapshot tree plus changed files with
  *  line counts against `base`, without blocking the event loop. Uses its own
  *  private index so it never collides with a checkpoint snapshot. */

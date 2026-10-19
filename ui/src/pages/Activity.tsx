@@ -64,9 +64,23 @@ export default function Activity() {
       .then((lists) => setEvents(lists.flat().sort((a, b) => a.seq - b.seq)));
   }, [activeKey, runs?.[0]?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // events stream in one message per WS frame — batch them so a busy run
+  // re-renders at ~4fps instead of once per event
+  const buf = useRef<OfficeEvent[]>([]);
+  const bufTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   useEvents((e) => {
-    if (e.runId && active.length && !active.some((r) => r.id === e.runId)) return;
-    if (ALL.has(e.type)) setEvents((prev) => [...prev.slice(-4000), e]);
+    if (e.runId && activeRef.current.length && !activeRef.current.some((r) => r.id === e.runId)) return;
+    if (!ALL.has(e.type)) return;
+    buf.current.push(e);
+    if (!bufTimer.current) {
+      bufTimer.current = setTimeout(() => {
+        bufTimer.current = null;
+        const batch = buf.current; buf.current = [];
+        setEvents((prev) => [...prev, ...batch].slice(-4000));
+      }, 250);
+    }
   });
 
   const members = (agents ?? []).filter((a) => (a.memberships ?? []).some((m: any) => m.active));
@@ -127,6 +141,7 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
+  const [limit, setLimit] = useState(300);
   const [msg, setMsg] = useState('');
   const [to, setTo] = useState('');
   const recipient = agent?.id ?? to;
@@ -153,8 +168,15 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
       <div className="relative flex-1 min-h-0">
         <div ref={ref} onScroll={(e) => { const el = e.currentTarget; setPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 24); }}
           className={`absolute inset-0 overflow-auto px-4 py-3 ${tab === 'technical' ? 'font-mono text-[11px] leading-[17px] bg-sunken/30 space-y-0.5' : 'space-y-2 text-[13px]'}`}>
+          {/* paginate: render the latest 300; earlier history on demand — a long
+              run used to mount every row at once */}
+          {shown.length > limit && (
+            <button className="w-full btn btn-ghost btn-sm text-2xs" onClick={() => setLimit((n) => n + 500)}>
+              Show earlier events ({shown.length - limit} hidden)
+            </button>
+          )}
           {tab === 'activity'
-            ? shown.map((e) => {
+            ? shown.slice(-limit).map((e) => {
               const who = !agent ? agentOf(e) : null;
               return (
                 <div key={e.seq} className={who ? 'flex gap-2' : ''}>
@@ -163,7 +185,7 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
                 </div>
               );
             })
-            : shown.map((e) => (
+            : shown.slice(-limit).map((e) => (
               <div key={e.seq} className="flex gap-2">
                 <span className="text-fg-4 shrink-0 num">{fmtTime(e.ts)}</span>
                 {!agent && <span className="text-fg-4 shrink-0 w-20 truncate">{e.actor}</span>}
@@ -171,6 +193,7 @@ function Feed({ agent, members, shown, tab, setTab, state, agentOf, now }: {
               </div>
             ))}
           {!shown.length && <div className="text-fg-4 py-10 text-center text-xs">{tab === 'activity' ? 'Nothing yet. Activity appears here as soon as an agent starts.' : 'No technical records yet.'}</div>}
+          {shown.length > limit && <div className="text-2xs text-fg-4 text-center pt-1">latest {limit} of {shown.length}</div>}
         </div>
         {!pinned && <button onClick={() => setPinned(true)} className="absolute bottom-3 left-1/2 -translate-x-1/2 btn btn-xs shadow-pop"><ArrowDown size={11} /> Jump to latest</button>}
       </div>
@@ -279,7 +302,7 @@ function ActivityRow({ e, wide }: { e: OfficeEvent; wide: boolean }) {
   const p = e.payload as Record<string, any>;
   if (e.type === 'agent.activity') {
     switch (p.kind) {
-      case 'prompt': return <Row icon={MessageSquare} tone="text-accent" time={e.ts}><Expand label={<span className="text-fg-2 font-medium">{p.text}</span>}>{p.detail}</Expand></Row>;
+      case 'prompt': return <Row icon={MessageSquare} tone="text-accent" time={e.ts}><Expand label={<span className="text-fg-2 font-medium">{p.text}</span>}>{p.detailTruncated ? <FullDetail seq={e.seq} preview={p.detail} /> : p.detail}</Expand></Row>;
       case 'status': return <Row icon={CircleDot} tone="text-fg-4" time={e.ts}><span className="text-fg-4 text-xs">{p.text}</span></Row>;
       case 'message': return <Row icon={MessageSquare} tone="text-fg-2" time={e.ts}><div className="text-fg whitespace-pre-wrap">{p.text}</div></Row>;
       case 'reasoning': return <Row icon={Sparkles} tone="text-fg-4" time={e.ts}><Expand label={<span className="text-fg-3 italic">Reasoning (as emitted by the CLI)</span>}>{p.text}</Expand></Row>;
@@ -349,6 +372,13 @@ function ActivityRow({ e, wide }: { e: OfficeEvent; wide: boolean }) {
     case 'merge.completed': return line(CheckCircle2, 'text-ok', 'Merged');
     default: return null;
   }
+}
+
+// The WS broadcast caps long fields at ~2k chars; fetch the stored event on demand.
+function FullDetail({ seq, preview }: { seq: number; preview: string }) {
+  const [full, setFull] = useState<string | null>(null);
+  useEffect(() => { let dead = false; get<any>(`/events/${seq}`).then((ev) => { if (!dead) setFull(String(ev?.payload?.detail ?? preview)); }).catch(() => {}); return () => { dead = true; }; }, [seq, preview]);
+  return <>{full ?? preview}</>;
 }
 
 function technicalText(e: OfficeEvent): string {
