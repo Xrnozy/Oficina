@@ -139,7 +139,7 @@ function AgentModels({ agent, providers, onSaved }: { agent: any; providers: any
 // One agent node's routing panel: the node's model-tier override and prompt
 // budget (node.config — the same fields the Workflow inspector edits), then
 // the ordered model options of every agent the node can dispatch to.
-function NodeRouting({ step, rv, agents, providers, onSaved }: { step: RoutingStep; rv: RoutingView; agents: any[]; providers: any; onSaved: () => void }) {
+function NodeRouting({ step, rv, agentFor, providers, onSaved }: { step: RoutingStep; rv: RoutingView; agentFor: (id: string) => any; providers: any; onSaved: () => void }) {
   const editable = rv.custom;
   const [tier, setTier] = useState(step.modelTier ?? '');
   const [budget, setBudget] = useState(step.budgetChars != null ? String(step.budgetChars) : '');
@@ -152,7 +152,7 @@ function NodeRouting({ step, rv, agents, providers, onSaved }: { step: RoutingSt
     }), `${step.label}: routing saved — a new workflow version`);
     if (r) onSaved();
   };
-  const full = (id: string) => agents.find((a) => a.id === id);
+  const full = (id: string) => agentFor(id);
   return (
     <div className="space-y-3">
       <div className="flex items-end gap-3 flex-wrap rounded-lg border border-line/70 bg-raised/40 px-3 py-2">
@@ -311,6 +311,18 @@ export default function Routing() {
   const approvalMode: (typeof APPROVAL_MODES)[number] = s.approvalMode === 'ask-when-risky' ? 'ask-when-risky' : s.approvalMode === 'auto' ? 'auto' : 'always-ask';
   const setting = (patch: Record<string, unknown>, msg: string) => ws && act(put(`/workspaces/${ws.id}/settings`, patch), msg).then(reloadWs);
   const reload = () => { reloadAgents(); reloadProviders(); };
+  // agents/providers refetch on every (throttled) ws tick — keep object
+  // identity stable for unchanged rows so an in-flight option edit isn't
+  // reset by an unrelated event
+  const stableAgents = useRef(new Map<string, any>());
+  const agentFor = (id: string) => {
+    const next = (agents ?? []).find((a) => a.id === id);
+    if (!next) return null;
+    const prev = stableAgents.current.get(id);
+    if (prev && JSON.stringify(prev) === JSON.stringify(next)) return prev;
+    stableAgents.current.set(id, next);
+    return next;
+  };
 
   return (
     <div className="space-y-5">
@@ -357,7 +369,7 @@ export default function Routing() {
                   {step.disabled && <Tag tone="idle">bypassed</Tag>}
                 </span>
               }>
-              <NodeRouting step={step} rv={rv!} agents={agents ?? []} providers={providers} onSaved={() => { reloadRv(); reload(); }} />
+              <NodeRouting step={step} rv={rv!} agentFor={agentFor} providers={providers} onSaved={() => { reloadRv(); reload(); }} />
             </Panel>
           ))}
           {rv && rv.notInWorkflow.length > 0 && (

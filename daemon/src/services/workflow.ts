@@ -124,7 +124,8 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     ids.add(n.id);
     if (n.type === 'agent' && !n.agentId && !n.role) err('agent node needs an agentId or a role', n.id);
     if (n.type !== 'agent' && (n.agentId || n.role)) warn('non-agent node ignores agentId/role', n.id);
-    if (n.config?.disabled) warn(`node "${n.label}" is bypassed — the engine will pass through it without dispatching`, n.id);
+    if (n.config?.disabled && n.type === 'agent') warn(`node "${n.label}" is bypassed — the engine will pass through it without dispatching`, n.id);
+    if (n.config?.disabled && n.type !== 'agent') warn(`"disabled" only bypasses agent nodes — "${n.label}" still runs`, n.id);
   }
   const eids = new Set<string>();
   const out = new Map<string, WfEdge[]>();
@@ -468,9 +469,9 @@ export function estimateWorkflowCalls(graph: WfGraph): { minCalls: number; maxCa
       for (const e of g.edges) if (e.from === id && e.kind !== 'message') stack.push(e.to);
     }
   }
-  const agentNodes = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && (n.config?.scope ?? 'task') === 'task');
+  const agentNodes = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && !n.config?.disabled && (n.config?.scope ?? 'task') === 'task');
   const taskScoped = agentNodes.length;
-  const runScoped = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && n.config?.scope === 'run').length;
+  const runScoped = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && !n.config?.disabled && n.config?.scope === 'run').length;
   const humans = g.nodes.filter((n) => n.type === 'human' && reachable.has(n.id)).length;
   // each loop edge's cycle body can re-run up to its bound. The body is the
   // nodes reachable from e.to that can also reach e.from — both endpoints
@@ -492,7 +493,7 @@ export function estimateWorkflowCalls(graph: WfGraph): { minCalls: number; maxCa
       rev.add(id);
       for (const x of g.edges) if (x.to === id && x.kind !== 'message') back.push(x.from);
     }
-    loopExtra += cap * [...fwd].filter((id) => rev.has(id) && reachable.has(id) && g.nodes.find((x) => x.id === id)?.type === 'agent').length;
+    loopExtra += cap * [...fwd].filter((id) => rev.has(id) && reachable.has(id) && g.nodes.find((x) => x.id === id)?.type === 'agent' && !g.nodes.find((x) => x.id === id)?.config?.disabled).length;
   }
   // node skill text the prompts may carry (approved version sizes)
   let skillChars = 0;

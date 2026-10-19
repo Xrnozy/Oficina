@@ -76,7 +76,7 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
   const [skillOver, setSkillOver] = useState(false);
   return (
     <div
-      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''} ${data.simVisited ? 'ring-2 ring-accent' : ''}`}
+      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${n.config?.disabled ? 'opacity-55' : ''} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''} ${data.simVisited ? 'ring-2 ring-accent' : ''}`}
       style={{ width: n.type === 'start' || n.type === 'end' ? 110 : NODE_W }}
       title={n.label}
       onDragOver={isAgent ? (ev) => { if (ev.dataTransfer.types.includes('application/x-officechain-skill')) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; setSkillOver(true); } } : undefined}
@@ -104,6 +104,7 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
             <Tag mono>{n.role ?? n.agentId?.slice(0, 8) ?? 'unassigned'}</Tag>
             {n.config?.purpose && <Tag>{PURPOSE_LABEL[n.config.purpose] ?? n.config.purpose}</Tag>}
             {n.config?.writable === false && <Tag title="read-only: does not edit files">ro</Tag>}
+            {n.config?.disabled && <Tag title="bypassed: the engine passes through without dispatching">bypassed</Tag>}
             {(n.config?.skills?.length ?? 0) > 0 && <Tag title={`${n.config!.skills!.length} node skill(s) attached`}><BookMarked size={9} />{n.config!.skills!.length}</Tag>}
           </div>
         )}
@@ -557,6 +558,10 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
             <Field label="Budget (chars)"><input className="inp" type="number" min={0} value={cfg.budgetChars ?? ''} placeholder="auto" onChange={(e) => setCfg({ budgetChars: e.target.value ? Number(e.target.value) : undefined })} /></Field>
             <Field label="Timeout (min)"><input className="inp" type="number" min={0} value={cfg.timeoutMin ?? ''} placeholder="auto" onChange={(e) => setCfg({ timeoutMin: e.target.value ? Number(e.target.value) : undefined })} /></Field>
           </div>
+          <label className="flex items-start gap-2 text-xs cursor-pointer mb-3">
+            <input type="checkbox" className="mt-0.5" checked={!!cfg.disabled} onChange={(e) => setCfg({ disabled: e.target.checked || undefined })} />
+            <span>Bypassed — the engine passes through this step without dispatching<span className="block text-fg-4 mt-0.5">The step stays on the canvas, greyed on Routing, and still counts for structure (merge arrivals, edges).</span></span>
+          </label>
           <Field label="Inputs — what the prompt carries">
             <select className="inp" value={inputsMode} onChange={(e) => {
               const v = e.target.value;

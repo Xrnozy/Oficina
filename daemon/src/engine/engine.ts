@@ -2796,6 +2796,15 @@ function wfGateGuardrail(r: Run, task: Task, node: WfNode, why: string): void {
 function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
   task = getTask(task.id)!;                       // fresh: sibling edges may have saved state
   const s = wfState(task);
+  // bypassed node: no dispatch, no message edges — it passes the last outcome
+  // through (a skipped review keeps the reviewer's verdict pending, not clean)
+  if (node.config?.disabled) {
+    s.nodes = s.nodes.filter((id) => id !== node.id);
+    saveWfState(task, s);
+    emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, bypassed: true }, r.id, task.id);
+    graphAdvanceFrom(r, task, node, s.lastOutcome ?? { status: 'success' }, null);
+    return;
+  }
   const kind = wfPurpose(node);
   const writable = node.config?.writable ?? WF_WRITER_KINDS.has(kind);
   // one writer at a time on the same task too — later writers queue
@@ -3155,6 +3164,12 @@ export function simulateWorkflow(graph: WfGraph, opts: {
     const { node, viaEdgeId, outcome } = queue.shift()!;
     switch (node.type) {
       case 'agent': {
+        if (node.config?.disabled) {
+          fired.add(node.id);
+          step(node, viaEdgeId, 'bypassed');
+          advance(node, lastOutcome);
+          break;
+        }
         calls++;
         const o = scripted(node.id);
         fired.add(node.id);
