@@ -412,6 +412,7 @@ export default function Routing() {
                   <div className="flex items-center gap-1.5">
                     <Tag tone={TIER_TONE[d.required] ?? 'idle'}>{d.kind}</Tag>
                     <span className="text-fg-2">{d.agent}</span>
+                    {d.node && <Tag tone="idle" title={`workflow node ${d.nodeId}`}>{d.node}</Tag>}
                     <span className="ml-auto text-fg-4 num">{fmtAgo(d.ts)}</span>
                   </div>
                   <div className="text-fg-3 mt-0.5 break-words">{d.reason}{d.options > 1 ? ` · ${d.options} options` : ''}</div>

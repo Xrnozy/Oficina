@@ -262,10 +262,13 @@ export function pickAgent(workspaceId: string, roleName: string, task: Task | nu
 export { estimateWorkItemCost };
 
 // Dispatch a work item through its adapter with quota pre-check and fallback.
+// `node` is the workflow node the item came from — its modelTier overrides the
+// kind/difficulty-derived required tier, and the routing decision records it.
 export async function dispatchThroughAdapter(
   baseCtx: Omit<AdapterCtx, 'agent' | 'account' | 'model'>,
   candidate: Candidate,
   fallbacks: Candidate[],
+  node?: { id: string; label: string; requiredTier?: 'fast' | 'standard' | 'strong' },
 ): Promise<{ result: WorkItemResult; usedAgent: Agent; usedBackend: string }> {
   const wi = baseCtx.workItem;
   const workspaceId = q1('SELECT workspace_id FROM runs WHERE id = ?', wi.runId)?.workspace_id as string;
@@ -275,11 +278,11 @@ export async function dispatchThroughAdapter(
   // primary backend). Each entry is tried at most once per work item, so an
   // unavailable provider can't cause a retry loop.
   let ownChain = modelChain(candidate.substituted ? { ...candidate, ...pickPrimary(candidate) } : candidate, allowed);
-  const required = requiredTier(wi.kind, baseCtx.task?.difficulty ?? 3);
+  const required = node?.requiredTier ?? requiredTier(wi.kind, baseCtx.task?.difficulty ?? 3);
   if (routingStrategy(workspaceId) === 'smart') {
-    const d = routeChain(ownChain, wi.kind, baseCtx.task?.difficulty ?? 3);
+    const d = routeChain(ownChain, wi.kind, baseCtx.task?.difficulty ?? 3, node?.requiredTier);
     ownChain = d.ordered;
-    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, options: ownChain.length }, wi.runId, wi.id);
+    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, options: ownChain.length, ...(node ? { nodeId: node.id, node: node.label } : {}) }, wi.runId, wi.id);
   }
   const others = fallbacks.filter((f) => f.agent.id !== candidate.agent.id && !f.blocked);
   const chain = [...ownChain, ...others];

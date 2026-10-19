@@ -696,6 +696,9 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
         fetchQuotaHeaders: undefined,
       },
       candidate, fallbacks,
+      // a work item dispatched by a workflow node inherits its modelTier —
+      // the same field Routing and the Workflow inspector both edit
+      wfN ? { id: wfN.id, label: wfN.label, requiredTier: wfN.config?.modelTier } : undefined,
     );
 
     if (live) clearInterval(live);

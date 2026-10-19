@@ -58,8 +58,10 @@ export function marginalCost(c: RouteOption, kind: WorkItemKind): number {
 
 export interface RouteDecision<C> { ordered: C[]; required: Tier; reason: string }
 
-export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind, difficulty = 3): RouteDecision<C> {
-  const required = requiredTier(kind, difficulty);
+// requiredOverride: a workflow node's modelTier — the node the work item came
+// from pins what "strong enough" means, instead of kind+difficulty.
+export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind, difficulty = 3, requiredOverride?: Tier): RouteDecision<C> {
+  const required = requiredOverride ?? requiredTier(kind, difficulty);
   const usable = chain.filter((c) => !c.blocked && c.provider);
   const tierOf = (c: C) => TIER_RANK[c.model?.strengthTier ?? 'standard'];
   const need = TIER_RANK[required];
@@ -77,7 +79,7 @@ export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind
   const ordered = [...ranked.map((x) => x.c), ...chain.filter((c) => !usable.includes(c))];
   const top = ranked[0];
   const reason = !top ? 'no option available'
-    : `${required} work → ${top.c.model?.name ?? 'default'} (${top.c.model?.strengthTier ?? 'standard'}, ${top.cost === 0 ? 'plan-billed' : `~$${top.cost.toFixed(3)}`})${top.gap < 0 ? ' — no stronger option available' : ''}`;
+    : `${required} work${requiredOverride ? ' (set on the node)' : ''} → ${top.c.model?.name ?? 'default'} (${top.c.model?.strengthTier ?? 'standard'}, ${top.cost === 0 ? 'plan-billed' : `~$${top.cost.toFixed(3)}`})${top.gap < 0 ? ' — no stronger option available' : ''}`;
   return { ordered, required, reason };
 }
 
