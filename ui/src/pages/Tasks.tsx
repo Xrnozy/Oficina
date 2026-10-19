@@ -77,8 +77,8 @@ export default function Tasks() {
         </div>
       )}
 
-      {/* columns keep a readable width and the board scrolls sideways, instead of squeezing cards until their text is cut off */}
-      <div className="flex gap-3 overflow-x-auto pb-3 -mx-4 px-4 lg:mx-0 lg:px-0 items-start">
+      {/* the board fills the page: every column shares the width equally and wraps onto more rows on narrow screens, so there is never a sideways scroll bar */}
+      <div className="grid gap-3 items-stretch grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-[repeat(var(--cols),minmax(0,1fr))]" style={{ ['--cols' as string]: grouped.length }}>
         {grouped.map((col) => (
           <Column key={col.key} col={col} dragged={dragged ?? null} canAddFiles={canAdd && col.key === 'ready'}
             onMove={(id, to) => { setDragging(null); void move(id, to); }} onDropFiles={(f) => setCreating(f)}>
@@ -148,13 +148,13 @@ function Column({ col, dragged, canAddFiles, onMove, onDropFiles, children }: {
         }
         files.props.onDrop?.(e);
       }}
-      className={`relative shrink-0 w-[250px] xl:w-auto xl:flex-1 xl:min-w-[215px] rounded-xl p-1.5 transition-colors ${over || files.over ? 'bg-raised outline outline-2 outline-fg/40 -outline-offset-2' : 'bg-transparent'} ${locked ? 'opacity-55' : ''}`}>
-      <h2 className="flex items-center gap-2 px-1 pb-2 mb-2.5 border-b-2 text-xs font-medium text-fg-2" style={{ borderColor: `rgb(var(--${col.tone === 'idle' ? 'fg-4' : col.tone}))` }}>
-        {col.label}
+      className={`relative min-w-0 min-h-[16rem] rounded-xl border p-2 transition-colors ${over || files.over ? 'bg-raised border-fg/40 outline outline-2 outline-fg/40 -outline-offset-2' : 'bg-raised/40 border-line'} ${locked ? 'opacity-60' : ''}`}>
+      <h2 className="flex items-center gap-2 px-1.5 pb-2 mb-2.5 text-[13px] font-semibold text-fg">
+        <span className={`w-2 h-2 rounded-full ${TONE_BG[col.tone]}`} />{col.label}
         {locked && <span title="Set by the workflow from what the agents actually do" className="text-fg-4"><Lock size={11} /></span>}
-        <span className="ml-auto text-fg-4 num">{col.list.length}</span>
+        <span className="ml-auto text-2xs text-fg-3 num rounded-full bg-surface border border-line px-1.5 min-w-[1.25rem] text-center">{col.list.length}</span>
       </h2>
-      <div className="space-y-2 min-h-24">{children}</div>
+      <div className="space-y-2 min-h-24 pb-5">{children}</div>
       {(over || files.over) && (
         <div aria-hidden className="pointer-events-none absolute inset-x-1.5 top-1.5 z-10 h-8 rounded-lg border border-dashed border-fg-3 bg-surface text-xs text-fg-2 flex items-center justify-center gap-2">
           {files.over ? <><UploadCloud size={14} /> Drop to create a task</> : col.drop === 'held' ? 'Drop to put on hold' : 'Drop to hand it to the agents'}
@@ -182,7 +182,7 @@ function TaskCard({ t, owner, files, canAttach, onFiles, onDragState, onMove, on
         setTimeout(() => { setLifted(true); onDragState(t.id); }, 0);
       }}
       onDragEnd={() => { setLifted(false); onDragState(null); }}
-      className={`block min-w-0 bg-surface border rounded-lg p-3 transition-colors ${movable ? 'cursor-grab active:cursor-grabbing' : ''} ${lifted ? 'opacity-40' : ''} ${over ? 'border-fg bg-raised' : 'border-line hover:border-line-strong'}`}>
+      className={`block min-w-0 bg-surface border rounded-lg p-3 shadow-sm transition-all ${movable ? 'cursor-grab active:cursor-grabbing' : ''} ${lifted ? 'opacity-40' : ''} ${over ? 'border-fg bg-raised' : 'border-line hover:border-line-strong hover:shadow-md'}`}>
       <div className="text-sm text-fg leading-snug break-words [overflow-wrap:anywhere]">{t.title}</div>
       <div className="mt-2 flex items-center gap-x-2.5 gap-y-1 flex-wrap text-2xs text-fg-4">
         <span className="text-fg-3">{t.status === 'held' ? 'on hold' : String(t.status).replace(/-/g, ' ')}</span>
