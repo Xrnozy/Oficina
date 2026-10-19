@@ -110,28 +110,56 @@ export default function Activity() {
       {members.length > 0 && (
         <div className="grid gap-4 flex-1 min-h-0 grid-cols-1 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_24rem]">
           {/* agents */}
-          <nav className="panel overflow-auto min-h-0 p-1.5 space-y-0.5" aria-label="Agents">
-            <button onClick={() => setParams({})} className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-sm ${!selected ? 'bg-raised' : 'hover:bg-raised/60'}`}>
-              <span className="w-6 h-6 rounded-md bg-sunken border border-line grid place-items-center"><Users size={13} /></span>
+          <nav className="panel overflow-auto min-h-0 p-2" aria-label="Agents">
+            <button onClick={() => setParams({})} className={`w-full flex items-center gap-2.5 px-2.5 h-10 rounded-lg text-left text-sm transition-colors ${!selected ? 'bg-raised border border-line' : 'border border-transparent hover:bg-raised/60'}`}>
+              <span className="w-7 h-7 rounded-lg bg-sunken border border-line grid place-items-center shrink-0"><Users size={14} /></span>
               <span className="font-medium text-fg">All agents</span>
-              <span className="ml-auto text-2xs text-fg-4">{members.filter((a) => states.get(a.id)?.running).length} working</span>
+              <span className="ml-auto text-2xs text-fg-3 num">{members.filter((a) => states.get(a.id)?.running).length} working</span>
             </button>
-            {members.map((a) => {
-              const st = states.get(a.id)!;
-              const kind = st.current ? String((st.current.payload as any).kind) : null;
-              const quiet = st.running && st.lastOutputAt ? Math.round((now - Date.parse(st.lastOutputAt)) / 1000) : null;
-              return (
-                <button key={a.id} onClick={() => setParams({ agent: a.id })} className={`w-full flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-left ${selected?.id === a.id ? 'bg-raised' : 'hover:bg-raised/60'}`}>
-                  <span className="shrink-0"><Avatar agent={a} size="sm" /></span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-2 h-6"><span className="text-sm font-medium text-fg truncate flex-1 min-w-0">{a.name}</span><span className={`w-2 h-2 rounded-full shrink-0 ${st.running ? 'bg-ok animate-pulse' : 'bg-line-strong'}`} title={st.running ? 'Working now' : 'Idle'} aria-label={st.running ? 'Working now' : 'Idle'} /></span>
-                    <span className="flex items-center gap-1.5 mt-0.5"><StatusChip value={st.running ? (WORKING.includes(a.status) ? a.status : 'working') : (WORKING.includes(a.status) ? 'idle' : a.status)} />{st.running && kind && <span className="text-2xs text-fg-3">{kind}</span>}</span>
-                    {st.last && <span className="block text-2xs text-fg-4 truncate mt-0.5">{String((st.last.payload as any).text ?? '').slice(0, 80)}</span>}
-                    {quiet != null && quiet > 20 && <span className="block text-2xs text-warn mt-0.5">no output for {quiet >= 60 ? `${Math.floor(quiet / 60)}m` : `${quiet}s`}</span>}
-                  </span>
-                </button>
-              );
-            })}
+            {[{ key: 'work', title: 'Working now', list: members.filter((a) => states.get(a.id)?.running) },
+              { key: 'idle', title: 'Idle', list: members.filter((a) => !states.get(a.id)?.running) }].filter((g) => g.list.length).map((g) => (
+              <div key={g.key} className="mt-3">
+                <div className="flex items-center gap-2 px-2.5 pb-1.5 text-2xs uppercase tracking-[0.06em] font-mono text-fg-4">{g.title}<span className="h-px flex-1 bg-line" /><span className="num">{g.list.length}</span></div>
+                <ul className="space-y-1">
+                  {g.list.map((a) => {
+                    const st = states.get(a.id)!;
+                    const kind = st.current ? String((st.current.payload as any).kind) : null;
+                    const quiet = st.running && st.lastOutputAt ? Math.round((now - Date.parse(st.lastOutputAt)) / 1000) : null;
+                    const since = st.running && st.current ? Math.max(0, Math.round((now - Date.parse(st.current.ts)) / 1000)) : null;
+                    const role = ((a.memberships ?? []).find((m: any) => m.active)?.role as string | undefined) ?? '';
+                    const lastText = st.last ? String((st.last.payload as any).text ?? '').replace(/s+/g, ' ').slice(0, 90) : '';
+                    const on = selected?.id === a.id;
+                    return (
+                      <li key={a.id}>
+                        <button onClick={() => setParams({ agent: a.id })} aria-current={on} className={`group relative w-full flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-left border transition-colors ${on ? 'bg-raised border-line-strong' : 'border-transparent hover:bg-raised/60'}`}>
+                          {on && <span className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-fg" />}
+                          <span className={`shrink-0 rounded-lg ${st.running ? 'ring-2 ring-ok/50' : ''}`}><Avatar agent={a} size="md" /></span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-fg truncate flex-1 min-w-0">{a.name}</span>
+                              <span className={`w-2 h-2 rounded-full shrink-0 ${st.running ? 'bg-ok animate-pulse' : 'bg-line-strong'}`} title={st.running ? 'Working now' : 'Idle'} />
+                            </span>
+                            {role && <span className="block text-2xs text-fg-4 -mt-0.5 capitalize">{role.replace(/-/g, ' ')}</span>}
+                            {st.running ? (
+                              <>
+                                <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-2">
+                                  <span className="chip !h-[18px] !bg-ok/10 !text-ok !border-ok/30 capitalize">{kind?.replace(/-/g, ' ') ?? 'working'}</span>
+                                  {since != null && <span className="text-2xs text-fg-4 num">{since >= 60 ? `${Math.floor(since / 60)}m ${since % 60}s` : `${since}s`}</span>}
+                                </span>
+                                {lastText && <span className="block text-2xs text-fg-3 mt-1 line-clamp-2 leading-4">{lastText}</span>}
+                                {quiet != null && quiet > 20 && <span className="block text-2xs text-warn mt-1">no output for {quiet >= 60 ? `${Math.floor(quiet / 60)}m` : `${quiet}s`}</span>}
+                              </>
+                            ) : (
+                              <span className="block text-2xs text-fg-4 truncate mt-0.5">{lastText || 'Waiting for work'}</span>
+                            )}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))}
           </nav>
 
           {/* feed */}
