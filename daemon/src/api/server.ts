@@ -890,6 +890,17 @@ export function createServer(port: number, uiDir: string): http.Server {
     ok(res, skillsFor({ agentId: req.params.id, roleId: (req.query.roleId as string) ?? (role?.role_id as string) ?? null, kind: (String(req.query.kind ?? 'implement')) as never, taskText: String(req.query.text ?? '') }));
   });
 
+  // preview a draft node's skill resolution (editor budget meter / greyed list)
+  app.post('/api/skills/node-preview', (req, res) => {
+    const b = req.body ?? {};
+    ok(res, skillsFor({
+      agentId: String(b.agentId ?? ''), roleId: (b.roleId as string) ?? null,
+      kind: (String(b.kind ?? 'implement')) as never, taskText: String(b.taskText ?? ''),
+      nodeSkills: Array.isArray(b.skills) ? b.skills : [],
+      inheritSkills: b.inheritSkills !== false,
+    }));
+  });
+
   // ---------- accounts ----------
   app.post('/api/accounts', (req, res) => {
     const { providerId, label, apiKey, billing, monthlyBudgetUsd, baseUrl, command, timeoutSec } = req.body ?? {};

@@ -31,6 +31,7 @@ export interface NodeConfig {
   mergeMode?: 'all' | 'any';         // merge node wait policy
   inheritSkills?: boolean;           // 3b: also send agent/role skills (default true)
   skillsOnly?: boolean;              // 3b: send only node-attached skills
+  skills?: { skillId: string; name: string; versionId?: string }[]; // 3b: skill refs attached to this node — stored in the version itself, so a run resolves the skills the version had when it was saved
 }
 
 export interface WfNode {
@@ -209,6 +210,19 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     if (p === 'review') reviewers.add(n.agentId);
   }
   for (const id of writers) if (reviewers.has(id)) err('the same agent cannot be the only writer and the reviewer (separation of duties)', undefined);
+
+  // node skill refs (3b): report unknown / disabled / still-unreviewed skills —
+  // warnings, not errors: at dispatch an undeliverable skill is simply skipped
+  for (const n of graph.nodes) {
+    for (const ref of n.config?.skills ?? []) {
+      const s = q1('SELECT id, name, enabled, owner_origin FROM skills WHERE id = ?', ref.skillId);
+      if (!s) { warn(`node "${n.label}" references skill "${ref.name || ref.skillId}", which is not in this office — import or create it`, n.id); continue; }
+      if (!s.enabled) { warn(`skill "${s.name}" on "${n.label}" is disabled — it will not be delivered`, n.id); continue; }
+      if (s.owner_origin === 'imported' && !q1(`SELECT id FROM skill_versions WHERE skill_id = ? AND review_status = 'approved'`, s.id as string)) {
+        warn(`imported skill "${s.name}" on "${n.label}" is waiting for approval`, n.id);
+      }
+    }
+  }
 
   return issues;
 }

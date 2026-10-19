@@ -267,48 +267,67 @@ export function detachSkill(attachmentId: string): void {
 
 // ------------------------------------------------------------ loading
 
-export interface AppliedSkill { skillId: string; name: string; version: string; versionId: string; chars: number; method: 'prompt'; via: 'role' | 'agent' }
-export interface SkippedSkill { name: string; reason: string }
+export interface AppliedSkill { skillId: string; name: string; version: string; versionId: string; chars: number; method: 'prompt'; via: 'node' | 'role' | 'agent' }
+export interface SkippedSkill { name: string; reason: string; via?: 'node' | 'role' | 'agent' }
 
-const SKILL_BUDGET = 16000; // characters of skill text per prompt
+export const SKILL_BUDGET = 16000; // characters of skill text per prompt
 
-/** The skills that apply to this agent/role for this work, rendered for the prompt. */
-export function skillsFor(opts: { agentId: string; roleId: string | null; kind: WorkItemKind; taskText: string }): { section: string; applied: AppliedSkill[]; skipped: SkippedSkill[] } {
+/** The skills that apply to this agent/role for this work, rendered for the prompt.
+ *  Node-attached refs (stored in the workflow version's graph) come first and win
+ *  under the budget; then agent attachments, then role — de-duplicated by skill. */
+export function skillsFor(opts: { agentId: string; roleId: string | null; kind: WorkItemKind; taskText: string; nodeSkills?: { skillId: string; versionId?: string }[]; inheritSkills?: boolean }): { section: string; applied: AppliedSkill[]; skipped: SkippedSkill[]; used: number; budget: number } {
+  type Cand = { skill_id: string; pinned_version_id: string | null; via: 'node' | 'agent' | 'role' };
+  const ordered: Cand[] = [];
+  const seen = new Set<string>();
+  const skipped: SkippedSkill[] = [];
+  for (const ref of opts.nodeSkills ?? []) {
+    if (seen.has(ref.skillId)) continue;
+    seen.add(ref.skillId);
+    ordered.push({ skill_id: ref.skillId, pinned_version_id: ref.versionId ?? null, via: 'node' });
+  }
   const atts = q(`SELECT a.*, v.skill_id FROM skill_attachments a JOIN skill_versions v ON v.id = a.skill_version_id`)
     .map((a) => ({ skill_id: a.skill_id as string, skill_version_id: a.skill_version_id as string, pinned: a.pinned as number, target: parseJson<{ roleId?: string; agentId?: string }>(a.target as string, {}) }))
     .filter((a) => (opts.roleId && a.target.roleId === opts.roleId) || a.target.agentId === opts.agentId);
-  const applied: AppliedSkill[] = []; const skipped: SkippedSkill[] = [];
-  const blocks: string[] = [];
-  let used = 0;
-  const seen = new Set<string>();
-  const text = opts.taskText.toLowerCase();
   // agent-specific attachments win over role ones for the same skill
   atts.sort((a, b) => (a.target.agentId ? 0 : 1) - (b.target.agentId ? 0 : 1));
+  const inherited = opts.inheritSkills !== false;
   for (const a of atts) {
-    const skillId = a.skill_id as string;
-    if (seen.has(skillId)) continue;
-    seen.add(skillId);
+    if (seen.has(a.skill_id)) continue;
+    seen.add(a.skill_id);
+    if (!inherited) {
+      const s = q1('SELECT name FROM skills WHERE id = ?', a.skill_id);
+      if (s) skipped.push({ name: s.name as string, reason: 'node is set to "node skills only"', via: a.target.agentId ? 'agent' : 'role' });
+      continue;
+    }
+    ordered.push({ skill_id: a.skill_id, pinned_version_id: a.pinned ? a.skill_version_id : null, via: a.target.agentId ? 'agent' : 'role' });
+  }
+  const applied: AppliedSkill[] = [];
+  const blocks: string[] = [];
+  let used = 0;
+  const text = opts.taskText.toLowerCase();
+  for (const a of ordered) {
+    const skillId = a.skill_id;
     const s = q1('SELECT * FROM skills WHERE id = ?', skillId);
     if (!s) continue;
     const name = s.name as string;
-    if (!s.enabled) { skipped.push({ name, reason: 'disabled' }); continue; }
-    const v = a.pinned ? q1('SELECT * FROM skill_versions WHERE id = ?', a.skill_version_id) : (latestApproved(skillId) ?? q1('SELECT * FROM skill_versions WHERE id = ?', a.skill_version_id));
-    if (!v || v.review_status !== 'approved') { skipped.push({ name, reason: 'no approved version' }); continue; }
+    if (!s.enabled) { skipped.push({ name, reason: 'disabled', via: a.via }); continue; }
+    const v = a.pinned_version_id ? q1('SELECT * FROM skill_versions WHERE id = ?', a.pinned_version_id) : latestApproved(skillId);
+    if (!v || v.review_status !== 'approved') { skipped.push({ name, reason: 'no approved version', via: a.via }); continue; }
     const content = String(v.content ?? '').trim();
-    if (!content) { skipped.push({ name, reason: 'content not stored — re-import the skill folder (or use Relink)' }); continue; }
+    if (!content) { skipped.push({ name, reason: 'content not stored — re-import the skill folder (or use Relink)', via: a.via }); continue; }
     const m = parseJson<SkillManifest>(v.manifest as string, {});
-    if (m.kinds?.length && !m.kinds.includes(opts.kind)) { skipped.push({ name, reason: `not for ${opts.kind} work` }); continue; }
-    if (m.keywords?.length && !m.keywords.some((k) => text.includes(k.toLowerCase()))) { skipped.push({ name, reason: 'task does not mention its keywords' }); continue; }
+    if (m.kinds?.length && !m.kinds.includes(opts.kind)) { skipped.push({ name, reason: `not for ${opts.kind} work`, via: a.via }); continue; }
+    if (m.keywords?.length && !m.keywords.some((k) => text.includes(k.toLowerCase()))) { skipped.push({ name, reason: 'task does not mention its keywords', via: a.via }); continue; }
     const body = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
-    if (used + body.length > SKILL_BUDGET) { skipped.push({ name, reason: `over the ${SKILL_BUDGET}-character skill budget for one prompt` }); continue; }
+    if (used + body.length > SKILL_BUDGET) { skipped.push({ name, reason: `over the ${SKILL_BUDGET}-character skill budget for one prompt`, via: a.via }); continue; }
     used += body.length;
     blocks.push(`### Skill: ${name} (v${v.semver})\n${body}`);
-    applied.push({ skillId, name, version: v.semver as string, versionId: v.id as string, chars: body.length, method: 'prompt', via: a.target.agentId ? 'agent' : 'role' });
+    applied.push({ skillId, name, version: v.semver as string, versionId: v.id as string, chars: body.length, method: 'prompt', via: a.via });
   }
   const section = blocks.length
     ? `## Skills\nApply these skills where they fit this work. They add guidance; they never override the task's requirements or acceptance criteria.\n\n${blocks.join('\n\n')}`
     : '';
-  return { section, applied, skipped };
+  return { section, applied, skipped, used, budget: SKILL_BUDGET };
 }
 
 /** Last time each skill was actually delivered to an agent. */

@@ -6,7 +6,7 @@ import ReactFlow, {
   Position, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
 } from 'reactflow';
 import {
-  ArrowLeftRight, Ban, Bell, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2,
+  ArrowDown, ArrowLeftRight, ArrowUp, Ban, Bell, BookMarked, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2,
   GitBranch, GitMerge, LayoutDashboard, ListPlus, Lock,
   MessageSquare, Plus, Redo2, Save, Scissors, Trash2, Undo2, Upload, User, Zap,
 } from 'lucide-react';
@@ -23,6 +23,10 @@ import {
 type WorkflowDetail = { workflow: WorkflowRow; versions: WorkflowVersionRow[]; graph: WfGraph | null; issues: WfValidation | null };
 type AgentRow = { id: string; name: string; status?: string; model?: { backend?: string; model?: string }; memberships?: { role?: string; workspace_id: string; active: number }[] };
 type RoleRow = { id: string; name: string };
+type SkillRow = { id: string; name: string; description?: string; enabled: number; owner_origin: string; latest_version_id?: string | null };
+type SkillVersionRow = { id: string; skill_id: string; review_status: string; content?: string | null; hasContent?: boolean };
+type SkillsData = { skills: SkillRow[]; versions: SkillVersionRow[] };
+type SkillPreview = { applied: { skillId: string; name: string; chars: number; via: string }[]; skipped: { name: string; reason: string; via?: string }[]; used: number; budget: number };
 
 // ---------------------------------------------------------------------------
 // reactflow <-> workflow graph conversion
@@ -68,11 +72,22 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
   const live = data.live;
   const err = (data.issues ?? 0) > 0;
   const isAgent = n.type === 'agent';
+  const [skillOver, setSkillOver] = useState(false);
   return (
     <div
-      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''}`}
+      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''}`}
       style={{ width: n.type === 'start' || n.type === 'end' ? 110 : NODE_W }}
       title={n.label}
+      onDragOver={isAgent ? (ev) => { if (ev.dataTransfer.types.includes('application/x-officechain-skill')) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; setSkillOver(true); } } : undefined}
+      onDragLeave={isAgent ? () => setSkillOver(false) : undefined}
+      onDrop={isAgent ? (ev) => {
+        const raw = ev.dataTransfer.getData('application/x-officechain-skill');
+        setSkillOver(false);
+        if (!raw) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const ref = JSON.parse(raw) as { skillId: string; name: string };
+        skillDropOp(n.id, ref);
+      } : undefined}
     >
       {n.type !== 'start' && <Handle type="target" position={Position.Left} className="!bg-fg-3 !w-2 !h-2 !border-0" />}
       <div className="px-3 py-2">
@@ -88,6 +103,7 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
             <Tag mono>{n.role ?? n.agentId?.slice(0, 8) ?? 'unassigned'}</Tag>
             {n.config?.purpose && <Tag>{PURPOSE_LABEL[n.config.purpose] ?? n.config.purpose}</Tag>}
             {n.config?.writable === false && <Tag title="read-only: does not edit files">ro</Tag>}
+            {(n.config?.skills?.length ?? 0) > 0 && <Tag title={`${n.config!.skills!.length} node skill(s) attached`}><BookMarked size={9} />{n.config!.skills!.length}</Tag>}
           </div>
         )}
         {n.type === 'condition' && <div className="mt-0.5 text-2xs text-fg-3">branches on edges →</div>}
@@ -145,6 +161,8 @@ function WfEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
 
 // The page registers its insert op here — keeps edge data free of callbacks.
 let insertOnEdgeOp: (edgeId: string) => void = () => undefined;
+// Same for a skill dropped onto a node.
+let skillDropOp: (nodeId: string, ref: { skillId: string; name: string }) => void = () => undefined;
 
 // left-to-right orthogonal-ish path: horizontal out, soft curve into target
 function edgePath(sx: number, sy: number, tx: number, ty: number, _sp: Position, _tp: Position): [string, number, number] {
@@ -158,7 +176,7 @@ const edgeTypes = { wf: WfEdgeView };
 
 // ---------------------------------------------------------------------------
 // palette
-function Palette({ agents, roles, wsId }: { agents: AgentRow[]; roles: RoleRow[]; wsId: string }) {
+function Palette({ agents, roles, wsId, skills }: { agents: AgentRow[]; roles: RoleRow[]; wsId: string; skills: SkillRow[] }) {
   const [open, setOpen] = useState(true);
   const byRole = useMemo(() => {
     const m = new Map<string, AgentRow[]>();
@@ -230,7 +248,28 @@ function Palette({ agents, roles, wsId }: { agents: AgentRow[]; roles: RoleRow[]
           ))}
         </div>
       </div>
-      <div className="px-1 text-2xs text-fg-4 leading-4">Drag onto the canvas. Drop on an edge to insert between its ends.</div>
+      {skills.length > 0 && (
+        <div>
+          <div className="field-label">Skills</div>
+          <div className="space-y-1">
+            {skills.map((s) => (
+              <div
+                key={s.id} draggable={!!s.enabled}
+                onDragStart={(ev) => { ev.dataTransfer.setData('application/x-officechain-skill', JSON.stringify({ skillId: s.id, name: s.name })); ev.dataTransfer.effectAllowed = 'copy'; }}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border bg-raised transition-colors ${s.enabled ? 'border-line cursor-grab active:cursor-grabbing hover:border-line-strong' : 'border-line/50 opacity-50'}`}
+                title={s.enabled ? 'Drag onto an agent node to attach' : 'Disabled — enable it on the Skills page'}
+              >
+                <BookMarked size={12} className="text-fg-3 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-xs font-medium truncate">{s.name}</div>
+                  {s.description && <div className="text-2xs text-fg-4 truncate">{s.description}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="px-1 text-2xs text-fg-4 leading-4">Drag onto the canvas. Drop on an edge to insert between its ends. Drop a skill on an agent node to attach it.</div>
     </div>
   );
 }
@@ -282,9 +321,180 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return <div className="mb-3"><span className="field-label">{label}</span>{children}</div>;
 }
 
-function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete, onOpenTask }: {
+// ---------------------------------------------------------------------------
+// node skills (Phase 3b) — attached refs live in the version's graph
+function NodeSkills({ n, cfg, setCfg, roles, skillsData, reloadSkills, onApplyToRole }: {
+  n: WfNode; cfg: NonNullable<WfNode['config']>; setCfg: (p: Partial<NonNullable<WfNode['config']>>) => void;
+  roles: RoleRow[]; skillsData: SkillsData | null | undefined; reloadSkills: () => void; onApplyToRole: () => void;
+}) {
+  const nodeSkills = cfg.skills ?? [];
+  const inherited = cfg.inheritSkills !== false && !cfg.skillsOnly;
+  const roleId = roles.find((r) => r.name === n.role)?.id ?? null;
+  const [prev, setPrev] = useState<SkillPreview | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [q2, setQ2] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      post<SkillPreview>('/skills/node-preview', {
+        skills: nodeSkills, agentId: n.agentId ?? '', roleId, kind: cfg.purpose ?? 'implement', taskText: '', inheritSkills: inherited,
+      }).then(setPrev).catch(() => setPrev(null));
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(nodeSkills), n.agentId, roleId, cfg.purpose, inherited]);
+
+  const approvedVersion = (skillId: string) => skillsData?.versions.find((v) => v.skill_id === skillId && v.review_status === 'approved');
+  const approvalOf = (s: SkillRow) => {
+    const v = approvedVersion(s.id);
+    if (v) return { state: 'approved' as const, versionId: v.id, size: v.content?.length ?? 0 };
+    if (s.owner_origin === 'imported') return { state: 'waiting' as const, versionId: undefined, size: 0 };
+    return { state: 'none' as const, versionId: undefined, size: 0 };
+  };
+  const attach = (s: SkillRow) => {
+    const ap = approvalOf(s);
+    setCfg({ skills: [...nodeSkills, { skillId: s.id, name: s.name, versionId: ap.versionId }] });
+    setAdding(false); setQ2('');
+    if (ap.state === 'waiting') toast(`"${s.name}" is imported but not approved yet — it won't be delivered until then`, 'warn');
+  };
+  const move = (i: number, d: -1 | 1) => {
+    const j = i + d;
+    if (j < 0 || j >= nodeSkills.length) return;
+    const next = [...nodeSkills];
+    [next[i], next[j]] = [next[j], next[i]];
+    setCfg({ skills: next });
+  };
+  const createHere = async () => {
+    const name = prompt('Skill name', 'my-skill');
+    if (!name) return;
+    const instructions = prompt(`Instructions for "${name}" (one line is fine)`, '');
+    if (!instructions) return;
+    const r = await act(post<{ skillId: string; versionId: string }>('/skills', { name, instructions }), 'Skill created and attached to this node');
+    if (r) { setCfg({ skills: [...nodeSkills, { skillId: r.skillId, name, versionId: r.versionId }] }); reloadSkills(); }
+  };
+  const importHere = async () => {
+    const dir = prompt('Folder containing a SKILL.md (or a folder of skill folders)', '');
+    if (!dir) return;
+    const r = await post<{ imported: { skillId: string; name: string; findings: string[] }[]; errors: string[] }>('/skills/import', { path: dir }).catch((e) => { toast(String(e?.message ?? e), 'bad'); return null; });
+    if (!r) return;
+    reloadSkills();
+    if (r.imported.length) setCfg({ skills: [...nodeSkills, ...r.imported.map((imp) => ({ skillId: imp.skillId, name: imp.name }))] });
+    for (const imp of r.imported) {
+      toast(`Imported "${imp.name}"${imp.findings.length ? ` — ${imp.findings.length} scan finding(s)` : ''}. Review and approve it on the Skills page; until then it shows "waiting for approval".`, imp.findings.length ? 'warn' : 'info');
+    }
+    if (r.errors.length) toast(`${r.errors.length} folder(s) failed to import`, 'bad');
+  };
+
+  const estTokens = (chars: number) => `~${Math.ceil(chars / 4)} tok`;
+  const attachable = (skillsData?.skills ?? []).filter((s) => !nodeSkills.some((x) => x.skillId === s.id))
+    .filter((s) => !q2 || s.name.toLowerCase().includes(q2.toLowerCase()) || (s.description ?? '').toLowerCase().includes(q2.toLowerCase()));
+  const applied = prev?.applied ?? [];
+  const inheritedRows = [
+    ...applied.filter((a) => a.via !== 'node').map((a) => ({ name: a.name, via: a.via, note: estTokens(a.chars), dim: false })),
+    ...(prev?.skipped ?? []).filter((s) => s.via && s.via !== 'node').map((s) => ({ name: s.name, via: s.via, note: s.reason, dim: true })),
+  ];
+
+  return (
+    <div className="border-t border-line pt-3 mt-3">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="field-label !mb-0">Skills</span>
+        <span className="text-2xs text-fg-4">{nodeSkills.length} attached</span>
+        <button className="btn btn-ghost btn-xs ml-auto" onClick={() => setAdding((x) => !x)}><Plus size={11} /> Add</button>
+      </div>
+
+      {nodeSkills.length === 0 && <div className="text-2xs text-fg-4 mb-2">No node skills — the agent's role and own attachments apply.</div>}
+      <div className="space-y-1 mb-2">
+        {nodeSkills.map((ref, i) => {
+          const s = skillsData?.skills.find((x) => x.id === ref.skillId);
+          const ap = applied.find((a) => a.skillId === ref.skillId);
+          const skip = (prev?.skipped ?? []).find((x) => x.name === ref.name && x.via === 'node');
+          const waiting = s && approvalOf(s).state === 'waiting';
+          return (
+            <div key={ref.skillId} className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-line bg-raised">
+              <BookMarked size={11} className="text-accent shrink-0" />
+              <span className="text-xs font-medium truncate flex-1" title={s?.description ?? ref.name}>{ref.name}</span>
+              <span className="chip !h-4 !px-1 text-[9px] border-accent/30 text-accent">node</span>
+              {waiting && <span className="chip !h-4 !px-1 text-[9px] border-warn/30 text-warn" title="Imported — not approved yet">waiting</span>}
+              {ap && <span className="text-2xs text-fg-4" title={`${ap.chars} chars`}>{estTokens(ap.chars)}</span>}
+              {skip && <span className="text-2xs text-warn truncate max-w-[90px]" title={skip.reason}>{skip.reason}</span>}
+              <button className="btn btn-ghost btn-icon !h-5 !w-5" disabled={i === 0} onClick={() => move(i, -1)} title="Earlier — wins the budget"><ArrowUp size={10} /></button>
+              <button className="btn btn-ghost btn-icon !h-5 !w-5" disabled={i === nodeSkills.length - 1} onClick={() => move(i, 1)} title="Later"><ArrowDown size={10} /></button>
+              <button className="btn btn-ghost btn-icon !h-5 !w-5" onClick={() => setCfg({ skills: nodeSkills.filter((x) => x.skillId !== ref.skillId) })} title="Remove"><Trash2 size={10} /></button>
+            </div>
+          );
+        })}
+      </div>
+
+      {adding && (
+        <div className="card !bg-canvas p-2 mb-2 space-y-1">
+          <input className="inp !h-6 !text-2xs" placeholder="search skills…" value={q2} onChange={(e) => setQ2(e.target.value)} autoFocus />
+          <div className="max-h-36 overflow-auto space-y-0.5">
+            {attachable.map((s) => {
+              const ap = approvalOf(s);
+              return (
+                <button key={s.id} className="w-full text-left px-2 py-1 rounded hover:bg-raised flex items-center gap-2" onClick={() => attach(s)}>
+                  <span className="text-xs truncate flex-1">{s.name}</span>
+                  {!s.enabled && <span className="chip !h-4 !px-1 text-[9px] border-line text-fg-4">disabled</span>}
+                  {ap.state === 'waiting' && <span className="chip !h-4 !px-1 text-[9px] border-warn/30 text-warn">needs approval</span>}
+                  {ap.state === 'approved' && <span className="text-2xs text-fg-4">{estTokens(ap.size)}</span>}
+                </button>
+              );
+            })}
+            {!attachable.length && <div className="px-2 py-1 text-2xs text-fg-4">No other skills.</div>}
+          </div>
+          <div className="flex gap-1.5 pt-1">
+            <button className="btn btn-ghost btn-xs" onClick={() => void createHere()}><Plus size={10} /> New skill</button>
+            <button className="btn btn-ghost btn-xs" onClick={() => void importHere()}><Upload size={10} /> Import folder…</button>
+          </div>
+        </div>
+      )}
+
+      {prev && (
+        <div className="mb-2" title="Skill text budget for one prompt">
+          <div className="flex justify-between text-2xs text-fg-4 mb-0.5">
+            <span>skill budget</span><span>{Math.round((prev.used / prev.budget) * 100)}% · {prev.used.toLocaleString()}/{prev.budget.toLocaleString()} chars</span>
+          </div>
+          <div className="h-1.5 rounded bg-line overflow-hidden"><div className={`h-full ${prev.used / prev.budget > 0.9 ? 'bg-bad' : 'bg-accent'}`} style={{ width: `${Math.min(100, (prev.used / prev.budget) * 100)}%` }} /></div>
+        </div>
+      )}
+
+      {inheritedRows.length > 0 && (
+        <div className="mb-2">
+          <div className="text-2xs text-fg-4 mb-1">From the agent / role</div>
+          <div className="space-y-0.5">
+            {inheritedRows.map((r, i) => (
+              <div key={i} className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-2xs ${r.dim ? 'opacity-50' : 'opacity-70'}`}>
+                <BookMarked size={10} className="text-fg-4 shrink-0" />
+                <span className="truncate flex-1">{r.name}</span>
+                <span className="chip !h-4 !px-1 text-[9px] border-line text-fg-4">{r.via}</span>
+                <span className="text-fg-4 truncate max-w-[110px]" title={r.note}>{r.note}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <label className="flex items-center gap-2 text-xs mb-1.5 cursor-pointer">
+        <input type="checkbox" checked={cfg.inheritSkills !== false} onChange={(e) => setCfg({ inheritSkills: e.target.checked ? undefined : false })} />
+        Inherit the agent's and role's skills
+      </label>
+      <label className="flex items-center gap-2 text-xs mb-2 cursor-pointer">
+        <input type="checkbox" checked={!!cfg.skillsOnly} onChange={(e) => setCfg({ skillsOnly: e.target.checked || undefined })} />
+        Skills only — send only this node's skills
+      </label>
+      {n.role && nodeSkills.length > 0 && (
+        <button className="btn btn-ghost btn-xs" onClick={onApplyToRole} title="Copy this node's skill list to every node with the same role">
+          Apply to all {roleLabel(n.role)} nodes
+        </button>
+      )}
+    </div>
+  );
+}
+
+function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete, onOpenTask, skillsData, reloadSkills, onApplyToRole }: {
   node: Node<RfData>; agents: AgentRow[]; roles: RoleRow[]; wsId: string;
   allNodes: Node<RfData>[]; onChange: (wf: WfNode) => void; onDelete: () => void; onOpenTask: () => void;
+  skillsData: SkillsData | null | undefined; reloadSkills: () => void; onApplyToRole: () => void;
 }) {
   const n = node.data.wf;
   const cfg = n.config ?? {};
@@ -377,6 +587,10 @@ function NodeInspector({ node, agents, roles, wsId, allNodes, onChange, onDelete
             <input type="checkbox" checked={cfg.writable !== false} onChange={(e) => setCfg({ writable: e.target.checked ? undefined : false })} />
             May edit files (writer). Read-only steps never hold the repo.
           </label>
+          <NodeSkills
+            n={n} cfg={cfg} setCfg={setCfg} roles={roles}
+            skillsData={skillsData} reloadSkills={reloadSkills} onApplyToRole={onApplyToRole}
+          />
         </>
       )}
       {n.type === 'merge' && (
@@ -465,6 +679,7 @@ function WorkflowEditor() {
   const { data: wflist, reload: reloadList } = useQuery<WorkflowRow[]>(wsId ? `/workflows?workspaceId=${wsId}` : null);
   const { data: agents } = useQuery<AgentRow[]>('/agents');
   const { data: roles } = useQuery<RoleRow[]>('/roles');
+  const { data: skillsData, reload: reloadSkills } = useQuery<SkillsData>('/skills');
 
   const [wfId, setWfId] = useState<string | null>(null);
   const { data: detail, reload: reloadDetail } = useFetch<WorkflowDetail>(wfId ? `/workflows/${wfId}` : null, [wfId]);
@@ -643,6 +858,39 @@ function WorkflowEditor() {
     });
   }, [mutate]);
   useEffect(() => { insertOnEdgeOp = (edgeId) => insertOn(edgeId); return () => { insertOnEdgeOp = () => undefined; }; }, [insertOn]);
+
+  // skill dropped onto a node — append the ref to that node's config
+  useEffect(() => {
+    skillDropOp = (nodeId, ref) => {
+      if (readOnly) return;
+      pushHistory();
+      setNodes((ns) => ns.map((x) => {
+        if (x.id !== nodeId) return x;
+        const wf = x.data.wf;
+        const cur = wf.config?.skills ?? [];
+        if (cur.some((s) => s.skillId === ref.skillId)) return x;
+        const sv = skillsData?.skills.find((s) => s.id === ref.skillId);
+        const versionId = skillsData?.versions.find((v) => v.skill_id === ref.skillId && v.review_status === 'approved')?.id;
+        if (sv && sv.owner_origin === 'imported' && !versionId) toast(`"${ref.name}" is waiting for approval`, 'warn');
+        return { ...x, data: { ...x.data, wf: { ...wf, config: { ...wf.config, skills: [...cur, { skillId: ref.skillId, name: ref.name, versionId }] } } } };
+      }));
+      setDirty(true);
+      setSelNodes([nodeId]); setSelEdges([]);
+    };
+    return () => { skillDropOp = () => undefined; };
+  }, [readOnly, pushHistory, setNodes, skillsData]);
+
+  // "apply to all nodes with this role" — copies the source node's skill config
+  const applySkillsToRole = useCallback((sourceNodeId: string) => {
+    const src = nodes.find((x) => x.id === sourceNodeId)?.data.wf;
+    if (!src?.role) return;
+    const skCfg = { skills: src.config?.skills, inheritSkills: src.config?.inheritSkills, skillsOnly: src.config?.skillsOnly };
+    pushHistory();
+    setNodes((ns) => ns.map((x) => (x.data.wf.role === src.role && x.data.wf.type === 'agent'
+      ? { ...x, data: { ...x.data, wf: { ...x.data.wf, config: { ...x.data.wf.config, ...skCfg } } } } : x)));
+    setDirty(true);
+    toast(`Skill config applied to all ${roleLabel(src.role)} nodes`);
+  }, [nodes, pushHistory, setNodes]);
 
   const onConnect = useCallback((c: Connection) => {
     if (!c.source || !c.target) return;
@@ -837,7 +1085,7 @@ function WorkflowEditor() {
             </div>
           </div>
           <div className="card flex-1 min-h-0 overflow-auto p-3">
-            <Palette agents={agents ?? []} roles={roles ?? []} wsId={wsId} />
+            <Palette agents={agents ?? []} roles={roles ?? []} wsId={wsId} skills={(skillsData?.skills ?? []).filter((s) => s.enabled)} />
           </div>
         </aside>
 
@@ -914,6 +1162,8 @@ function WorkflowEditor() {
               onChange={(wf) => { pushHistory(); setNodes((ns) => ns.map((n) => (n.id === wf.id ? { ...n, data: { ...n.data, wf } } : n))); setDirty(true); }}
               onDelete={deleteSelection}
               onOpenTask={() => selNode.data.live?.taskId && nav(`/tasks/${selNode.data.live.taskId}`)}
+              skillsData={skillsData} reloadSkills={reloadSkills}
+              onApplyToRole={() => applySkillsToRole(selNode.id)}
             />
           ) : selEdge ? (
             <EdgeInspector

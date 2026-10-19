@@ -23,6 +23,7 @@ export interface WfNodeConfig {
   mergeMode?: 'all' | 'any';
   inheritSkills?: boolean;
   skillsOnly?: boolean;
+  skills?: { skillId: string; name: string; versionId?: string }[];
 }
 
 export interface WfNode {

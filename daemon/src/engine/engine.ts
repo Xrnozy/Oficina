@@ -587,7 +587,14 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   const task = wi.taskId ? (getTask(wi.taskId) ?? null) : null;
   // Skills attached to this agent or its role, relevant to this work, ride
   // along with the prompt. The stored (approved) prompt stays as it was.
-  const sk = skillsFor({ agentId: candidate.agent.id, roleId: candidate.role?.id ?? null, kind: wi.kind, taskText: `${task?.title ?? ''}\n${task?.description ?? ''}\n${r.goal}` });
+  // Graph runs add node-scoped skills from the pinned version's node config.
+  const wfN = wi.workflowNodeId ? wfNode(graphFor(r)?.graph ?? { nodes: [], edges: [] }, wi.workflowNodeId) : null;
+  const sk = skillsFor({
+    agentId: candidate.agent.id, roleId: candidate.role?.id ?? null, kind: wi.kind,
+    taskText: `${task?.title ?? ''}\n${task?.description ?? ''}\n${r.goal}`,
+    nodeSkills: wfN?.config?.skills,
+    inheritSkills: wfN ? (wfN.config?.inheritSkills !== false && !wfN.config?.skillsOnly) : true,
+  });
   // lowest-value section: skills are the first thing dropped when the prompt
   // would exceed the budget it was fitted to
   const pvRow = wi.promptVersionId ? q1('SELECT budget_chars, dropped FROM prompt_versions WHERE id = ?', wi.promptVersionId) : null;
