@@ -297,7 +297,9 @@ namespace Oficina {
         protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e) {
             if (e.Image == null) return;
             e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            e.Graphics.DrawImage(e.Image, e.ImageRectangle);
+            // the framework pins the image to the menu's left edge; centre it on the logo's column and the row's middle instead
+            int n = e.Image.Width;
+            e.Graphics.DrawImage(e.Image, Ui.S(27) - n / 2, (e.Item.Height - n) / 2, n, n);
         }
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
             ToolStripItem item = e.Item;
@@ -317,10 +319,11 @@ namespace Oficina {
             if (tag == "danger" && e.Item.Selected) c = P.Bad;
             if (!e.Item.Enabled) c = P.Fg4;
             TextFormatFlags f = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
-            if (e.Text == e.Item.Text) f |= TextFormatFlags.Left | TextFormatFlags.EndEllipsis;
+            Rectangle tr = new Rectangle(Ui.S(48), 0, e.Item.Width - Ui.S(48) - Ui.S(24), e.Item.Height);   // same x as the brand's name
+            if (e.Text == e.Item.Text) { f |= TextFormatFlags.Left | TextFormatFlags.EndEllipsis; }
             else { f |= TextFormatFlags.Right; c = P.Fg4; }       // the shortcut hint on the right
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.TextRectangle, c, f);
+            TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.Text == e.Item.Text ? tr : e.TextRectangle, c, f);
         }
     }
 
