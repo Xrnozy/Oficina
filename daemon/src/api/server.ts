@@ -13,7 +13,7 @@ import { readBlob } from '../services/verify.ts';
 import {
   approveDod, assignSweep, createRun, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
-  pauseRun, proceedMerge, resumeRun, stopRun, getRepo, getWorkspace,
+  pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
 import { decideApproval, requestApproval } from '../services/policy.ts';
 import { ensureIntegration, ensureRepo, gitOk } from '../services/git.ts';
@@ -29,8 +29,9 @@ import { modelSettings, settingsSupport, validateModelSettings } from '../servic
 import { messagesForRun, unreadCountFor } from '../services/messages.ts';
 import { projectDoc } from '../services/projectDoc.ts';
 import {
-  cloneWorkflow, createWorkflow, deleteWorkflow, getWorkflow, listWorkflows,
+  cloneWorkflow, createWorkflow, deleteWorkflow, estimateWorkflowCalls, getWorkflow, listWorkflows,
   rowToVersion, saveWorkflowVersion, setActiveWorkflow, validateWorkflow, validationSummary,
+  workflowAudit, workflowRefsFor, workflowTemplates,
 } from '../services/workflow.ts';
 import { CATALOG_ADAPTERS, fetchCatalog, fetchProviderCatalog, syncProviderModels } from '../services/provider-catalog.ts';
 import { DEFAULT_BASE_URL } from '../services/api-catalog.ts';
@@ -387,13 +388,40 @@ export function createServer(port: number, uiDir: string): http.Server {
   });
   app.post('/api/workflows/validate', (req, res) => {
     const issues = validateWorkflow(req.body?.graph, req.body?.workspaceId);
-    ok(res, { ...validationSummary(issues), issues });
+    ok(res, { ...validationSummary(issues), issues, estimate: req.body?.graph ? estimateWorkflowCalls(req.body.graph) : null });
   });
+  app.get('/api/workflows/templates', (_req, res) => ok(res, workflowTemplates()));
+  app.post('/api/workflows/simulate', (req, res) => {
+    const g = req.body?.graph;
+    if (!g || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) return err(res, 400, 'graph required');
+    ok(res, simulateWorkflow(g, req.body ?? {}));
+  });
+  app.get('/api/workflows/refs', (req, res) => {
+    ok(res, workflowRefsFor({ agentId: req.query.agentId as string | undefined, roleName: req.query.roleName as string | undefined }));
+  });
+
+  // Nodes an agent touches in each workspace's effective workflow: pinned
+  // directly, or the last member of a role a node names.
+  function workflowWarningsForAgent(agentId: string): string[] {
+    const warnings: string[] = [];
+    for (const ref of workflowRefsFor({ agentId })) {
+      warnings.push(`${ref.workflowName}: pinned on ${ref.nodes.map((n) => `"${n.label}"`).join(', ')}`);
+    }
+    for (const m of q(`SELECT m.role_id, m.workspace_id, r.name rname FROM memberships m JOIN roles r ON r.id = m.role_id WHERE m.agent_id = ? AND m.active = 1`, agentId)) {
+      const others = (q1(`SELECT COUNT(*) c FROM memberships WHERE role_id = ? AND workspace_id = ? AND active = 1 AND agent_id != ?`, m.role_id, m.workspace_id, agentId)?.c as number) ?? 0;
+      if (others > 0) continue;
+      for (const ref of workflowRefsFor({ roleName: m.rname as string })) {
+        warnings.push(`${ref.workflowName}: ${ref.nodes.map((n) => `"${n.label}"`).join(', ')} need a "${m.rname}" — this agent is the last one in that workspace`);
+      }
+    }
+    return warnings;
+  }
+  app.get('/api/workflows/:id/audit', (req, res) => ok(res, workflowAudit(req.params.id)));
   app.get('/api/workflows/:id', (req, res) => {
     const w = getWorkflow(req.params.id);
     if (!w) return err(res, 404, 'not found');
     const issues = w.graph ? validateWorkflow(w.graph, w.workflow.workspaceId) : [];
-    ok(res, { ...w, issues: { ...validationSummary(issues), issues } });
+    ok(res, { ...w, issues: { ...validationSummary(issues), issues }, estimate: w.graph ? estimateWorkflowCalls(w.graph) : null, audit: workflowAudit(req.params.id) });
   });
   app.get('/api/workflows/:id/versions/:n', (req, res) => {
     const v = q1('SELECT * FROM workflow_versions WHERE workflow_id = ? AND n = ?', req.params.id, Number(req.params.n));
@@ -545,10 +573,11 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.post('/api/agents/:id/fire', (req, res) => {
     const a = getAgent(req.params.id);
     if (!a) return err(res, 404, 'agent not found');
+    const warnings = workflowWarningsForAgent(a.id);          // before memberships deactivate
     run('UPDATE memberships SET active = 0 WHERE agent_id = ?', a.id);
     run(`UPDATE agents SET status = 'idle' WHERE id = ?`, a.id);
-    emit('agent.fired', 'owner', { agentId: a.id, name: a.name });
-    ok(res, { ok: true });
+    emit('agent.fired', 'owner', { agentId: a.id, name: a.name, workflowWarnings: warnings.length });
+    ok(res, { ok: true, workflowWarnings: warnings });
   });
 
   app.post('/api/errors/:id/wontfix', (req, res) => {
@@ -660,7 +689,8 @@ export function createServer(port: number, uiDir: string): http.Server {
       agentId: a.id, name: a.name, accountId: next.accountId, modelId: next.modelId,
       model: modelSettings(next.settings), changed: Object.keys(b),
     });
-    ok(res, next);
+    const warnings = workflowWarningsForAgent(a.id);
+    ok(res, { ...next, workflowWarnings: warnings });
   });
 
   app.get('/api/providers/:id/catalog', async (req, res) => {
@@ -803,6 +833,7 @@ export function createServer(port: number, uiDir: string): http.Server {
     const { workspaceId, roleId, inFlightChoice } = req.body ?? {};
     const a = getAgent(req.params.id);
     if (!a) return err(res, 404, 'agent not found');
+    const warnings = workflowWarningsForAgent(a.id);          // the role it is leaving
     const existing = q1('SELECT * FROM memberships WHERE agent_id = ? AND workspace_id = ? AND active = 1', a.id, workspaceId);
     if (existing) {
       run('UPDATE memberships SET role_id = ? WHERE id = ?', roleId, existing.id);
@@ -814,14 +845,16 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (inFlightTasks.length && inFlightChoice === 'abort') {
       for (const t of inFlightTasks) ownerEditTask(t.id as string, { status: undefined }, 'abort');
     }
-    emit('membership.changed', 'owner', { agentId: a.id, workspaceId, roleId, inFlight: inFlightTasks.length });
-    ok(res, { ok: true });
+    emit('membership.changed', 'owner', { agentId: a.id, workspaceId, roleId, inFlight: inFlightTasks.length, workflowWarnings: warnings.length });
+    ok(res, { ok: true, workflowWarnings: warnings });
   });
 
   app.delete('/api/memberships/:id', (req, res) => {
+    const m = q1('SELECT agent_id FROM memberships WHERE id = ?', req.params.id);
+    const warnings = m ? workflowWarningsForAgent(m.agent_id as string) : [];
     run('UPDATE memberships SET active = 0 WHERE id = ?', req.params.id);
     emit('membership.removed', 'owner', { membershipId: req.params.id });
-    ok(res, { ok: true });
+    ok(res, { ok: true, workflowWarnings: warnings });
   });
 
   // ---------- skills ----------

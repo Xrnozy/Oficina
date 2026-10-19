@@ -2584,12 +2584,14 @@ type WfState = {
   fired: string[];                     // nodes that completed this run-through
   loops: Record<string, number>;       // traversals per bounded edge
   arrived: Record<string, string[]>;   // merge node -> arrived edge ids
-  awaiting?: { kind: 'human' | 'reply'; nodeId: string; edgeId?: string; approvalId?: string; at: string };
+  awaiting?: { kind: 'human' | 'reply' | 'guard'; nodeId: string; edgeId?: string; approvalId?: string; at: string; guard?: string };
   held?: string;                       // writer node parked while the tree is busy
   queued?: string[];                   // writer nodes waiting on a sibling writer
   deadEndNode?: string;                // node that stalled — owner approval retries it
   draft?: { text: string; approved: boolean; revision: number };
   lastOutcome?: WfOutcome;
+  steps?: number;                      // agent dispatches this task has taken (guardrail counter)
+  guardOk?: string[];                  // guardrails the owner let pass for this task
 };
 
 const WF_LOOP_KINDS = ['on-failure', 'on-reject'];
@@ -2743,6 +2745,50 @@ function wfInputsText(r: Run, task: Task, node: WfNode): string {
   return '';
 }
 
+// Guardrail acknowledgements that span a whole run (a task's own acks live in
+// its wf state). A restart re-asks — safe default.
+const wfRunGuardOk = new Map<string, Set<string>>();
+
+// Phase 4 guardrails — pause dispatching and raise a Needs-you item when a
+// workflow's limits are hit. Approving lets the run continue past it.
+function wfGuardrailCheck(r: Run, task: Task, node: WfNode, s: WfState): string | null {
+  const g = graphFor(r)?.graph.guardrails;
+  if (!g) return null;
+  const ok = (key: string, scope: 'task' | 'run') =>
+    scope === 'task' ? (s.guardOk ?? []).includes(key) : (wfRunGuardOk.get(r.id)?.has(key) ?? false);
+  if (g.maxStepsPerTask != null && (s.steps ?? 0) >= g.maxStepsPerTask && !ok('task-steps', 'task'))
+    return `task "${task.title}" used its ${g.maxStepsPerTask} graph steps`;
+  if (g.maxStepsPerRun != null && !ok('run-steps', 'run')) {
+    const used = q1(`SELECT COUNT(*) c FROM work_items WHERE run_id = ?`, r.id)?.c as number ?? 0;
+    if (used >= g.maxStepsPerRun) return `the run used its ${g.maxStepsPerRun} agent calls`;
+  }
+  if (g.costCeilingUsd != null && !ok('cost', 'run')) {
+    const spent = q1(`SELECT COALESCE(SUM(cost_usd),0) c FROM usage_records WHERE run_id = ?`, r.id)?.c as number ?? 0;
+    if (spent >= g.costCeilingUsd) return `the run passed its $${g.costCeilingUsd} cost ceiling ($${spent.toFixed(2)} spent)`;
+  }
+  if (g.timeCeilingMin != null && !ok('time', 'run')) {
+    const started = r.startedAt ? new Date(r.startedAt).getTime() : Date.now();
+    if (Date.now() - started >= g.timeCeilingMin * 60000) return `the run passed its ${g.timeCeilingMin} min time ceiling`;
+  }
+  return null;
+}
+
+function wfGateGuardrail(r: Run, task: Task, node: WfNode, why: string): void {
+  const s = wfState(task);
+  s.awaiting = { kind: 'guard', nodeId: node.id, at: now(), guard: why };
+  saveWfState(task, s);
+  emit('workflow.guardrail', 'engine', { taskId: task.id, nodeId: node.id, why }, r.id, task.id);
+  const a = requestApproval({ action: 'workflow.guardrail', taskId: task.id, runId: r.id, requestedBy: 'engine',
+    payload: { summary: `Guardrail hit: ${why}. Approve to keep going anyway, reject to stop the task.`, nodeId: node.id, guard: why } });
+  const fresh = getTask(task.id)!;
+  const s2 = wfState(fresh);
+  if (s2.awaiting?.nodeId === node.id) {
+    s2.awaiting = { ...s2.awaiting, approvalId: a.id };
+    saveWfState(fresh, s2);
+    setTaskStatus(task.id, 'waiting-input', 'engine', { reason: `guardrail: ${why}` });
+  }
+}
+
 function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
   task = getTask(task.id)!;                       // fresh: sibling edges may have saved state
   const s = wfState(task);
@@ -2755,6 +2801,10 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
     emit('workflow.parked', 'engine', { taskId: task.id, nodeId: node.id, reason: 'another writer step is still running' }, r.id, task.id);
     return;
   }
+  // guardrails — a step that trips a ceiling pauses for the owner (checked
+  // after the writer queue so a parked node does not consume the budget)
+  const guard = wfGuardrailCheck(r, task, node, s);
+  if (guard) { wfGateGuardrail(r, task, node, guard); return; }
   const tierDifficulty = node.config?.modelTier === 'strong' ? 5 : node.config?.modelTier === 'fast' ? 1 : task.difficulty;
   const candidate = wfCandidate(r, task, node, kind, tierDifficulty);
   if (!candidate) {
@@ -2810,6 +2860,7 @@ function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | n
   }
   s2.nodes = [...new Set([...s2.nodes.filter((id) => id !== node.id), node.id])];
   s2.held = s2.held === node.id ? undefined : s2.held;
+  s2.steps = (s2.steps ?? 0) + 1;                  // guardrail counter — a dispatch actually happened
   saveWfState(task, s2);
   emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, kind, agent: candidate.agent.name, via: viaEdge?.id ?? null }, r.id, task.id);
   if (task.status !== 'verifying' && task.status !== 'in-review') setTaskStatus(task.id, 'assigned', 'engine', { agent: candidate.agent.name, node: node.label });
@@ -3035,6 +3086,96 @@ export function graphTaskEntry(r: Run, task: Task): void {
   for (const n of entries) graphEnter(r, fresh, n, null);
 }
 
+// ---------- Phase 4: dry-run simulation (no model calls) ----------
+
+export interface WfSimStep { n: number; nodeId: string; label: string; type: string; viaEdgeId?: string; note?: string }
+export interface WfSimResult {
+  steps: WfSimStep[]; takenEdges: string[]; calls: number; humanGates: number;
+  loopsUsed: Record<string, number>; result: 'end' | 'dead-end' | 'max-steps'; notes: string[];
+}
+
+// Walk the graph exactly as the executor would, with scripted per-node
+// outcomes. outcomes[nodeId] may be a single outcome or a queue — looped
+// nodes pop the next scripted result each visit.
+export function simulateWorkflow(graph: WfGraph, opts: {
+  outcomes?: Record<string, WfOutcome['status'] | WfOutcome['status'][]>;
+  taskType?: string; difficulty?: number; maxSteps?: number;
+} = {}): WfSimResult {
+  const task = { id: 'sim', title: 'dry run', type: opts.taskType ?? 'task', difficulty: opts.difficulty ?? 1, attempts: 1, affectedPaths: [], meta: {} } as unknown as Task;
+  const steps: WfSimStep[] = [];
+  const takenEdges = new Set<string>();
+  const loopsUsed: Record<string, number> = {};
+  const fired = new Set<string>();
+  const arrived: Record<string, Set<string>> = {};
+  const notes: string[] = [];
+  let calls = 0; let humanGates = 0;
+  const scripts = new Map<string, WfOutcome['status'][]>();
+  for (const [k, v] of Object.entries(opts.outcomes ?? {})) scripts.set(k, Array.isArray(v) ? [...v] : [v]);
+  const scripted = (id: string): WfOutcome => {
+    const q2 = scripts.get(id);
+    const status = q2?.length ? q2.length > 1 ? q2.shift()! : q2[0] : 'success';
+    return { status, verdict: status === 'reject' ? 'reject' : status === 'failure' ? 'fail' : 'approve', checksPassed: status === 'failure' ? false : true };
+  };
+  const step = (n: WfNode, viaEdgeId: string | undefined, note?: string) =>
+    steps.push({ n: steps.length + 1, nodeId: n.id, label: n.label, type: n.type, viaEdgeId, note });
+
+  const queue: { node: WfNode; viaEdgeId?: string; outcome: WfOutcome }[] = [];
+  const start = graph.nodes.find((n) => n.type === 'start');
+  if (!start) return { steps, takenEdges: [], calls, humanGates, loopsUsed, result: 'dead-end', notes: ['no start node'] };
+  step(start, undefined);
+  const advance = (node: WfNode, outcome: WfOutcome) => {
+    const { take, elseEdge } = wfMatchingEdges(graph, node.id, { outcome, task });
+    const edges = take.length ? take : elseEdge ? [elseEdge] : [];
+    if (!edges.length) { if (!queue.length) notes.push(`dead end after "${node.label}" (${outcome.status})`); return; }
+    for (const e of edges) {
+      const cap = e.maxLoops ?? (WF_LOOP_KINDS.includes(e.kind) ? DEFAULT_MAX_LOOPS : undefined);
+      const used = loopsUsed[e.id] ?? 0;
+      if (cap != null && used >= cap) { notes.push(`loop "${e.label ?? e.id}" hit its bound (${cap}) — the owner would be asked`); continue; }
+      if (cap != null) loopsUsed[e.id] = used + 1;
+      takenEdges.add(e.id);
+      const t = wfNode(graph, e.to);
+      if (t) queue.push({ node: t, viaEdgeId: e.id, outcome });
+    }
+  };
+  let lastOutcome: WfOutcome = { status: 'success' };
+  advance(start, lastOutcome);
+
+  const guardLimit = opts.maxSteps ?? 100;
+  while (queue.length && steps.length < guardLimit) {
+    const { node, viaEdgeId, outcome } = queue.shift()!;
+    switch (node.type) {
+      case 'agent': {
+        calls++;
+        const o = scripted(node.id);
+        fired.add(node.id);
+        step(node, viaEdgeId, `${o.status}${scripts.has(node.id) ? '' : ' (mocked)'}`);
+        // message edges fire alongside the flow — recorded, no call
+        for (const e of graph.edges.filter((x) => x.from === node.id && x.kind === 'message')) {
+          takenEdges.add(e.id);
+          notes.push(`message → ${wfNode(graph, e.to)?.label ?? e.to}${e.waitForReply ? ' (waits for reply)' : ''}`);
+        }
+        lastOutcome = o;
+        advance(node, o);
+        break;
+      }
+      case 'condition': step(node, viaEdgeId); advance(node, lastOutcome); break;
+      case 'human': humanGates++; step(node, viaEdgeId, 'owner gate — simulated approve'); advance(node, { status: 'success', verdict: 'approve' }); break;
+      case 'merge': {
+        const ins = graph.edges.filter((e) => e.to === node.id && e.kind !== 'message');
+        const a = arrived[node.id] ?? (arrived[node.id] = new Set());
+        if (viaEdgeId) a.add(viaEdgeId);
+        const done = (node.config?.mergeMode ?? 'all') === 'any' ? a.size >= 1 : a.size >= ins.length;
+        step(node, viaEdgeId, `${a.size}/${ins.length} arrived${done ? '' : ' — waiting'}`);
+        if (done) advance(node, lastOutcome);
+        break;
+      }
+      case 'end': step(node, viaEdgeId, 'done'); return { steps, takenEdges: [...takenEdges], calls, humanGates, loopsUsed, result: 'end', notes };
+      case 'start': step(node, viaEdgeId); advance(node, lastOutcome); break;
+    }
+  }
+  return { steps, takenEdges: [...takenEdges], calls, humanGates, loopsUsed, result: steps.length >= guardLimit ? 'max-steps' : 'dead-end', notes };
+}
+
 // verifyDeliveredTask hands its check outcomes here for graph runs: engine
 // checks still decide pass/fail; the graph decides who runs next.
 async function graphChecksDone(wi: WorkItem, task: Task, results: { cr: ReturnType<typeof rowToCheckRun>; check: Check }[], files: string[]): Promise<void> {
@@ -3183,6 +3324,29 @@ function graphResume(r: Run, task: Task, approved: boolean, approval?: { action:
   graphAdvanceFrom(r, task, node, { status: approved ? 'success' : 'reject', verdict: approved ? 'approve' : 'reject' }, null);
 }
 
+// Guardrail gate resume: approving lets the run continue past the limit —
+// the task-scoped ceiling acks on the task, run-scoped ceilings on the run.
+function graphGuardResume(r: Run, task: Task, approved: boolean): void {
+  const s = wfState(task);
+  const awaiting = s.awaiting;
+  s.awaiting = undefined;
+  if (!approved) {
+    saveWfState(task, s);
+    setTaskStatus(task.id, 'blocked', 'owner', { reason: 'guardrail — owner stopped the task' });
+    return;
+  }
+  const why = awaiting?.guard ?? '';
+  if (/graph steps/.test(why)) s.guardOk = [...new Set([...(s.guardOk ?? []), 'task-steps'])];
+  else {
+    const key = /cost ceiling/.test(why) ? 'cost' : /time ceiling/.test(why) ? 'time' : 'run-steps';
+    wfRunGuardOk.set(r.id, new Set([...(wfRunGuardOk.get(r.id) ?? []), key]));
+  }
+  saveWfState(task, s);
+  setTaskStatus(task.id, 'assigned', 'owner', { reason: 'guardrail acknowledged' });
+  const node = awaiting ? wfNode(graphFor(r)!.graph, awaiting.nodeId) : null;
+  if (node) graphEnter(r, getTask(task.id)!, node, null);
+}
+
 export function wireEngineEvents(): void {
   onEvent((e) => {
     if (e.type !== 'approval.decided') return;
@@ -3206,12 +3370,13 @@ export function wireEngineEvents(): void {
       else { setTaskStatus(taskId, 'assigned', 'owner'); startPromptDraft({ ...job, revision: 0, notes: `Owner: ${reason}` }); }
       return;
     }
-    // workflow gates: human nodes, exhausted loops, dead ends
-    if (['workflow.human', 'workflow.loop', 'workflow.deadend'].includes(decided.action as string) && decided.task_id) {
+    // workflow gates: human nodes, exhausted loops, dead ends, guardrails
+    if (['workflow.human', 'workflow.loop', 'workflow.deadend', 'workflow.guardrail'].includes(decided.action as string) && decided.task_id) {
       const task = getTask(decided.task_id as string);
       const rr = task ? getRun(task.runId) : null;
       if (!task || !rr || !graphFor(rr)) return;
       const s = wfState(task);
+      if (s.awaiting?.kind === 'guard') { graphGuardResume(rr, task, !!e.payload.approved); void maybeAdvanceRun(rr.id); return; }
       if (s.awaiting) { graphResume(rr, task, !!e.payload.approved, { action: decided.action as string, payload: parseJson(decided.payload as string, {}) }); void maybeAdvanceRun(rr.id); return; }
       if (s.deadEndNode && e.payload.approved) { setTaskStatus(task.id, 'ready', 'owner', { reason: 'dead-end retry approved' }); void maybeAdvanceRun(rr.id); return; }
       if (e.payload.approved && task.status === 'blocked') { setTaskStatus(task.id, 'ready', 'owner'); void maybeAdvanceRun(rr.id); }

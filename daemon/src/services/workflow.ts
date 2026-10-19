@@ -48,7 +48,14 @@ export interface WfEdge {
   waitForReply?: boolean; timeoutMin?: number; // 'message' edges
 }
 
-export interface WfGraph { nodes: WfNode[]; edges: WfEdge[]; }
+export interface WfGuardrails {
+  maxStepsPerTask?: number;   // agent dispatches one task may take through the graph
+  maxStepsPerRun?: number;    // agent dispatches across the whole run
+  costCeilingUsd?: number;    // stop dispatching when recorded spend passes this
+  timeCeilingMin?: number;    // stop dispatching when the run is older than this
+}
+
+export interface WfGraph { nodes: WfNode[]; edges: WfEdge[]; guardrails?: WfGuardrails; }
 
 export interface WfIssue { level: 'error' | 'warning'; nodeId?: string; edgeId?: string; message: string; }
 
@@ -298,7 +305,9 @@ export function saveWorkflowVersion(workflowId: string, graph: WfGraph, note: st
   const vId = ulid();
   run(`INSERT INTO workflow_versions (id, workflow_id, n, graph, note, created_by, created_at) VALUES (?,?,?,?,?,?,?)`, vId, workflowId, n, JSON.stringify(graph), note, createdBy, now());
   run('UPDATE workflows SET latest_version_id = ?, updated_at = ? WHERE id = ?', vId, now(), workflowId);
-  emit('workflow.saved', 'owner', { workflowId, versionId: vId, n, note });
+  const prev = w.latest_version_id ? getWorkflowVersion(w.latest_version_id as string)?.graph : null;
+  emit('workflow.saved', createdBy === 'system' ? 'system' : 'owner',
+    { workflowId, versionId: vId, n, note, by: createdBy, changes: prev ? graphDiff(prev, graph) : 'initial version' }, null, workflowId);
   return { version: { id: vId, workflowId, n, note, createdBy, createdAt: now() }, issues };
 }
 
@@ -309,7 +318,7 @@ export function createWorkflow(wsId: string, name: string, description: string, 
   const id = ulid(), vId = ulid();
   run(`INSERT INTO workflow_versions (id, workflow_id, n, graph, note, created_by, created_at) VALUES (?,?,1,?,?,'owner',?)`, vId, id, JSON.stringify(g), 'initial version', now());
   run(`INSERT INTO workflows (id, workspace_id, name, description, builtin, latest_version_id, created_at, updated_at) VALUES (?,?,?,?,0,?,?,?)`, id, wsId, name, description, vId, now(), now());
-  emit('workflow.saved', 'owner', { workflowId: id, versionId: vId, n: 1, note: 'created' });
+  emit('workflow.saved', 'owner', { workflowId: id, versionId: vId, n: 1, note: 'created', by: 'owner', changes: 'created' }, null, id);
   return { workflowId: id };
 }
 
@@ -328,7 +337,7 @@ export function deleteWorkflow(workflowId: string): { ok: true } | { error: stri
   if (used) return { error: 'a run was created with this workflow — keep it for the record' };
   run('DELETE FROM workflow_versions WHERE workflow_id = ?', workflowId);
   run('DELETE FROM workflows WHERE id = ?', workflowId);
-  emit('workflow.deleted', 'owner', { workflowId });
+  emit('workflow.deleted', 'owner', { workflowId, name: w.name }, null, workflowId);
   return { ok: true };
 }
 
@@ -346,7 +355,7 @@ export function setActiveWorkflow(wsId: string, workflowId: string | null): { ok
   const settings = parseJson<Record<string, unknown>>(w.settings as string, {});
   if (workflowId) settings.activeWorkflowId = workflowId; else delete settings.activeWorkflowId;
   run('UPDATE workspaces SET settings = ? WHERE id = ?', JSON.stringify(settings), wsId);
-  emit('workflow.activated', 'owner', { workflowId, workspaceId: wsId });
+  emit('workflow.activated', 'owner', { workflowId, workspaceId: wsId, name: workflowId ? (q1('SELECT name FROM workflows WHERE id = ?', workflowId)?.name ?? null) : null }, null, workflowId);
   return { ok: true };
 }
 
@@ -359,4 +368,167 @@ export function activeWorkflowFor(wsId: string): { workflowId: string; versionId
   if (!w?.latest_version_id) return null;
   const v = getWorkflowVersion(w.latest_version_id as string);
   return v ? { workflowId: id, versionId: v.version.id, graph: v.graph } : null;
+}
+
+// ---------- Phase 4: templates, estimates, referenced-by, audit ----------
+
+// What changed between two versions — recorded on the audit event.
+function graphDiff(a: WfGraph, b: WfGraph): string {
+  const an = new Map(a.nodes.map((n) => [n.id, n])); const bn = new Map(b.nodes.map((n) => [n.id, n]));
+  const added = [...bn.keys()].filter((id) => !an.has(id));
+  const removed = [...an.keys()].filter((id) => !bn.has(id));
+  const changed = [...bn.keys()].filter((id) => an.has(id) && JSON.stringify({ ...an.get(id)!, position: undefined }) !== JSON.stringify({ ...bn.get(id)!, position: undefined }));
+  const ae = new Set(a.edges.map((e) => e.id)); const be = new Set(b.edges.map((e) => e.id));
+  const eAdded = [...be].filter((id) => !ae.has(id)).length; const eRemoved = [...ae].filter((id) => !be.has(id)).length;
+  const parts = [
+    added.length && `+${added.length} node${added.length > 1 ? 's' : ''} (${added.join(', ')})`,
+    removed.length && `-${removed.length} node${removed.length > 1 ? 's' : ''} (${removed.join(', ')})`,
+    changed.length && `${changed.length} changed`,
+    (eAdded || eRemoved) && `edges +${eAdded}/-${eRemoved}`,
+  ].filter(Boolean);
+  return parts.join('; ') || 'positions only';
+}
+
+// ---------- ready-made templates ----------
+
+const snode = (id: string, label: string, type: WfNode['type'], x: number, y: number): WfNode => ({ id, type, label, position: { x, y } });
+
+export function workflowTemplates(): { id: string; name: string; description: string; graph: WfGraph }[] {
+  const fast: WfGraph = {
+    nodes: [snode('start', 'Request', 'start', 0, 120), anode('dev', 'Developer', 'developer', 'implement', 180, 120),
+      anode('rev', 'Reviewer', 'reviewer', 'review', 400, 120, { writable: false }),
+      anode('accept', 'PM · Accept', 'pm', 'accept', 620, 120, { writable: false }), snode('end', 'Done', 'end', 840, 120)],
+    edges: [edge('e1', 'start', 'dev', 'next'), edge('e2', 'dev', 'rev', 'on-success'), edge('e3', 'rev', 'dev', 'on-reject', { maxLoops: 2 }),
+      edge('e4', 'rev', 'accept', 'on-success'), edge('e5', 'accept', 'dev', 'on-reject', { maxLoops: 2 }), edge('e6', 'accept', 'end', 'on-success')],
+  };
+  const strict: WfGraph = {
+    nodes: [snode('start', 'Request', 'start', 0, 120), anode('dev', 'Developer', 'developer', 'implement', 180, 120),
+      anode('qa', 'QA', 'qa', 'qa', 400, 60, { writable: false }),
+      anode('sec', 'Security review', 'reviewer', 'review', 620, 120, { writable: false, instructions: 'Review for security issues only: injection, secrets, unsafe dependencies, auth gaps.' }),
+      anode('rev', 'Code review', 'reviewer', 'review', 840, 60, { writable: false }),
+      anode('accept', 'PM · Accept', 'pm', 'accept', 1060, 120, { writable: false }), snode('end', 'Done', 'end', 1280, 120)],
+    edges: [edge('e1', 'start', 'dev', 'next'), edge('e2', 'dev', 'qa', 'on-success'), edge('e3', 'qa', 'dev', 'on-failure', { maxLoops: 3 }),
+      edge('e4', 'qa', 'sec', 'on-success'), edge('e5', 'sec', 'dev', 'on-reject', { maxLoops: 2 }),
+      edge('e6', 'sec', 'rev', 'on-success'), edge('e7', 'rev', 'dev', 'on-reject', { maxLoops: 2 }),
+      edge('e8', 'rev', 'accept', 'on-success'), edge('e9', 'accept', 'dev', 'on-reject', { maxLoops: 2 }), edge('e10', 'accept', 'end', 'on-success')],
+  };
+  const docs: WfGraph = {
+    nodes: [snode('start', 'Request', 'start', 0, 120), anode('docs', 'Docs writer', 'docs', 'doc', 180, 120),
+      anode('accept', 'PM · Accept', 'pm', 'accept', 400, 120, { writable: false }), snode('end', 'Done', 'end', 620, 120)],
+    edges: [edge('e1', 'start', 'docs', 'next'), edge('e2', 'docs', 'accept', 'on-success'),
+      edge('e3', 'accept', 'docs', 'on-reject', { maxLoops: 2 }), edge('e4', 'accept', 'end', 'on-success')],
+  };
+  const bugfix: WfGraph = {
+    nodes: [snode('start', 'Request', 'start', 0, 120), anode('an', 'Analyst · Diagnose', 'analyst', 'analyse', 180, 120, { writable: false }),
+      anode('dev', 'Developer · Fix', 'developer', 'fix', 400, 120), anode('qa', 'QA', 'qa', 'qa', 620, 120, { writable: false }),
+      anode('accept', 'PM · Accept', 'pm', 'accept', 840, 120, { writable: false }), snode('end', 'Done', 'end', 1060, 120)],
+    edges: [edge('e1', 'start', 'an', 'next'), edge('e2', 'an', 'dev', 'next'), edge('e3', 'dev', 'qa', 'on-success'),
+      edge('e4', 'qa', 'an', 'on-failure', { maxLoops: 3 }), edge('e5', 'qa', 'accept', 'on-success'),
+      edge('e6', 'accept', 'dev', 'on-reject', { maxLoops: 2 }), edge('e7', 'accept', 'end', 'on-success')],
+  };
+  const parallel: WfGraph = {
+    nodes: [snode('start', 'Request', 'start', 0, 120), anode('dev', 'Developer', 'developer', 'implement', 180, 120),
+      anode('rev-a', 'Reviewer A', 'reviewer', 'review', 400, 40, { writable: false }),
+      anode('rev-b', 'Reviewer B (security)', 'reviewer', 'review', 400, 200, { writable: false, instructions: 'Focus on security and edge cases.' }),
+      snode('join', 'Both reviews', 'merge', 620, 120),
+      anode('accept', 'PM · Accept', 'pm', 'accept', 840, 120, { writable: false }), snode('end', 'Done', 'end', 1060, 120)],
+    edges: [edge('e1', 'start', 'dev', 'next'), edge('e2', 'dev', 'rev-a', 'on-success'), edge('e3', 'dev', 'rev-b', 'on-success'),
+      edge('e4', 'rev-a', 'join', 'next'), edge('e5', 'rev-b', 'join', 'next'),
+      edge('e6', 'rev-a', 'dev', 'on-reject', { maxLoops: 2 }), edge('e7', 'rev-b', 'dev', 'on-reject', { maxLoops: 2 }),
+      edge('e8', 'join', 'accept', 'next'), edge('e9', 'accept', 'dev', 'on-reject', { maxLoops: 2 }), edge('e10', 'accept', 'end', 'on-success')],
+    guardrails: {},
+  };
+  return [
+    { id: 'default', name: 'Default pipeline', description: 'The full office flow: plan, prompt draft + review, implement, verify, review, accept.', graph: defaultWorkflowGraph() },
+    { id: 'fast', name: 'Fast path', description: 'Developer then reviewer — no plan or QA stage. For small, clear tasks.', graph: fast },
+    { id: 'strict', name: 'Strict', description: 'Implement, QA, a security reviewer, a code reviewer, then accept. For risky changes.', graph: strict },
+    { id: 'docs', name: 'Docs only', description: 'Docs writer then PM accept. For documentation tasks.', graph: docs },
+    { id: 'bugfix', name: 'Bug-fix', description: 'Analyst diagnoses, developer fixes, QA verifies, PM accepts.', graph: bugfix },
+    { id: 'parallel', name: 'Parallel review', description: 'Two reviewers run side by side and merge before the PM accepts.', graph: parallel },
+  ];
+}
+
+// ---------- worst-case call estimate ----------
+
+// Upper bound of model calls per task: every agent node once, plus each
+// loop edge letting its cycle body re-run up to its bound. Parallel
+// branches add, they don't multiply. Human gates are approvals, not calls.
+export function estimateWorkflowCalls(graph: WfGraph): { minCalls: number; maxCalls: number; humanGates: number; skillChars: number } {
+  const g = graph;
+  const reachable = new Set<string>();
+  {
+    const start = g.nodes.find((n) => n.type === 'start');
+    const stack = start ? [start.id] : [];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (reachable.has(id)) continue;
+      reachable.add(id);
+      for (const e of g.edges) if (e.from === id && e.kind !== 'message') stack.push(e.to);
+    }
+  }
+  const agentNodes = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && (n.config?.scope ?? 'task') === 'task');
+  const taskScoped = agentNodes.length;
+  const runScoped = g.nodes.filter((n) => n.type === 'agent' && reachable.has(n.id) && n.config?.scope === 'run').length;
+  const humans = g.nodes.filter((n) => n.type === 'human' && reachable.has(n.id)).length;
+  // each loop edge's cycle body can re-run up to its bound. The body is the
+  // nodes reachable from e.to that can also reach e.from — both endpoints
+  // included, since each pass re-enters e.to and re-arrives at e.from.
+  let loopExtra = 0;
+  for (const e of g.edges.filter((x) => x.kind === 'on-failure' || x.kind === 'on-reject')) {
+    const cap = e.maxLoops ?? DEFAULT_MAX_LOOPS;
+    const fwd = new Set<string>(); const stack = [e.to];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (fwd.has(id)) continue;
+      fwd.add(id);
+      for (const x of g.edges) if (x.from === id && x.kind !== 'message') stack.push(x.to);
+    }
+    const rev = new Set<string>(); const back = [e.from];
+    while (back.length) {
+      const id = back.pop()!;
+      if (rev.has(id)) continue;
+      rev.add(id);
+      for (const x of g.edges) if (x.to === id && x.kind !== 'message') back.push(x.from);
+    }
+    loopExtra += cap * [...fwd].filter((id) => rev.has(id) && reachable.has(id) && g.nodes.find((x) => x.id === id)?.type === 'agent').length;
+  }
+  // node skill text the prompts may carry (approved version sizes)
+  let skillChars = 0;
+  for (const n of agentNodes) {
+    for (const ref of n.config?.skills ?? []) {
+      const v = ref.versionId
+        ? q1(`SELECT LENGTH(content) c FROM skill_versions WHERE id = ? AND review_status = 'approved'`, ref.versionId)
+        : q1(`SELECT LENGTH(content) c FROM skill_versions WHERE skill_id = ? AND review_status = 'approved' ORDER BY created_at DESC LIMIT 1`, ref.skillId);
+      skillChars += (v?.c as number) ?? 0;
+    }
+  }
+  return { minCalls: Math.min(taskScoped + runScoped, Math.max(1, taskScoped + runScoped)), maxCalls: taskScoped + runScoped + loopExtra, humanGates: humans, skillChars };
+}
+
+// ---------- referenced-by warnings ----------
+
+// The effective graph each workspace runs: its active custom workflow, else
+// the built-in. Used to warn before firing/editing a referenced agent/role.
+export function workflowRefsFor(opts: { agentId?: string; roleName?: string }): { workflowId: string; workflowName: string; nodes: { id: string; label: string }[] }[] {
+  const out: { workflowId: string; workflowName: string; nodes: { id: string; label: string }[] }[] = [];
+  for (const ws of q('SELECT id FROM workspaces')) {
+    const eff = activeWorkflowFor(ws.id as string) ?? (() => {
+      ensureBuiltinWorkflow(ws.id as string);
+      const w = q1('SELECT id, latest_version_id FROM workflows WHERE id = ?', BUILTIN_ID(ws.id as string));
+      const v = w?.latest_version_id ? getWorkflowVersion(w.latest_version_id as string) : null;
+      return v ? { workflowId: w!.id as string, graph: v.graph } : null;
+    })();
+    if (!eff) continue;
+    const name = (q1('SELECT name FROM workflows WHERE id = ?', eff.workflowId)?.name as string) ?? eff.workflowId;
+    const nodes = eff.graph.nodes.filter((n) =>
+      (opts.agentId && n.agentId === opts.agentId) || (opts.roleName && n.role === opts.roleName));
+    if (nodes.length) out.push({ workflowId: eff.workflowId, workflowName: name, nodes: nodes.map((n) => ({ id: n.id, label: n.label })) });
+  }
+  return out;
+}
+
+// Audit log for one workflow — events are already hash-chained.
+export function workflowAudit(workflowId: string, limit = 20): { ts: string; type: string; actor: string; payload: Record<string, unknown> }[] {
+  return q(`SELECT ts, type, actor, payload FROM events WHERE entity_id = ? ORDER BY seq DESC LIMIT ?`, workflowId, limit)
+    .map((e) => ({ ts: e.ts as string, type: e.type as string, actor: e.actor as string, payload: parseJson(e.payload as string, {}) }));
 }

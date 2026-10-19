@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { post, put, useQuery } from '../api';
+import { get, post, put, useQuery } from '../api';
 import { useProviderCatalog } from './Providers';
-import { Avatar, Drawer, Empty, KV, Modal, ObsBadge, PageHeader, Segmented, Skeleton, StatusChip, Tag, act, fmtUsd, roleLabel } from '../components';
+import { Avatar, Drawer, Empty, KV, Modal, ObsBadge, PageHeader, Segmented, Skeleton, StatusChip, Tag, act, fmtUsd, roleLabel, toast } from '../components';
 import { ArrowDown, ArrowUp, Cpu, Plus, Send, SlidersHorizontal, UserMinus, UserPlus, X } from 'lucide-react';
 
 function modelLabel(m: any): string {
@@ -248,8 +248,13 @@ export default function Agents() {
                 <button className="btn btn-sm" onClick={() => setMsgAgent(a)}><Send size={12} /> Message{a.unread ? <span className="num text-2xs text-fg-4">· {a.unread} queued</span> : null}</button>
                 {active.length > 0 && (
                   <button className="btn btn-ghost btn-sm btn-icon hover:!text-bad ml-auto" title="Unassign — remove from all desks" aria-label="Unassign" onClick={async () => {
-                    if (!confirm(`Remove ${a.name} from all desks? They keep their config but stop receiving work.`)) return;
-                    await act(post(`/agents/${a.id}/fire`, {}), `${a.name} removed from all desks`); reload();
+                    const refs = await get<{ workflowName: string; nodes: { label: string }[] }[]>(`/workflows/refs?agentId=${a.id}`).catch(() => []);
+                    const affected = (refs ?? []).flatMap((r) => r.nodes.map((n) => `${r.workflowName}: ${n.label}`));
+                    const extra = affected.length ? `\n\nIt is referenced by workflow node(s):\n${affected.map((x) => `  - ${x}`).join('\n')}` : '';
+                    if (!confirm(`Remove ${a.name} from all desks? They keep their config but stop receiving work.${extra}`)) return;
+                    const r = await act<{ workflowWarnings?: string[] }>(post(`/agents/${a.id}/fire`, {}), `${a.name} removed from all desks`);
+                    if (r?.workflowWarnings?.length) toast(`Still referenced: ${r.workflowWarnings.join('; ')}`, 'warn');
+                    reload();
                   }}><UserMinus size={13} /></button>
                 )}
               </div>

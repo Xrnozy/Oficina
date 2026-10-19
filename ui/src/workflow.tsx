@@ -39,7 +39,19 @@ export interface WfEdge {
   maxLoops?: number; waitForReply?: boolean; timeoutMin?: number;
 }
 
-export interface WfGraph { nodes: WfNode[]; edges: WfEdge[]; }
+export interface WfGuardrails {
+  maxStepsPerTask?: number; maxStepsPerRun?: number; costCeilingUsd?: number; timeCeilingMin?: number;
+}
+export interface WfGraph { nodes: WfNode[]; edges: WfEdge[]; guardrails?: WfGuardrails; }
+
+export interface WfEstimate { minCalls: number; maxCalls: number; humanGates: number; skillChars: number; }
+export interface WfSimStep { n: number; nodeId: string; label: string; type: string; viaEdgeId?: string; note?: string; }
+export interface WfSimResult {
+  steps: WfSimStep[]; takenEdges: string[]; calls: number; humanGates: number;
+  loopsUsed: Record<string, number>; result: 'end' | 'dead-end' | 'max-steps'; notes: string[];
+}
+export interface WfTemplate { id: string; name: string; description: string; graph: WfGraph; }
+export interface WfAuditRow { ts: string; type: string; actor: string; payload: Record<string, unknown>; }
 
 export interface WfIssue { level: 'error' | 'warning'; nodeId?: string; edgeId?: string; message: string; }
 

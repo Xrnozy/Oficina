@@ -6,21 +6,22 @@ import ReactFlow, {
   Position, ReactFlowProvider, useEdgesState, useNodesState, useReactFlow,
 } from 'reactflow';
 import {
-  ArrowDown, ArrowLeftRight, ArrowUp, Ban, Bell, BookMarked, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2,
+  ArrowDown, ArrowLeftRight, ArrowUp, Ban, Bell, BookMarked, BookOpen, Check, CirclePlay, Copy, Download, FilePlus2, FlaskConical,
   GitBranch, GitMerge, LayoutDashboard, ListPlus, Lock,
-  MessageSquare, Plus, Redo2, Save, Scissors, Trash2, Undo2, Upload, User, Zap,
+  MessageSquare, Plus, Redo2, Save, Scissors, Shield, Trash2, Undo2, Upload, User, Zap,
 } from 'lucide-react';
 import { get, post, put, del, useFetch, useQuery, useEvents, OfficeEvent } from '../api';
 import { Dot, Empty, Modal, PageHeader, StatusChip, Tag, act, fmtAgo, roleLabel, toast, useCurrentRun } from '../components';
 import {
-  COND_FIELDS, COND_OPS, EDGE_KINDS, NODE_TYPE_LABEL, PURPOSES, PURPOSE_LABEL, WfCondition,
-  WfEdge, WfEdgeKind, WfGraph, WfIssue, WfNode, WfNodeType, WorkflowRow, WorkflowVersionRow,
+  COND_FIELDS, COND_OPS, EDGE_KINDS, NODE_TYPE_LABEL, PURPOSES, PURPOSE_LABEL, WfAuditRow, WfCondition,
+  WfEdge, WfEdgeKind, WfEstimate, WfGraph, WfGuardrails, WfIssue, WfNode, WfNodeType, WfSimResult, WfTemplate,
+  WorkflowRow, WorkflowVersionRow,
   WfValidation, condText, emptyGraph, insertOnEdge, layoutLR, nearestEdge, spliceOut, uid,
 } from '../workflow';
 
 // ---------------------------------------------------------------------------
 // data shapes from the API
-type WorkflowDetail = { workflow: WorkflowRow; versions: WorkflowVersionRow[]; graph: WfGraph | null; issues: WfValidation | null };
+type WorkflowDetail = { workflow: WorkflowRow; versions: WorkflowVersionRow[]; graph: WfGraph | null; issues: WfValidation | null; estimate: WfEstimate | null; audit: WfAuditRow[] };
 type AgentRow = { id: string; name: string; status?: string; model?: { backend?: string; model?: string }; memberships?: { role?: string; workspace_id: string; active: number }[] };
 type RoleRow = { id: string; name: string };
 type SkillRow = { id: string; name: string; description?: string; enabled: number; owner_origin: string; latest_version_id?: string | null };
@@ -30,7 +31,7 @@ type SkillPreview = { applied: { skillId: string; name: string; chars: number; v
 
 // ---------------------------------------------------------------------------
 // reactflow <-> workflow graph conversion
-type RfData = { wf: WfNode; live?: { status: string; taskId?: string }; issues?: number };
+type RfData = { wf: WfNode; live?: { status: string; taskId?: string }; issues?: number; simVisited?: boolean };
 
 const toRfNodes = (g: WfGraph): Node<RfData>[] =>
   g.nodes.map((n) => ({ id: n.id, type: 'wf', position: n.position, data: { wf: { ...n, position: undefined as never } } }));
@@ -75,7 +76,7 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
   const [skillOver, setSkillOver] = useState(false);
   return (
     <div
-      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''}`}
+      className={`group relative rounded-xl border shadow-pop transition-shadow ${TYPE_TINT[n.type]} ${selected ? 'border-fg ring-1 ring-fg' : err ? 'border-bad' : 'border-line-strong'} ${live?.status === 'running' ? 'ring-2 ring-info' : ''} ${live?.status === 'failed' ? 'ring-2 ring-bad' : ''} ${skillOver ? 'ring-2 ring-accent' : ''} ${data.simVisited ? 'ring-2 ring-accent' : ''}`}
       style={{ width: n.type === 'start' || n.type === 'end' ? 110 : NODE_W }}
       title={n.label}
       onDragOver={isAgent ? (ev) => { if (ev.dataTransfer.types.includes('application/x-officechain-skill')) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; setSkillOver(true); } } : undefined}
@@ -119,6 +120,7 @@ const WfNodeView = React.memo(function WfNodeView({ data, selected }: NodeProps<
 function WfEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected, markerEnd }: EdgeProps) {
   const e: WfEdge = data.wf;
   const taken: boolean = !!data.taken;
+  const simTaken: boolean = !!data.simTaken;
   const style = EDGE_STYLE[e.kind] ?? EDGE_STYLE.next;
   const [path, labelX, labelY] = edgePath(sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition);
   const label = e.else ? 'else' : e.label ?? (e.condition ? condText(e.condition) : '');
@@ -127,8 +129,8 @@ function WfEdgeView({ id, sourceX, sourceY, targetX, targetY, sourcePosition, ta
       <BaseEdge
         id={id} path={path} markerEnd={markerEnd}
         style={{
-          stroke: taken ? 'rgb(var(--info))' : style.stroke,
-          strokeWidth: selected ? 2.5 : taken ? 2 : 1.5,
+          stroke: taken ? 'rgb(var(--info))' : simTaken ? 'rgb(var(--accent))' : style.stroke,
+          strokeWidth: selected ? 2.5 : taken || simTaken ? 2 : 1.5,
           strokeDasharray: style.dash,
         }}
       />
@@ -691,10 +693,17 @@ function WorkflowEditor() {
   const [selNodes, setSelNodes] = useState<string[]>([]);
   const [selEdges, setSelEdges] = useState<string[]>([]);
   const [issues, setIssues] = useState<WfIssue[]>([]);
+  const [estimate, setEstimate] = useState<WfEstimate | null>(null);
+  const [guardrails, setGuardrails] = useState<WfGuardrails>({});
   const [dirty, setDirty] = useState(false);
   const [draftBanner, setDraftBanner] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [showSim, setShowSim] = useState(false);
+  const [sim, setSim] = useState<WfSimResult | null>(null);
+  const [simOutcomes, setSimOutcomes] = useState<Record<string, string>>({});
   const [note, setNote] = useState('');
+  const { data: templates } = useQuery<WfTemplate[]>('/workflows/templates');
 
   const { screenToFlowPosition } = useReactFlow();
 
@@ -723,9 +732,9 @@ function WorkflowEditor() {
   }, [snapshot, restore]);
 
   // ---- graph helpers operating on the RF state ----
-  const currentGraph = useCallback((): WfGraph => toWfGraph(nodes, edges), [nodes, edges]);
+  const currentGraph = useCallback((): WfGraph => ({ ...toWfGraph(nodes, edges), guardrails: Object.keys(guardrails).length ? guardrails : undefined }), [nodes, edges, guardrails]);
   const applyGraph = useCallback((g: WfGraph, markDirty = true) => {
-    setNodes(toRfNodes(g)); setEdges(toRfEdges(g));
+    setNodes(toRfNodes(g)); setEdges(toRfEdges(g)); setGuardrails(g.guardrails ?? {});
     if (markDirty) setDirty(true);
   }, [setNodes, setEdges]);
   const mutate = useCallback((f: (g: WfGraph) => WfGraph) => { pushHistory(); applyGraph(f(currentGraph())); }, [pushHistory, applyGraph, currentGraph]);
@@ -740,7 +749,8 @@ function WorkflowEditor() {
       try { applyGraph(JSON.parse(draft).graph as WfGraph, false); setDraftBanner(true); setDirty(true); return; } catch { /* fall through */ }
     }
     applyGraph(detail.graph ?? emptyGraph(), false);
-    setDraftBanner(false); setDirty(false); setIssues(detail.issues?.issues ?? []);
+    setDraftBanner(false); setDirty(false); setIssues(detail.issues?.issues ?? []); setEstimate(detail.estimate ?? null);
+    setSim(null);
   }, [detail, builtin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // auto-select first workflow
@@ -750,12 +760,12 @@ function WorkflowEditor() {
   useEffect(() => {
     if (!nodes.length || !wsId) return;
     const t = setTimeout(() => {
-      post<WfValidation>('/workflows/validate', { graph: currentGraph(), workspaceId: wsId })
-        .then((v) => setIssues(v.issues ?? []))
+      post<WfValidation & { estimate?: WfEstimate }>('/workflows/validate', { graph: currentGraph(), workspaceId: wsId })
+        .then((v) => { setIssues(v.issues ?? []); setEstimate(v.estimate ?? null); })
         .catch(() => undefined);
     }, 450);
     return () => clearTimeout(t);
-  }, [nodes, edges, wsId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [nodes, edges, wsId, guardrails]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- autosave draft ----
   useEffect(() => {
@@ -830,17 +840,20 @@ function WorkflowEditor() {
       next.set(id, p && p.status === l.status && p.taskId === l.taskId ? p : l);
     }
     liveStable.current = next;
+    const simVisited = new Set(sim?.steps.map((s) => s.nodeId) ?? []);
     return nodes.map((n) => {
       const l = next.get(n.id); const iss = issueMap.get(n.id) ?? 0;
-      if (n.data.live === l && n.data.issues === iss) return n;
-      return { ...n, data: { ...n.data, live: l, issues: iss } };
+      const sv = simVisited.has(n.id) || undefined;
+      if (n.data.live === l && n.data.issues === iss && n.data.simVisited === sv) return n;
+      return { ...n, data: { ...n.data, live: l, issues: iss, simVisited: sv } };
     });
-  }, [nodes, live, issueMap]);
+  }, [nodes, live, issueMap, sim]);
   const dEdges = useMemo(() => edges.map((e) => {
     const taken = live.taken.has(e.id) || undefined;
-    if (e.data.taken === taken) return e;
-    return { ...e, data: { ...e.data, taken } };
-  }), [edges, live]);
+    const simTaken = (sim ? new Set(sim.takenEdges) : new Set()).has(e.id) || undefined;
+    if (e.data.taken === taken && e.data.simTaken === simTaken) return e;
+    return { ...e, data: { ...e.data, taken, simTaken } };
+  }), [edges, live, sim]);
 
   // ---- selection ----
   const selNode = dNodes.find((n) => selNodes.includes(n.id));
@@ -1008,12 +1021,18 @@ function WorkflowEditor() {
     if (r) { localStorage.removeItem(`wf-draft:${detail.workflow.id}`); setDirty(false); setNote(''); setDraftBanner(false); reloadDetail(); reloadList(); }
   }, [detail, builtin, hasErrors, currentGraph, note, reloadDetail, reloadList]);
 
-  const createNew = async () => {
-    if (!wsId) return;
-    const name = prompt('Name for the new workflow', 'Custom pipeline');
+  const createNew = async () => setShowTemplates(true);
+  const createFromTemplate = async (t: WfTemplate) => {
+    const name = prompt(`Name for the new workflow (from "${t.name}")`, t.id === 'default' ? 'My pipeline' : t.name);
     if (!name) return;
-    const r = await act(post<{ id: string }>('/workflows', { workspaceId: wsId, name, description: '', graph: emptyGraph() }));
-    if (r) { reloadList(); setWfId(r.id); }
+    const r = await act(post<{ id: string }>('/workflows', { workspaceId: wsId, name, description: t.description, graph: t.id === 'blank' ? emptyGraph() : t.graph }));
+    if (r) { setShowTemplates(false); reloadList(); setWfId(r.id); }
+  };
+  const runSim = async () => {
+    const outcomes: Record<string, string> = {};
+    for (const [k, v] of Object.entries(simOutcomes)) if (v && v !== 'success') outcomes[k] = v;
+    const r = await post<WfSimResult>('/workflows/simulate', { graph: currentGraph(), outcomes }).catch((e) => { toast(String(e?.message ?? e), 'bad'); return null; });
+    if (r) setSim(r);
   };
   const cloneWf = async () => {
     if (!detail) return;
@@ -1140,6 +1159,7 @@ function WorkflowEditor() {
                     {wfRuns.map((r) => <option key={r.id} value={r.id}>{r.id === run?.id ? '● ' : ''}run {r.id.slice(0, 8)} · {r.status}</option>)}
                   </select>
                 )}
+                <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run — simulate the graph with mocked outcomes, no model calls"><FlaskConical size={11} /> Dry run</button>
                 {!readOnly && (
                   <>
                     <button className="btn btn-xs" onClick={() => mutate((g) => layoutLR(g))} title="Arrange the graph left to right"><ArrowLeftRight size={11} /> Auto-layout</button>
@@ -1221,6 +1241,39 @@ function WorkflowEditor() {
                       ))}
                     </div>
                   </div>
+                  {estimate && (
+                    <div className="border-t border-line pt-3 mt-3">
+                      <div className="field-label">Worst case per task</div>
+                      <div className="text-2xs text-fg-3 leading-4">
+                        up to <b className="text-fg">{estimate.maxCalls}</b> agent calls
+                        {estimate.humanGates > 0 && `, ${estimate.humanGates} human gate${estimate.humanGates > 1 ? 's' : ''}`}
+                        {estimate.skillChars > 0 && `, ~${estimate.skillChars.toLocaleString()} skill chars`}
+                      </div>
+                    </div>
+                  )}
+                  {!builtin && (
+                    <div className="border-t border-line pt-3 mt-3">
+                      <div className="field-label">Guardrails — pause for the owner when hit</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([
+                          ['maxStepsPerTask', 'steps / task'],
+                          ['maxStepsPerRun', 'steps / run'],
+                          ['costCeilingUsd', 'cost $'],
+                          ['timeCeilingMin', 'minutes'],
+                        ] as const).map(([key, label]) => (
+                          <Field key={key} label={label}>
+                            <input className="inp" type="number" min={key === 'costCeilingUsd' ? 0.01 : 1} step={key === 'costCeilingUsd' ? 0.01 : 1}
+                              value={guardrails[key] ?? ''} placeholder="off"
+                              onChange={(e) => {
+                                const v = e.target.value ? Number(e.target.value) : undefined;
+                                setGuardrails((g2) => { const n2 = { ...g2 }; if (v == null) delete n2[key]; else n2[key] = v; return n2; });
+                                setDirty(true);
+                              }} />
+                          </Field>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : (
                 <Empty icon={LayoutDashboard} title="Pick a workflow" text="Select a workflow on the left, or create a new one to start drawing." />
@@ -1251,6 +1304,92 @@ function WorkflowEditor() {
               </div>
             ))}
           </div>
+          {detail.audit?.length > 0 && (
+            <div className="border-t border-line mt-3 pt-3">
+              <div className="field-label">Audit — hash-chained event log</div>
+              <div className="space-y-1 max-h-40 overflow-auto">
+                {detail.audit.map((a, i) => (
+                  <div key={i} className="text-2xs flex items-baseline gap-2">
+                    <span className="text-fg-4 shrink-0">{fmtAgo(a.ts)}</span>
+                    <span className="font-mono shrink-0">{a.type.replace('workflow.', '')}</span>
+                    <span className="text-fg-3 truncate">{String(a.payload.changes ?? a.payload.note ?? a.payload.name ?? '')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* templates modal */}
+      {showTemplates && (
+        <Modal title="New workflow from a template" onClose={() => setShowTemplates(false)} width="max-w-lg">
+          <div className="space-y-1.5 max-h-[60vh] overflow-auto">
+            {(templates ?? []).map((t) => (
+              <button key={t.id} className="w-full text-left px-3 py-2.5 rounded-lg border border-line hover:border-line-strong hover:bg-raised transition-colors"
+                onClick={() => void createFromTemplate(t)}>
+                <div className="text-xs font-medium flex items-center gap-2">
+                  {t.id === 'default' && <Lock size={11} className="text-fg-4" />}
+                  {t.id === 'strict' && <Shield size={11} className="text-fg-4" />}
+                  {t.name}
+                </div>
+                <div className="text-2xs text-fg-3 mt-0.5 leading-4">{t.description}</div>
+              </button>
+            ))}
+            <button className="w-full text-left px-3 py-2.5 rounded-lg border border-dashed border-line hover:border-line-strong transition-colors"
+              onClick={() => void createFromTemplate({ id: 'blank', name: 'Blank', description: '', graph: emptyGraph() })}>
+              <div className="text-xs font-medium text-fg-3">Start blank — start → end only</div>
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* dry-run modal */}
+      {showSim && (
+        <Modal title="Dry run — simulate the graph, no model calls" onClose={() => setShowSim(false)} width="max-w-lg">
+          <div className="text-2xs text-fg-3 mb-3 leading-4">
+            Pick an outcome for any agent step; the rest default to success. The path highlights on the canvas.
+          </div>
+          <div className="space-y-1 max-h-44 overflow-auto mb-3">
+            {nodes.filter((n) => n.data.wf.type === 'agent').map((n) => (
+              <div key={n.id} className="flex items-center gap-2 text-xs">
+                <span className="truncate flex-1">{n.data.wf.label}</span>
+                <select className="inp !h-6 !text-2xs !w-32" value={simOutcomes[n.id] ?? 'success'}
+                  onChange={(e) => setSimOutcomes((o) => ({ ...o, [n.id]: e.target.value }))}>
+                  <option value="success">succeeds</option>
+                  <option value="failure">fails</option>
+                  <option value="reject">rejects</option>
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-primary btn-xs" onClick={() => void runSim()}><FlaskConical size={11} /> Simulate</button>
+            {sim && (
+              <span className="text-2xs text-fg-3">
+                {sim.result === 'end' ? 'reached the end' : sim.result === 'max-steps' ? 'stopped at the step cap' : 'dead end'} · {sim.calls} agent call{sim.calls === 1 ? '' : 's'}{sim.humanGates ? ` · ${sim.humanGates} gate(s)` : ''}
+              </span>
+            )}
+          </div>
+          {sim && (
+            <div className="border-t border-line mt-3 pt-3 max-h-[40vh] overflow-auto">
+              <div className="space-y-0.5">
+                {sim.steps.map((s) => (
+                  <button key={s.n} className="w-full text-left text-2xs flex items-baseline gap-2 px-1 py-0.5 rounded hover:bg-raised"
+                    onClick={() => { setSelNodes([s.nodeId]); setSelEdges(s.viaEdgeId ? [s.viaEdgeId] : []); }}>
+                    <span className="font-mono text-fg-4 w-6 shrink-0">{s.n}</span>
+                    <span className="truncate flex-1">{s.label}</span>
+                    <span className="text-fg-4 shrink-0">{s.type}{s.note ? ` · ${s.note}` : ''}</span>
+                  </button>
+                ))}
+              </div>
+              {sim.notes.length > 0 && (
+                <div className="mt-2 space-y-0.5">
+                  {sim.notes.map((n2, i) => <div key={i} className="text-2xs text-warn">{n2}</div>)}
+                </div>
+              )}
+            </div>
+          )}
         </Modal>
       )}
     </div>
