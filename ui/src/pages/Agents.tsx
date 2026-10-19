@@ -1,3 +1,4 @@
+import { agentInOffice, useOffice } from '../office';
 import React, { useState } from 'react';
 import { get, post, put, useQuery } from '../api';
 import { useProviderCatalog } from './Providers';
@@ -192,7 +193,10 @@ const OBS_OPTIONS = [
 ];
 
 export default function Agents() {
-  const { data: agents, reload, loading } = useQuery<any[]>('/agents');
+  const { office } = useOffice();
+  const { data: everyone, reload, loading } = useQuery<any[]>('/agents');
+  // only the agents of the current office; the others belong to their own offices
+  const agents = everyone ? everyone.filter((a) => agentInOffice(a, office?.id)) : null;
   const { data: workspaces } = useQuery<any[]>('/workspaces');
   const { data: roles } = useQuery<any[]>('/roles');
   const { data: providers } = useQuery<any>('/providers');
@@ -204,18 +208,18 @@ export default function Agents() {
   const [text, setText] = useState('');
 
   const openHire = () => {
-    setForm({ name: '', avatar: '', observability: 'actions', workspace: workspaces?.[0]?.id ?? '', role: roles?.find((r) => r.name === 'developer')?.id ?? roles?.[0]?.id ?? '' });
+    setForm({ name: '', avatar: '', observability: 'actions', workspace: office?.id ?? workspaces?.[0]?.id ?? '', role: roles?.find((r) => r.name === 'developer')?.id ?? roles?.[0]?.id ?? '' });
     setTried(false); setHire(true);
   };
 
   return (
     <div>
-      <PageHeader title="Agents" sub="Who works in the Office, which backend each one runs on, and what they're allowed to do.">
+      <PageHeader title="Agents" sub={<>Who works in {office ? <span className="text-fg-2">{office.name}</span> : 'the office'}, which backend each one runs on, and what they're allowed to do.</>}>
         <button className="btn btn-primary" onClick={openHire}><UserPlus size={14} /> Hire agent</button>
       </PageHeader>
 
       {loading && <Skeleton rows={4} />}
-      {!loading && !agents?.length && <Empty icon={Cpu} title="No agents" text="Hire an agent, give it a role in a workspace, and point it at a backend." />}
+      {!loading && !agents?.length && <Empty icon={Cpu} title="No agents in this office" text="Hire an agent, give it a role here, and point it at a backend — or add existing agents from another office under Roles." />}
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {(agents ?? []).map((a) => {

@@ -4,6 +4,7 @@ import { post, put, useEvents, useQuery } from '../api';
 import { Avatar, Muted, PageHeader, Panel, Segmented, Tag, act, fmtAgo, toast, useCurrentRun, type Tone } from '../components';
 import { ArrowDown, ArrowRight, ArrowUp, CornerUpLeft, GitBranch, Mail, Pencil, Plus, X } from 'lucide-react';
 import type { WorkflowRow } from '../workflow';
+import { useOffice } from '../office';
 import { PURPOSE_LABEL, type RoutingRow, type RoutingStep, type RoutingView } from '../workflow';
 
 // Routing: who does each step of the flow, which models each step may run
@@ -300,10 +301,18 @@ export default function Routing() {
   const { data: agents, reload: reloadAgents } = useQuery<any[]>('/agents');
   const { data: providers, reload: reloadProviders } = useQuery<any>('/providers');
   const { data: decisions } = useQuery<any[]>('/routing/decisions');
-  const ws = workspaces?.find((w) => w.id === run?.workspaceId) ?? workspaces?.[0];
+  const { office } = useOffice();
+  const ws = workspaces?.find((w) => w.id === (office?.id ?? run?.workspaceId)) ?? workspaces?.[0];
   // which workflow to show: '' = the active one. Remembered, and shared with the Workflow editor's last pick.
-  const [viewId, setViewId] = useState(() => { try { return localStorage.getItem('routing-wf') ?? ''; } catch { return ''; } });
-  const pickView = (id: string) => { setViewId(id); try { localStorage.setItem('routing-wf', id); } catch { /* private mode */ } };
+  // the pick is remembered per office: a workflow id means nothing in another office
+  const [views, setViews] = useState<Record<string, string>>(() => { try { return JSON.parse(localStorage.getItem('routing-wf-by-office') ?? '{}'); } catch { return {}; } });
+  const viewId = (ws?.id && views[ws.id]) || '';
+  const pickView = (id: string) => {
+    if (!ws?.id) return;
+    const next = { ...views, [ws.id]: id };
+    setViews(next);
+    try { localStorage.setItem('routing-wf-by-office', JSON.stringify(next)); } catch { /* private mode */ }
+  };
   const { data: wfList } = useQuery<WorkflowRow[]>(ws?.id ? `/workflows?workspaceId=${ws.id}` : null, [ws?.id]);
   const knownView = !viewId || (wfList ?? []).some((w) => w.id === viewId);
   const { data: saved, reload: reloadRv } = useQuery<RoutingView>(

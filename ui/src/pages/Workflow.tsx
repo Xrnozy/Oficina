@@ -1,3 +1,4 @@
+import { downloadJson, fileSlug, readJsonFile, useOffice } from '../office';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import ReactFlow, {
@@ -744,7 +745,8 @@ function WorkflowEditor() {
   const nav = useNavigate();
   const { run } = useCurrentRun();
   const { data: workspaces } = useQuery<any[]>('/workspaces');
-  const ws = workspaces?.find((w) => w.id === run?.workspaceId) ?? workspaces?.[0];
+  const { office } = useOffice();
+  const ws = workspaces?.find((w) => w.id === (office?.id ?? run?.workspaceId)) ?? workspaces?.[0];
   const wsId = ws?.id ?? '';
   const { data: wflist, reload: reloadList } = useQuery<WorkflowRow[]>(wsId ? `/workflows?workspaceId=${wsId}` : null);
   const { data: agents } = useQuery<AgentRow[]>('/agents');
@@ -893,12 +895,14 @@ function WorkflowEditor() {
   const versionIds = useMemo(() => new Set((detail?.versions ?? []).map((v) => v.id)), [detail]);
   const { data: runs } = useQuery<any[]>('/runs');
   // first open: show the workflow the current (or any running) request picked, else the active one
+  useEffect(() => { setWfId(null); }, [wsId]);
   useEffect(() => {
     if (wfId || !wflist?.length || runs == null) return;
+    if (wflist[0].workspaceId !== wsId) return;   // still the previous office's list
     const going = (r: any) => ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'].includes(r.status) && r.workflow?.id && wflist.some((w) => w.id === r.workflow.id);
     const pick = runs.find((r) => r.id === run?.id && going(r)) ?? runs.find(going);
     setWfId(pick?.workflow?.id ?? wflist.find((w) => w.active)?.id ?? wflist[0].id);
-  }, [wflist, wfId, runs, run?.id]);
+  }, [wflist, wfId, runs, run?.id, wsId]);
   // Only an ongoing run of the picked workflow drives the live bar and the node states; finished runs
   // are replayed from Run replay, so a flow nobody is running shows as a plain graph.
   const ONGOING = ['running', 'verifying', 'pausing', 'paused', 'dod-review', 'draft'];
@@ -1298,23 +1302,25 @@ function WorkflowEditor() {
     const r = await act(post(`/workflows/${detail.workflow.id}/${on ? 'activate' : 'deactivate'}`), on ? 'Workflow is now active for this workspace' : 'Deactivated — runs use the built-in pipeline');
     if (r) reloadList();
   };
-  const exportJson = () => {
-    const blob = new Blob([JSON.stringify({ name: detail?.workflow.name, graph: currentGraph() }, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${(detail?.workflow.name ?? 'workflow').replace(/\s+/g, '-').toLowerCase()}.json`;
-    a.click();
+  // Export names agents instead of ids, so the file works in any office; import resolves those names
+  // in the open office (falling back to each step's role) and adds the result as a new workflow.
+  const exportFlow = async () => {
+    if (!detail) return;
+    const file = await act(get(`/workflows/${detail.workflow.id}/export`));
+    if (!file) return;
+    downloadJson(`${fileSlug(detail.workflow.name)}.workflow.json`, file);
+    if (dirty) toast('Exported the saved version — unsaved changes are not in the file', 'warn');
   };
-  const importJson = (ev: React.ChangeEvent<HTMLInputElement>) => {
-    const f = ev.target.files?.[0];
-    if (!f) return;
-    f.text().then((txt) => {
-      const j = JSON.parse(txt);
-      const g: WfGraph = j.graph ?? j;
-      if (!Array.isArray(g.nodes) || !Array.isArray(g.edges)) throw new Error('not a workflow graph');
-      pushHistory(); applyGraph(g); toast('Imported — review, then save as a new version');
-    }).catch((e) => toast(String(e?.message ?? e), 'bad'));
-    ev.target.value = '';
+  const importFlow = async (f: File | undefined) => {
+    if (!f || !wsId) return;
+    try {
+      const bundle = await readJsonFile(f);
+      const r = await act(post<{ workflowId: string; warnings: string[] }>('/workflows/import', { workspaceId: wsId, bundle }));
+      if (!r) return;
+      reloadList();
+      setWfId(r.workflowId);
+      toast(r.warnings.length ? `Imported — ${r.warnings[0]}${r.warnings.length > 1 ? ` (+${r.warnings.length - 1} more)` : ''}` : 'Imported as a new workflow', r.warnings.length ? 'warn' : 'ok');
+    } catch (e) { toast(String((e as Error).message), 'bad'); }
   };
 
   const errorsList = issues.filter((i) => i.level === 'error');
@@ -1353,6 +1359,11 @@ function WorkflowEditor() {
           <button className="btn btn-xs" onClick={() => fitView({ padding: 0.14, maxZoom: 1, duration: 250 })} title="Zoom to show the whole flow"><Maximize2 size={13} /> Fit</button>
           <button className="btn btn-xs" onClick={() => { setShowSim(true); setSimOutcomes({}); }} title="Dry run: walk through the flow with pretend results. No model calls."><FlaskConical size={13} /> Dry run</button>
           {detail && <button className="btn btn-xs" onClick={() => setShowVersions(true)} title="Saved versions and who changed what"><HistoryIcon size={13} /> History</button>}
+          {detail && <button className="btn btn-xs" onClick={() => void exportFlow()} title="Download this workflow as a file that works in any office"><Download size={13} /> Export</button>}
+          <label className="btn btn-xs cursor-pointer" title="Add a workflow from a file to this office">
+            <Upload size={13} /> Import
+            <input type="file" accept=".json,application/json" className="hidden" onChange={(e) => { void importFlow(e.target.files?.[0]); e.target.value = ''; }} />
+          </label>
           <span className="w-px h-5 bg-line mx-1" />
           {detail && builtin && <button className="btn btn-accent btn-xs" onClick={cloneWf}><Copy size={13} /> Clone to edit</button>}
           {detail && !builtin && (
@@ -1504,20 +1515,12 @@ function WorkflowEditor() {
               {detail ? (
                 <>
                   <div className="text-xs text-fg-3 mb-3">{detail.workflow.description || 'No description.'}</div>
-                  <div className="text-2xs text-fg-4 mb-3">Save, clone, activate and history are in the bar above.</div>
+                  <div className="text-2xs text-fg-4 mb-3">Save, clone, export, import and history are in the bar above.</div>
                   {!readOnly && (
                     <Field label="Version note (saved with the version)">
                       <input className="inp" value={note} onChange={(e) => setNote(e.target.value)} placeholder="what changed" />
                     </Field>
                   )}
-                  <div className="flex gap-1.5 mb-4">
-                    <button className="btn btn-ghost btn-xs" onClick={exportJson}><Download size={11} /> Export</button>
-                    {!readOnly && (
-                      <label className="btn btn-ghost btn-xs cursor-pointer"><Upload size={11} /> Import
-                        <input type="file" accept=".json,application/json" className="hidden" onChange={importJson} />
-                      </label>
-                    )}
-                  </div>
                   <div className="border-t border-line pt-3">
                     <div className="field-label">Validation</div>
                     {issues.length === 0 && <div className="text-2xs text-ok flex items-center gap-1.5"><Check size={11} /> Graph is valid.</div>}

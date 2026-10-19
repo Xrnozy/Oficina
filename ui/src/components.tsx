@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { post, useQuery, useWsConnected } from './api';
+import { OfficeSwitcher, useOffice, useOfficeApprovals } from './office';
 import {
   Activity, Bookmark, Building2, ChevronRight, GitCommitHorizontal, Clock, Command, Cpu, FileText, Inbox, LayoutDashboard, MessagesSquare,
   Library, ListChecks, Menu, Moon, Pause, Play, Plug, Route, Search, Square, Sun, TriangleAlert, Workflow, X,
@@ -109,8 +110,11 @@ export const roleLabel = (n?: string) => (!n ? '' : n.length <= 3 ? n.toUpperCas
 
 export function useCurrentRun() {
   const q = useQuery<any[]>('/runs');
-  const run = q.data?.find((r) => !['done', 'stopped'].includes(r.status)) ?? q.data?.[0] ?? null;
-  return { run, runs: q.data, loading: q.loading };
+  const { office } = useOffice();
+  // runs belong to an office; the page follows the one chosen in the sidebar
+  const runs = office ? q.data?.filter((r) => r.workspaceId === office.id) : q.data;
+  const run = runs?.find((r) => !['done', 'stopped'].includes(r.status)) ?? runs?.[0] ?? null;
+  return { run, runs, loading: q.loading };
 }
 
 // ---------------- toasts + action helper -----------------------------------
@@ -328,7 +332,7 @@ function Logo() {
 }
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { data: approvals } = useQuery<any[]>('/approvals');
+  const { data: approvals } = useOfficeApprovals();
   const { data: errors } = useQuery<any[]>('/errors');
   const connected = useWsConnected();
   const loc = useLocation();
@@ -348,6 +352,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <div className="text-2xs text-fg-4">agent router</div>
           </div>
         </div>
+        <OfficeSwitcher />
         <div className="flex-1 overflow-auto px-2.5 py-2 space-y-5">
           {NAV.map((g) => (
             <div key={g.group}>
@@ -385,7 +390,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
 
 export function RunBar({ onMenu, onPalette }: { onMenu: () => void; onPalette: () => void }) {
   const { run, loading } = useCurrentRun();
-  const { data: approvals } = useQuery<any[]>('/approvals');
+  const { data: approvals } = useOfficeApprovals();
   const pending = approvals?.filter((a) => a.status === 'pending').length ?? 0;
   const spendFrac = run?.budget?.runUsd ? run.spentUsd / run.budget.runUsd : 0;
   return (

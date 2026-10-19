@@ -1,4 +1,5 @@
 import { WorkflowSelect } from '../workflowPicker';
+import { useOffice, useOfficeAgents, useOfficeApprovals } from '../office';
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { post, useQuery } from '../api';
@@ -14,9 +15,9 @@ const ROLE_BAR: Record<string, string> = { pm: 'bg-lilac', 'prompt-creator': 'bg
 export default function Dashboard() {
   const { run, loading } = useCurrentRun();
   const { data: detail } = useQuery<any>(run ? `/runs/${run.id}` : null, [run?.id]);
-  const { data: agents } = useQuery<any[]>('/agents');
+  const { agents } = useOfficeAgents();
   const { data: errors } = useQuery<any[]>(run ? `/errors?runId=${run.id}` : null, [run?.id]);
-  const { data: approvals } = useQuery<any[]>('/approvals');
+  const { data: approvals } = useOfficeApprovals();
   const { data: providers } = useQuery<any>('/providers');
   const { data: usage } = useQuery<any>('/usage');
   const { data: tokenReport } = useQuery<any>(run ? `/runs/${run.id}/token-report` : null, [run?.id]);
@@ -161,8 +162,11 @@ function RunSummaryPanel({ runId, done }: { runId: string; done: boolean }) {
 function DigestPanel() {
   const [since] = useState(() => localStorage.getItem('oc:lastVisit') ?? new Date(Date.now() - 24 * 3600e3).toISOString());
   useEffect(() => { localStorage.setItem('oc:lastVisit', new Date().toISOString()); }, []);
-  const { data: d } = useQuery<any>(`/digest?since=${encodeURIComponent(since)}`);
-  if (!d) return null;
+  const { data: raw } = useQuery<any>(`/digest?since=${encodeURIComponent(since)}`);
+  const { data: approvals } = useOfficeApprovals();
+  if (!raw) return null;
+  const mineIds = new Set((approvals ?? []).map((a: any) => a.id));
+  const d = { ...raw, needsYou: (raw.needsYou ?? []).filter((a: any) => mineIds.has(a.id)) };
   const quiet = !d.tasksDone.length && !d.tasksBlocked.length && !d.needsYou.length && !d.tokens?.calls;
   return (
     <Panel title="Since your last visit" action={<span className="text-2xs text-fg-4">{quiet ? 'nothing new · ' : ''}{fmtAgo(since)}</span>}>
@@ -254,7 +258,7 @@ function TokenReportPanel({ report }: { report: any }) {
 }
 
 function NewRun({ onCancel }: { onCancel?: () => void }) {
-  const { data: workspaces } = useQuery<any[]>('/workspaces');
+  const { office, offices } = useOffice();
   const { data: repos } = useQuery<any[]>('/repos');
   const [goal, setGoal] = useState('');
   const [budget, setBudget] = useState('50');
@@ -265,12 +269,12 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
   const budgetNum = Number(budget);
-  const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === workspaces?.[0]?.id);
+  const wsRepos = (repos ?? []).filter((r: any) => r.workspaceId === office?.id);
   const custom = repoChoice === '__custom__' || (!repoChoice && wsRepos.length === 0);
-  const invalid = !goal.trim() || !(budgetNum > 0) || !workspaces?.[0]
+  const invalid = !goal.trim() || !(budgetNum > 0) || !office
     || (custom ? !repoPath.trim() : !(repoChoice || wsRepos[0]?.id));
   const oneShot = mode === 'one-shot';
-  const confirmPlan = !!workspaces?.[0]?.settings?.confirmPlan;
+  const confirmPlan = !!office?.settings?.confirmPlan;
   return (
     <form className="pblock block-lilac animate-rise" onSubmit={async (e) => {
       e.preventDefault();
@@ -278,18 +282,18 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
       setBusy(true);
       let repoId = repoChoice || wsRepos[0]?.id;
       if (custom) {
-        const repo = await act(post('/repos', { workspaceId: workspaces![0].id, path: repoPath.trim() }), 'Repo registered');
+        const repo = await act(post('/repos', { workspaceId: office!.id, path: repoPath.trim() }), 'Repo registered');
         repoId = repo?.id;
         if (!repoId) { setBusy(false); return; }
       }
-      const r = await act(post('/runs', { workspaceId: workspaces![0].id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined }),
+      const r = await act(post('/runs', { workspaceId: office!.id, goal: goal.trim(), budgetUsd: budgetNum, oneShot, repoId, workflowId: workflowId || undefined }),
         oneShot ? 'One-shot started — the PM is on it' : confirmPlan ? 'Run created — review the PM\'s plan' : 'Sent to the PM — hand-offs are automatic from here');
       setBusy(false);
       if (r?.id && !oneShot && confirmPlan) nav(`/dod/${r.id}`);
     }}>
       <div className="flex items-center gap-3 mb-1 flex-wrap">
         <Sparkles size={15} className="text-fg" />
-        <h2 className="text-[15px] font-semibold">{oneShot ? 'Run it once' : 'New request'}</h2>
+        <h2 className="text-[15px] font-semibold">{oneShot ? 'Run it once' : 'New request'}{office && <span className="ml-2 text-xs font-normal text-fg-2">in {office.name}</span>}</h2>
         <div className="ml-auto"><Segmented value={mode} options={['guided', 'one-shot'] as const} onChange={setMode} /></div>
       </div>
       <p className="text-sm text-fg-2 mb-5 max-w-[64ch]">
@@ -321,7 +325,7 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
         </label>
         <label className="block">
           <span className="field-label">Workflow</span>
-          <WorkflowSelect wsId={workspaces?.[0]?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
+          <WorkflowSelect wsId={office?.id} value={workflowId} onChange={setWorkflowId} className="w-full" />
         </label>
         {custom && (
           <label className="block">
@@ -332,7 +336,7 @@ function NewRun({ onCancel }: { onCancel?: () => void }) {
       </div>
       {custom && <p className="text-xs text-fg-4 mt-2">Git-init'd if it isn't a repo yet. Task branches, worktrees, and the integration branch all live inside it.</p>}
       {!(budgetNum > 0) && <div className="text-xs text-bad mt-2">Budget must be a positive number.</div>}
-      {workspaces && !workspaces.length && <div className="text-xs text-bad mt-2">No workspace exists yet — run <span className="mono">npm run seed</span> first.</div>}
+      {offices && !offices.length && <div className="text-xs text-bad mt-2">No workspace exists yet — run <span className="mono">npm run seed</span> first.</div>}
     </form>
   );
 }

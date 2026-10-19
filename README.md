@@ -30,6 +30,7 @@ Because the engine is deterministic and event-sourced, every agent — including
 | **Deterministic workflow engine** | A durable state machine drives the loop. Agents are called at defined decision points; loops are bounded (3 attempts, then you decide). |
 | **Definition of Done** | Acceptance criteria map to checks: commands that must `exit 0`, zero open high/critical error reports, reviews approved by a *different* agent, required README sections, and more. |
 | **Visual workflow editor** | Edit the pipeline as a graph (agent, condition, merge, human and end nodes; success/failure/reject/message edges). Validate, dry-run with no model calls, version, clone and activate it — or pick a workflow per request. |
+| **Multiple offices** | Each office is its own set of agents, desks and workflows. Create one blank or by copying another, switch from the sidebar, and every page follows the choice. Export or import a whole office, or a single workflow, as portable JSON. |
 | **Smart model routing** | Per work item, picks the cheapest model option strong enough for the job — plan-billed CLI logins first, then lowest metered price — with circuit breakers, quota windows, budgets and failover. |
 | **Bring your own backend** | Claude Code, cursor-agent and Devin CLIs (their own logins), Devin's cloud API, OpenAI-compatible APIs (OpenAI, Ollama, LM Studio), the Anthropic API, or a scripted demo agent. |
 | **Works in your repository** | Agents edit your checked-out branch like a coding CLI. Your uncommitted changes are preserved; the office never runs `reset`, `checkout`, `clean` or force-push. |
@@ -42,7 +43,7 @@ Because the engine is deterministic and event-sourced, every agent — including
 ## Screenshots
 
 ### Workflow editor
-Build or clone a pipeline as a graph; the palette on the left is colored by role, matching the nodes it creates. While a run of the open workflow is ongoing, node rings and taken edges show its progress live; finished runs are replayed under Run replay, so an idle workflow shows as a plain graph.
+Build or clone a pipeline as a graph; the palette on the left lists only the open office's agents, colored by role to match the nodes it creates. Export saves a flow as a file any office can import. While a run of the open workflow is ongoing, node rings and taken edges show its progress live; finished runs are replayed under Run replay, so an idle workflow shows as a plain graph.
 
 <img src="docs/screenshots/workflow.png" alt="Workflow editor showing a custom graph with a condition branch, loops and a message edge, with node states from a finished run" width="900">
 
@@ -66,8 +67,8 @@ The run's tasks by state, with an overall progress bar.
 
 <img src="docs/screenshots/tasks.png" alt="Tasks board with a progress bar and columns for ready, in progress, in review, done and failed" width="900">
 
-### Office
-Rooms are workspaces and desks are roles. Drag an agent to a desk to change its permissions.
+### Offices
+Create, copy, rename, export and import offices; the sidebar switcher scopes the rest of the app to one. Only that office's agents are on its desks, and agents from other offices can be dragged in. Dragging an agent to a desk shows the permission change before anything happens.
 
 <img src="docs/screenshots/office.png" alt="Office page showing roles as desks with agents assigned to them" width="900">
 
@@ -198,7 +199,7 @@ npm run bench -w daemon        # scripted end-to-end scenario (no model calls)
 npm run demo:workflow -w daemon  # end-to-end run on a custom workflow graph
 ```
 
-At the time of writing the daemon type-checks cleanly and the suite passes (131 tests).
+At the time of writing the daemon type-checks cleanly and the suite passes (139 tests).
 
 ## Status and limitations
 

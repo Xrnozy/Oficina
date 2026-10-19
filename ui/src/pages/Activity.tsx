@@ -1,3 +1,4 @@
+import { useOffice, useOfficeAgents } from '../office';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { get, post, useEvents, useFetch, useQuery, type OfficeEvent } from '../api';
@@ -46,8 +47,10 @@ function workState(events: OfficeEvent[]) {
 }
 
 export default function Activity() {
-  const { data: agents } = useQuery<any[]>('/agents');
-  const { data: runs, reload: reloadRuns } = useQuery<any[]>('/runs');
+  const { agents } = useOfficeAgents();
+  const { office } = useOffice();
+  const { data: allRuns, reload: reloadRuns } = useQuery<any[]>('/runs');
+  const runs = useMemo(() => (allRuns && office ? allRuns.filter((r) => r.workspaceId === office.id) : allRuns), [allRuns, office?.id]);
   const active = useMemo(() => (runs ?? []).filter((r) => ACTIVE_RUN.includes(r.status)), [runs]);
   const activeKey = active.map((r) => r.id).join(',');
   const [events, setEvents] = useState<OfficeEvent[]>([]);

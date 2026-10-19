@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { createOffice, deleteOffice, exportOffice, exportWorkflow, importOffice, importWorkflow, updateOffice } from '../services/offices.ts';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'node:http';
 import path from 'node:path';
@@ -92,6 +93,44 @@ export function createServer(port: number, uiDir: string): http.Server {
   app.get('/api/workspaces', (_req, res) => {
     const rows = q('SELECT * FROM workspaces').map((r) => ({ ...r, repoIds: parseJson(r.repo_ids as string, []), allowedProviderIds: parseJson(r.allowed_provider_ids as string, []), settings: parseJson(r.settings as string, {}) }));
     ok(res, rows);
+  });
+
+  // ---------- offices (workspaces): create, clone, rename, delete, export/import ----------
+  app.post('/api/workspaces', (req, res) => {
+    const r = createOffice({ name: req.body?.name, purpose: req.body?.purpose, cloneFrom: req.body?.cloneFrom ?? null });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
+  });
+  app.post('/api/workspaces/import', (req, res) => {
+    const r = importOffice(req.body?.bundle, { name: req.body?.name });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
+  });
+  app.get('/api/workspaces/:id/export', (req, res) => {
+    const b = exportOffice(req.params.id);
+    if (!b) return err(res, 404, 'office not found');
+    ok(res, b);
+  });
+  app.put('/api/workspaces/:id', (req, res) => {
+    const r = updateOffice(req.params.id, { name: req.body?.name, purpose: req.body?.purpose });
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 400, r.error);
+    ok(res, r);
+  });
+  app.delete('/api/workspaces/:id', (req, res) => {
+    const r = deleteOffice(req.params.id);
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 400, r.error);
+    ok(res, r);
+  });
+  app.get('/api/workflows/:id/export', (req, res) => {
+    const b = exportWorkflow(req.params.id);
+    if (!b) return err(res, 404, 'workflow not found');
+    ok(res, b);
+  });
+  app.post('/api/workflows/import', (req, res) => {
+    if (!req.body?.workspaceId) return err(res, 400, 'workspaceId required');
+    const r = importWorkflow(String(req.body.workspaceId), req.body?.bundle, { name: req.body?.name });
+    if ('error' in r) return err(res, 400, r.error);
+    ok(res, r);
   });
 
   app.get('/api/agents', (_req, res) => {

@@ -85,6 +85,21 @@ Edges: `next` (positive outcomes), `on-success`, `on-failure`, `on-reject` (the 
 
 **Limits.** A run pins its starting version; conditions are deterministic (fields/operators, no free-form code); a `message` edge delivers to the target's next prompt rather than interrupting it; the run-scope `plan` node still runs through the engine's planning cadence, so re-planning on DoD review is unchanged.
 
+## Offices
+
+An **office** is a workspace with its own agents, desks (roles), workflows and runs. Pick the current office in the sidebar; Dashboard, Tasks, Live activity, Run replay, Routing, Workflow, Agents, Roles and *Needs you* all follow it, so each office sees only its own agents and its own flow. Providers, Skills and Error reports are shared across offices.
+
+**Roles page.** Create an office **blank** (no agents, only the built-in pipeline) or **by copying** one: the copy gets *new* agents with the same roles and settings, and the source's workflows with their pinned agents remapped to the copies, so editing one office never touches the other. Rename or delete from the same page. An office with runs can't be deleted (the runs are kept for the record), and the last office can't be deleted; its agents stay and become available to other offices.
+
+**Agents and offices.** The desks show only the open office's agents. *Available agents* lists everyone else; dragging one onto a desk adds it to this office (after the usual permission preview) and it keeps its desk elsewhere until you remove it with the × on its card.
+
+**Export and import.** Two JSON formats, both portable between machines:
+
+- `officechain.office` — the office's name, description and portable settings, its agents (name, avatar, instructions, observability, per-agent settings, roles) and its workflows. Import always creates a *new* office (a taken name gets a suffix) with new agents.
+- `officechain.workflow` — one workflow. Export is on the Workflow toolbar; Import adds the file as a *new* workflow in the open office (from any view, including the read-only built-in one).
+
+Agents are referenced **by name**, never by local id. On import a pinned step goes to the agent of that name in the target office (case-insensitive); if there is none it falls back to the step's role and the import reports which steps changed. Machine-specific things are not exported: backends, API keys and model fallbacks. Imported agents start on this machine's first enabled account, so check **Routing** afterwards.
+
 ## Working in your repository (direct mode)
 
 By default (**Routing → Where agents work → direct**) agents work inside the repository you selected, on the branch you have checked out, like a coding CLI — no copies of the project. `isolated` keeps the older worktree-per-task flow.

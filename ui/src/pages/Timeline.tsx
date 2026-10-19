@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { get, useQuery, type OfficeEvent } from '../api';
 import { Empty, PageHeader, StatusChip, Tag, fmtTime } from '../components';
 import { Clock, Pause, Play, X } from 'lucide-react';
+import { useOffice } from '../office';
 
 // Run timeline & replay (spec §9): lanes per actor, filterable event list;
 // clicking an event shows its payload; a replay slider reconstructs the
@@ -18,7 +19,9 @@ const KINDS = ['run', 'cycle', 'plan', 'task', 'workitem', 'checkrun', 'review',
 const LABEL_COL = '8.75rem'; // actor column (8rem) + gap — the playhead is positioned against this
 
 export default function Timeline() {
-  const { data: runs } = useQuery<any[]>('/runs');
+  const { data: allRuns } = useQuery<any[]>('/runs');
+  const { office } = useOffice();
+  const runs = useMemo(() => (allRuns && office ? allRuns.filter((r) => r.workspaceId === office.id) : allRuns), [allRuns, office?.id]);
   const [runId, setRunId] = useState<string>('');
   const run = runs?.find((r) => r.id === (runId || runs[0]?.id));
   const [events, setEvents] = useState<OfficeEvent[]>([]);

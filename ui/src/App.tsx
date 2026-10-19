@@ -20,6 +20,7 @@ import Routing from './pages/Routing';
 import Workflow from './pages/Workflow';
 import { Checkpoints, RepoTimeline } from './pages/History';
 import { Compass } from 'lucide-react';
+import { OfficeProvider } from './office';
 
 export default function App() {
   const [nav, setNav] = useState(false);
@@ -27,6 +28,7 @@ export default function App() {
   // the workflow canvas uses the whole content area instead of the centred column
   const full = useLocation().pathname.startsWith('/workflow');
   return (
+    <OfficeProvider>
     <div className="grain h-[100dvh] flex overflow-hidden">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[80] btn btn-primary">Skip to content</a>
       <Sidebar open={nav} onClose={() => setNav(false)} />
@@ -66,5 +68,6 @@ export default function App() {
       <CommandPalette open={palette} setOpen={setPalette} />
       <Toasts />
     </div>
+    </OfficeProvider>
   );
 }

@@ -1,3 +1,4 @@
+import { useOfficeApprovals } from '../office';
 import React, { useState } from 'react';
 import { post, useQuery } from '../api';
 import { Avatar, Drawer, Empty, PageHeader, Skeleton, StatusChip, Tag, act, fmtAgo, toast } from '../components';
@@ -10,7 +11,7 @@ import { Check, Inbox, ShieldQuestion, X } from 'lucide-react';
 const BATCH_ACTIONS = new Set(['commit.task', 'file.write.protected', 'deps.add']);
 
 export default function Approvals() {
-  const { data: approvals, reload, loading } = useQuery<any[]>('/approvals');
+  const { data: approvals, reload, loading } = useOfficeApprovals();
   const { data: runs } = useQuery<any[]>('/runs');
   const { data: agents } = useQuery<any[]>('/agents');
   const [sel, setSel] = useState<Set<string>>(new Set());
