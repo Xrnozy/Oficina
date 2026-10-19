@@ -121,11 +121,11 @@ export default function Activity() {
               const kind = st.current ? String((st.current.payload as any).kind) : null;
               const quiet = st.running && st.lastOutputAt ? Math.round((now - Date.parse(st.lastOutputAt)) / 1000) : null;
               return (
-                <button key={a.id} onClick={() => setParams({ agent: a.id })} className={`w-full flex gap-2.5 px-2.5 py-2 rounded-lg text-left ${selected?.id === a.id ? 'bg-raised' : 'hover:bg-raised/60'}`}>
-                  <span className="relative shrink-0"><Avatar agent={a} size="sm" />{st.running && <span className="absolute -right-0.5 -bottom-0.5 w-2 h-2 rounded-full bg-ok ring-2 ring-canvas animate-pulse" />}</span>
+                <button key={a.id} onClick={() => setParams({ agent: a.id })} className={`w-full flex items-start gap-2.5 px-2.5 py-2 rounded-lg text-left ${selected?.id === a.id ? 'bg-raised' : 'hover:bg-raised/60'}`}>
+                  <span className="shrink-0"><Avatar agent={a} size="sm" /></span>
                   <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5"><span className="text-sm font-medium text-fg truncate">{a.name}</span></span>
-                    <span className="flex items-center gap-1.5 mt-0.5"><StatusChip value={st.running ? a.status : (WORKING.includes(a.status) ? 'idle' : a.status)} />{st.running && kind && <span className="text-2xs text-fg-3">{kind}</span>}</span>
+                    <span className="flex items-center gap-2 h-6"><span className="text-sm font-medium text-fg truncate flex-1 min-w-0">{a.name}</span><span className={`w-2 h-2 rounded-full shrink-0 ${st.running ? 'bg-ok animate-pulse' : 'bg-line-strong'}`} title={st.running ? 'Working now' : 'Idle'} aria-label={st.running ? 'Working now' : 'Idle'} /></span>
+                    <span className="flex items-center gap-1.5 mt-0.5"><StatusChip value={st.running ? (WORKING.includes(a.status) ? a.status : 'working') : (WORKING.includes(a.status) ? 'idle' : a.status)} />{st.running && kind && <span className="text-2xs text-fg-3">{kind}</span>}</span>
                     {st.last && <span className="block text-2xs text-fg-4 truncate mt-0.5">{String((st.last.payload as any).text ?? '').slice(0, 80)}</span>}
                     {quiet != null && quiet > 20 && <span className="block text-2xs text-warn mt-0.5">no output for {quiet >= 60 ? `${Math.floor(quiet / 60)}m` : `${quiet}s`}</span>}
                   </span>
