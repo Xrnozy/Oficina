@@ -354,6 +354,7 @@ export function renderPrompt(opts: {
   if (extra.target) data.push({ key: 'target', text: dataBlock('TARGET', String(extra.target)) });
   if (extra.basePrompt) data.push({ key: 'base-prompt', text: dataBlock('BASE_PROMPT', String(extra.basePrompt)) });
   if (extra.draft) data.push({ key: 'draft', text: dataBlock('PROMPT_UNDER_REVIEW', String(extra.draft)) });
+  if (extra.nodeInstructions) data.push({ key: 'node-instructions', text: dataBlock('NODE_INSTRUCTIONS', String(extra.nodeInstructions)) });
   if (extra.revisionNotes) data.push({ key: 'revision-notes', text: dataBlock('REVISION_NOTES', String(extra.revisionNotes)) });
   if (extra.inbox) data.push({ key: 'messages', text: dataBlock('TEAM_MESSAGES', capInbox(String(extra.inbox))) });
 

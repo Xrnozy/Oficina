@@ -87,9 +87,11 @@ export function defaultWorkflowGraph(): WfGraph {
       edge('e-review-back', 'pm-review', 'pc-draft', 'on-reject', { label: 'send back', maxLoops: 3 }),
       edge('e-review-dev', 'pm-review', 'dev', 'next'),
       edge('e-dev-qa', 'dev', 'qa', 'next'),
-      edge('e-qa-analyst', 'qa', 'analyst', 'on-failure'),
+      edge('e-dev-analyst', 'dev', 'analyst', 'on-failure', { label: 'checks failed' }),
+      edge('e-qa-analyst', 'qa', 'analyst', 'on-failure', { maxLoops: 3 }),
       edge('e-analyst-fix', 'analyst', 'fixer', 'next'),
-      edge('e-fix-qa', 'fixer', 'qa', 'on-reject', { label: 're-verify', maxLoops: 3 }),
+      edge('e-fix-qa', 'fixer', 'qa', 'next', { label: 're-verify' }),
+      edge('e-fix-analyst', 'fixer', 'analyst', 'on-failure', { maxLoops: 3 }),
       edge('e-qa-rev', 'qa', 'reviewer', 'on-success'),
       edge('e-rev-dev', 'reviewer', 'dev', 'on-reject', { label: 'changes requested', maxLoops: 3 }),
       edge('e-rev-accept', 'reviewer', 'pm-accept', 'next'),
@@ -155,21 +157,34 @@ export function validateWorkflow(graph: WfGraph, workspaceId?: string): WfIssue[
     }
   }
 
-  // cycles: a back-edge (to a DFS ancestor) is legal only as on-failure /
-  // on-reject — otherwise retries could loop forever. maxLoops defaults.
+  // cycles: a loop is legal only when the cycle passes through an
+  // on-failure/on-reject edge — that edge's maxLoops is the bound, so a retry
+  // loop can never spin forever. A cycle of plain next edges is an error.
   const state = new Map<string, 'open' | 'done'>();
+  const nodeStack: string[] = [];
+  const edgeStack: WfEdge[] = [];
+  const reported = new Set<string>();
   const dfs = (id: string) => {
     state.set(id, 'open');
+    nodeStack.push(id);
     for (const e of flowOutOf(id)) {
+      edgeStack.push(e);
       const t = e.to;
       if (state.get(t) === 'open') {
-        if (!LOOP_KINDS.includes(e.kind)) err(`cycle closed by "${e.kind}" edge — loops must close through on-failure/on-reject`, t, e.id);
-        else if (e.maxLoops != null && e.maxLoops < 1) err('maxLoops must be at least 1', t, e.id);
+        const i = nodeStack.indexOf(t);
+        const cycleEdges = [...edgeStack.slice(i), e];
+        if (!cycleEdges.some((x) => LOOP_KINDS.includes(x.kind))) {
+          const key = cycleEdges.map((x) => x.id).sort().join(',');
+          if (!reported.has(key)) { reported.add(key); err(`cycle through "${t}" has no on-failure/on-reject edge — loops must carry a bounded retry edge`, t, e.id); }
+        }
       } else if (!state.get(t)) dfs(t);
+      edgeStack.pop();
     }
+    nodeStack.pop();
     state.set(id, 'done');
   };
   for (const s of starts) dfs(s.id);
+  for (const e of graph.edges) if (LOOP_KINDS.includes(e.kind) && e.maxLoops != null && e.maxLoops < 1) err('maxLoops must be at least 1', e.to, e.id);
 
   // referenced agents / roles exist (and the agent belongs to the workspace)
   const roles = new Set(q('SELECT id, name FROM roles').flatMap((r) => [r.id, r.name] as string[]));

@@ -48,6 +48,8 @@ export function rowToWorkItem(r: Record<string, unknown>): WorkItem {
     result: r.result ? parseJson(r.result as string, null) : null,
     adapterRef: r.adapter_ref as string | null, errorSignature: r.error_signature as string | null,
     attempt: r.attempt as number,
+    workflowNodeId: (r.workflow_node_id as string | null) ?? null,
+    workflowEdgeId: (r.workflow_edge_id as string | null) ?? null,
   };
 }
 

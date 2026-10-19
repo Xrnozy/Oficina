@@ -27,7 +27,7 @@ export const EFFORT_FOR_TIER: Record<Tier, 'low' | 'medium' | 'high'> = { fast: 
 
 const EST_COST: Record<WorkItemKind, number> = {
   plan: 0.5, implement: 1.5, review: 0.4, test: 0.8, analyse: 0.4, fix: 1.0, doc: 0.6,
-  prompt: 0.2, 'prompt-review': 0.15, qa: 0.4, accept: 0.15, diagnose: 0.3,
+  prompt: 0.2, 'prompt-review': 0.15, qa: 0.4, accept: 0.15, diagnose: 0.3, custom: 0.6,
 };
 
 export function estimateWorkItemCost(kind: WorkItemKind): number {

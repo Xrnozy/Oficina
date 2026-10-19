@@ -19,3 +19,21 @@ Order: 1 → 2 → 3 → 3b → 4 → 5. Baseline before Phase 1: `npm run typec
 - **Tests `daemon/tests/workflow-graph.test.js`** (9): default graph validates + mirrors pipeline roles/purposes; start-count/reachability/end-path; condition else rule; loop-kind rule; agent/role refs; SoD; builtin read-only+clone; immutable versioning + activate resolution + invalid-graph refusal; used-by-run delete refusal.
 - Results: 9/9 new tests pass; typecheck clean; full suite run confirms no regression (85 → 94).
 - Engine untouched — zero behavior change.
+
+## Phase 2 — Engine executes the graph — DONE
+
+- **Types:** `WorkItemKind` gains `'custom'` (any node purpose not mappable to a pipeline kind); `EST_COST` gets a `custom` entry (`routing.ts`); `rows.ts` maps `workflow_node_id`/`workflow_edge_id` on `WorkItem`.
+- **`workflow.ts`:** cycle validation relaxed to cycle-membership semantics — a directed cycle is legal iff at least one edge in it is `on-failure`/`on-reject` (which carries the loop bound); error names the offending cycle. Default graph edge kinds adjusted to fit the rule.
+- **`engine.ts` — graph executor (~450 lines before `wireEngineEvents`):**
+  - `graphFor(run)` resolves + memoizes the run's pinned workflow version; `createRun` stamps `workflow_version_id` from `activeWorkflowFor` (null → untouched legacy path).
+  - `wfState`/`saveWfState` keep per-task traversal in `task.meta.wf`: in-flight `nodes`, completed `fired`, `loops` per bounded edge, `arrived` per merge node, `awaiting` gate, `queued` writers, `draft` for prompt loops, `lastOutcome`.
+  - `graphTaskEntry` walks start→entry nodes (run-scope `plan` nodes execute once per run via `dispatchPlan`); `wfEntryNodes` exported for tests.
+  - `dispatchAgentNode` builds the node's work item (`purpose`→kind, role/pinned-agent/agentId candidate, `modelTier`→difficulty, `instructions`→new `nodeInstructions` prompt block, `inputs` envelope|full|named-node outputs, `writable` default by kind, `budgetChars`), stamps `workflow_node_id`/`workflow_edge_id` on row + in-memory object, parks a second writer (`queued`), and dispatches through `executeWorkItem`.
+  - `graphHandleDelivered` (hooked in `handleDelivered`) turns the result into a `WfOutcome` (status/verdict/checks/files/report), fires `message` edges (postMessage + optional `waitForReply` pause with a timer), and `graphAdvanceFrom` picks matching edges (condition eval via `wfFieldValue`/`wfEval`), falls back to `else`, applies `maxLoops` (default 3 on loop-kind edges) and emits `workflow.step`/`branch`/`loop`/`merge`/`deadend`/`human`.
+  - Gates: `human` nodes → `workflow.human` approval; loop exhaustion → `workflow.loop`; dead end / starved merge / no eligible agent → `workflow.deadend`. The approval wiring resumes via `graphResume` (reject on a loop edge fails the task; approve grants one more pass; dead-end approve retries the node).
+  - Parallel: multiple matching edges dispatch sibling nodes concurrently; merge nodes wait `all`/`any`; writer nodes serialize per task through the repo tree; `end` marks the task approved and proceeds to merge.
+- **Two real bugs the loop tests exposed (Stage 6 cache interactions):**
+  - Cross-task reuse: `cache.hit` replayed a *different* run's QA verdict because scripted plans produce identically-titled tasks → identical prompts. Cache lookup now requires `task_id IS wi.taskId` — a cached result can only serve the task it verified.
+  - Retry poisoning: re-entering an already-`fired` node is a retry — the identical prompt would `cache.hit` and replay the failing verdict forever. Node re-entry NULLs `cache_key` on row **and** the in-memory `wi` (the lookup reads `wi.cacheKey`, not the row).
+- **Tests `daemon/tests/workflow-graph-exec.test.js`** (6): compat (no active workflow → unchanged legacy `[plan, prompt, prompt-review, implement, qa, accept]`); linear custom graph stamps node+edge ids and reaches `done`; `on-failure` loop re-runs the writer until QA passes; exhausted `on-reject` edge (maxLoops=1) requests `workflow.loop`, owner decision resumes; deterministic condition eval; `wfEntryNodes` walk.
+- Results: 6/6 new tests pass; typecheck clean; full suite 94 → **100**.

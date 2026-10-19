@@ -219,7 +219,7 @@ export interface Task {
   meta: Record<string, unknown>;
 }
 
-export type WorkItemKind = 'plan' | 'implement' | 'review' | 'test' | 'analyse' | 'fix' | 'doc' | 'prompt' | 'prompt-review' | 'qa' | 'accept' | 'diagnose';
+export type WorkItemKind = 'plan' | 'implement' | 'review' | 'test' | 'analyse' | 'fix' | 'doc' | 'prompt' | 'prompt-review' | 'qa' | 'accept' | 'diagnose' | 'custom';
 
 // Per-agent model configuration (kept in agents.settings). Which fields a
 // backend honours is described by settingsSupport() in services/models.ts.
@@ -268,6 +268,8 @@ export interface WorkItem {
   adapterRef: string | null;
   errorSignature: string | null;
   attempt: number;
+  workflowNodeId: string | null;
+  workflowEdgeId: string | null;
 }
 
 export interface PromptVersion {

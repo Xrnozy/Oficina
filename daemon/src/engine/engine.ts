@@ -31,6 +31,10 @@ import { changedFilesBetween, displayDiff, liveChanges, snapshotTree, snapshotTr
 import { buildCommitMessage, commitPaths, currentBranch, dirtyPaths, planTaskCommit } from '../services/commits.ts';
 import { skillsFor } from '../services/skills.ts';
 import { finalizeRunSummary } from '../services/summary.ts';
+import {
+  activeWorkflowFor, getWorkflowVersion, DEFAULT_MAX_LOOPS,
+  type WfCondition, type WfEdge, type WfGraph, type WfNode,
+} from '../services/workflow.ts';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -279,15 +283,20 @@ export function createRun(opts: { workspaceId: string; goal: string; budgetUsd?:
 
   const runId = ulid();
   const dodId = ulid();
+  // runs pin the workspace's active workflow version at creation so a later
+  // edit can't change a run mid-flight
+  const wf = activeWorkflowFor(ws.id);
   tx(() => {
-    run(`INSERT INTO runs (id, workspace_id, repo_id, goal, status, dod_id, budget, limits, current_cycle, started_at)
-         VALUES (?,?,?,?,?,?,?,?,0,?)`,
+    run(`INSERT INTO runs (id, workspace_id, repo_id, goal, status, dod_id, budget, limits, current_cycle, started_at, workflow_version_id)
+         VALUES (?,?,?,?,?,?,?,?,0,?,?)`,
       runId, ws.id, repoId, opts.goal, 'draft', dodId,
       JSON.stringify({ runUsd: opts.budgetUsd ?? 50, taskUsd: 10, warnPct: 80 }),
-      JSON.stringify({ ...DEFAULT_LIMITS, ...(opts.limits ?? {}), ...(opts.oneShot ? { maxCycles: 1, oneShot: true } : {}) }), null);
+      JSON.stringify({ ...DEFAULT_LIMITS, ...(opts.limits ?? {}), ...(opts.oneShot ? { maxCycles: 1, oneShot: true } : {}) }), null,
+      wf?.versionId ?? null);
     run(`INSERT INTO dod (id, run_id, version, items, status) VALUES (?,?,1,'[]','draft')`, dodId, runId);
   });
   emit('run.created', 'owner', { goal: opts.goal }, runId, runId);
+  if (wf) emit('workflow.run', 'engine', { workflowId: wf.workflowId, versionId: wf.versionId, v: q1('SELECT n FROM workflow_versions WHERE id = ?', wf.versionId)?.n ?? null }, runId);
   // Bootstrap phase: PM drafts DoD + initial task graph
   void dispatchPlan(runId, true);
   return getRun(runId)!;
@@ -356,7 +365,11 @@ const planFailCount = new Map<string, number>();
 async function dispatchPlan(runId: string, bootstrap: boolean): Promise<void> {
   const r = getRun(runId);
   if (!r) return;
-  const candidate = pickAgent(r.workspaceId, 'pm', null, 'plan', 3);
+  // a run-scope plan node may pin the planner (agent/role); default is the PM
+  const planNode = graphFor(r)?.graph.nodes.find((n) => n.type === 'agent' && n.config?.scope === 'run' && n.config?.purpose === 'plan') ?? null;
+  const candidate = planNode
+    ? wfCandidate(r, null, planNode, 'plan', 3)
+    : pickAgent(r.workspaceId, 'pm', null, 'plan', 3);
   if (!candidate) {
     emit('plan.unavailable', 'engine', { reason: 'no eligible PM agent; engine continues current plan' }, runId);
     if (bootstrap) {
@@ -392,9 +405,11 @@ async function dispatchPlan(runId: string, bootstrap: boolean): Promise<void> {
         delivered: t.status === 'done' ? (changeNotes(t).match(/^\s*Commit:\s*(.+)$/m)?.[1] ?? (t.meta?.commitProposal as { title?: string })?.title ?? null) : undefined,
       }))),
       inbox: inboxText(candidate, runId, null),
+      nodeInstructions: planNode?.config?.instructions,
     },
   });
   const wi = createWorkItemRecord(runId, null, 'plan', candidate, prompt, pack.hash);
+  if (planNode) run('UPDATE work_items SET workflow_node_id = ? WHERE id = ?', planNode.id, wi.id);
   emit('plan.started', 'engine', { bootstrap, agent: candidate.agent.name }, runId, wi.id);
   void executeWorkItem(wi, candidate, prompt.text, null);
 }
@@ -615,7 +630,7 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
     // Result cache (spec 6.2): an identical dispatch (kind + prompt + context
     // pack + model) already delivered — reuse it instead of calling a backend.
     const prevHit = wi.cacheKey
-      ? q1(`SELECT id, result FROM work_items WHERE cache_key = ? AND status = 'delivered' AND id != ? AND result IS NOT NULL ORDER BY finished_at DESC LIMIT 1`, wi.cacheKey, wi.id)
+      ? q1(`SELECT id, result FROM work_items WHERE cache_key = ? AND status = 'delivered' AND id != ? AND result IS NOT NULL AND task_id IS ? ORDER BY finished_at DESC LIMIT 1`, wi.cacheKey, wi.id, wi.taskId ?? null)
       : null;
     if (prevHit) {
       const cached = parseJson<WorkItemResult & { cached?: unknown }>(prevHit.result as string, {} as never);
@@ -798,7 +813,7 @@ function roleNameFor(kind: WorkItemKind, task: Task | null): string {
 // What an agent is doing, from the work it is actually running.
 const AGENT_STATE: Partial<Record<WorkItemKind, string>> = {
   plan: 'planning', prompt: 'planning', 'prompt-review': 'reviewing', accept: 'reviewing', review: 'reviewing',
-  qa: 'testing', test: 'coding', implement: 'coding', fix: 'coding', doc: 'coding', analyse: 'working', diagnose: 'working',
+  qa: 'testing', test: 'coding', implement: 'coding', fix: 'coding', doc: 'coding', analyse: 'working', diagnose: 'working', custom: 'working',
 };
 
 function setAgentStatus(agentId: string, status: string): void {
@@ -985,6 +1000,11 @@ function repairReply(wi: WorkItem, err: string, raw: Record<string, any>, usedAg
     `Your previous reply failed validation.\n\nError: ${err}\n\nYour reply (truncated):\n${bad.slice(0, 6000) || '(empty)'}\n\nSend only the corrected reply.`,
     wi.kind, cand.provider?.adapterId, '', cand.role, 'HANDOFF.md', deskPack(cand, 8000).budgetChars);
   const nwi = createWorkItemRecord(r.id, task, wi.kind, cand, prompt, 'repair');
+  if (wi.workflowNodeId) {
+    run('UPDATE work_items SET workflow_node_id = ?, workflow_edge_id = ? WHERE id = ?', wi.workflowNodeId, wi.workflowEdgeId, nwi.id);
+    nwi.workflowNodeId = wi.workflowNodeId;
+    nwi.workflowEdgeId = wi.workflowEdgeId;
+  }
   if (job) promptJobs.set(nwi.id, job);
   emit('workitem.repair', 'engine', { kind: wi.kind, taskId: wi.taskId, retryOf: wi.id, error: err.slice(0, 200) }, r.id, nwi.id);
   void executeWorkItem(nwi, cand, prompt.text, null);
@@ -995,6 +1015,13 @@ async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['resul
   const task = wi.taskId ? getTask(wi.taskId) : null;
   const r = getRun(wi.runId);
   if (!r) return;
+  // graph stamps are written after the row is created — the in-memory copy
+  // can lag the DB, so refresh before routing
+  if (!wi.workflowNodeId) {
+    const stamp = q1('SELECT workflow_node_id, workflow_edge_id FROM work_items WHERE id = ?', wi.id);
+    wi.workflowNodeId = (stamp?.workflow_node_id as string | null) ?? null;
+    wi.workflowEdgeId = (stamp?.workflow_edge_id as string | null) ?? null;
+  }
 
   // Strict JSON for the decision roles: an unusable reply gets one repair
   // retry carrying only the error and the bad output; it is a normal work
@@ -1003,6 +1030,13 @@ async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['resul
     const raw = (result.raw ?? {}) as Record<string, unknown>;
     const err = validateReply(wi.kind, (raw.json ?? raw) as Record<string, any>);
     if (err && repairReply(wi, err, raw, usedAgentId, r, task ?? null)) return;
+  }
+
+  // graph-dispatched items route through the workflow executor — the fixed
+  // pipeline only handles legacy items (and run-scope plan, below)
+  if (task && wi.workflowNodeId && graphFor(r)) {
+    await graphDelivered(wi, result, usedAgentId, r, task);
+    return;
   }
 
   switch (wi.kind) {
@@ -1330,6 +1364,9 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
   }
 
   const failed = results.filter((x) => x.cr.status === 'fail' || x.cr.status === 'error');
+  // graph runs: engine checks still decide pass/fail here; the graph's edges
+  // decide which node runs next
+  if (graphFor(r)) { await graphChecksDone(wi, task, results, files); return; }
   if (!failed.length) {
     // resolve open Error Reports for this task — fix acceptance is check-based.
     const passCr = results.find((x) => x.cr.status === 'pass')?.cr;
@@ -1943,6 +1980,20 @@ export function assignSweep(runId: string): void {
     }
   }
 
+  // Custom workflow: parked writers resume when the tree frees; ready tasks
+  // enter the graph instead of the fixed implement step.
+  if (graphFor(r)) {
+    for (const t of tasks.filter((x) => x.status === 'assigned' && (x.meta?.wf as WfState | undefined)?.held)) {
+      if (inFlight.some((h) => h.id !== t.id)) continue;
+      graphTaskEntry(r, t);
+    }
+    for (const t of tasks.filter((x) => x.status === 'ready').sort((a, b) => a.priority - b.priority)) {
+      if (!t.dependsOn.every((d) => tasks.find((x) => x.id === d)?.status === 'done')) continue;
+      graphTaskEntry(r, t);
+    }
+    return;
+  }
+
   const readOnlyCap = Math.max(0, Number(r.limits.maxReadOnly ?? 2));
   // lane occupancy, fresh from the DB (the resume loop above already cleared
   // the flags of tasks it dispatched)
@@ -2466,6 +2517,21 @@ export function fireDueTimers(): void {
       for (const task of runTasks(runId, ['blocked-quota'])) setTaskStatus(task.id, 'ready', 'engine', { reason: 'quota window reset' });
       void maybeAdvanceRun(runId);
     }
+    // a message edge with waitForReply waited its timeout — keep moving
+    if (t.type === 'wf.reply.timeout' && runId) {
+      const task = getTask(payload.taskId as string);
+      const rr = task ? getRun(task.runId) : null;
+      if (!task || !rr || !graphFor(rr)) continue;
+      const s = wfState(task);
+      if (s.awaiting?.kind !== 'reply' || s.awaiting.edgeId !== payload.edgeId) continue;
+      const node = wfNode(graphFor(rr)!.graph, s.awaiting.nodeId);
+      s.awaiting = undefined;
+      saveWfState(task, s);
+      emit('workflow.timeout', 'timer', { taskId: task.id, edgeId: payload.edgeId }, runId, task.id);
+      setTaskStatus(task.id, 'assigned', 'timer', { reason: 'reply wait timed out' });
+      graphAdvanceFrom(rr, getTask(task.id)!, node, s.lastOutcome ?? { status: 'success' }, null);
+      void maybeAdvanceRun(runId);
+    }
   }
 }
 
@@ -2486,6 +2552,628 @@ export function reconcileOnBoot(): void {
     else { setRunStatus(r.id as string, 'running', { resumed: 'after restart' }); void maybeAdvanceRun(r.id as string); }
   }
   scheduleTimer(null, 5, 'timer.checkpoint', {});
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-graph execution (visual-routing phase 2). When a run records a
+// custom workflow version, the graph — not the hard-coded switch — decides
+// which node runs next after each work item. Verification, commits, error
+// reports, messages, budgets and recovery are unchanged: the graph only picks
+// WHO runs next and with which config.
+// ---------------------------------------------------------------------------
+
+type WfOutcome = {
+  status: 'success' | 'failure' | 'reject';
+  verdict?: string;                    // approve | reject | fail
+  checksPassed?: boolean;
+  checkRunId?: string;                 // failing check run, for the analyse step
+  checkName?: string;
+  files?: string[];
+  report?: string;                     // QA/accept text the next prompt may need
+  output?: Record<string, unknown>;    // the agent's parsed reply (envelope fields)
+};
+type WfState = {
+  nodes: string[];                     // node ids with work in flight
+  fired: string[];                     // nodes that completed this run-through
+  loops: Record<string, number>;       // traversals per bounded edge
+  arrived: Record<string, string[]>;   // merge node -> arrived edge ids
+  awaiting?: { kind: 'human' | 'reply'; nodeId: string; edgeId?: string; approvalId?: string; at: string };
+  held?: string;                       // writer node parked while the tree is busy
+  queued?: string[];                   // writer nodes waiting on a sibling writer
+  deadEndNode?: string;                // node that stalled — owner approval retries it
+  draft?: { text: string; approved: boolean; revision: number };
+  lastOutcome?: WfOutcome;
+};
+
+const WF_LOOP_KINDS = ['on-failure', 'on-reject'];
+const WF_WRITER_KINDS = new Set<WorkItemKind>(['implement', 'fix', 'doc', 'test', 'custom']);
+
+const wfGraphCache = new Map<string, { versionId: string; graph: WfGraph } | null>();
+export function graphFor(r: Run | undefined | null): { versionId: string; graph: WfGraph } | null {
+  if (!r?.workflowVersionId) return null;
+  if (!wfGraphCache.has(r.id)) {
+    const v = getWorkflowVersion(r.workflowVersionId);
+    wfGraphCache.set(r.id, v ? { versionId: v.version.id, graph: v.graph } : null);
+  }
+  return wfGraphCache.get(r.id) ?? null;
+}
+
+const wfNode = (g: WfGraph, id: string | null | undefined): WfNode | null => (id ? g.nodes.find((n) => n.id === id) ?? null : null);
+const wfFlowOut = (g: WfGraph, id: string): WfEdge[] => g.edges.filter((e) => e.from === id && e.kind !== 'message');
+const wfMsgOut = (g: WfGraph, id: string): WfEdge[] => g.edges.filter((e) => e.from === id && e.kind === 'message');
+
+function wfState(task: Task): WfState {
+  const s = task.meta?.wf as WfState | undefined;
+  return s ?? { nodes: [], fired: [], loops: {}, arrived: {} };
+}
+function saveWfState(task: Task, s: WfState): void { setTaskMeta(task.id, 'wf', s); }
+
+// Condition fields resolve against the step outcome — deterministic, no model.
+export function wfFieldValue(field: string, ctx: { outcome: WfOutcome; task: Task }): unknown {
+  const { outcome, task } = ctx;
+  switch (field) {
+    case 'step.status': return outcome.status;
+    case 'step.verdict': return outcome.verdict;
+    case 'checks': return outcome.checksPassed === true ? 'pass' : outcome.checksPassed === false ? 'fail' : 'none';
+    case 'files': return outcome.files ?? [];
+    case 'attempts': return task.attempts;
+    case 'task.type': return task.type;
+    case 'task.difficulty': return task.difficulty;
+    case 'task.paths': return task.affectedPaths;
+    default:
+      if (field.startsWith('output.')) return outcome.output?.[field.slice(7)];
+      if (field.startsWith('envelope.')) return outcome.output?.[field.slice(9)];
+      return undefined;
+  }
+}
+
+export function wfEvalCondition(c: WfCondition | undefined, ctx: { outcome: WfOutcome; task: Task }): boolean {
+  if (!c) return true;
+  if (c.and?.length) return c.and.every((x) => wfEvalCondition(x, ctx));
+  if (c.or?.length) return c.or.some((x) => wfEvalCondition(x, ctx));
+  if (c.not) return !wfEvalCondition(c.not, ctx);
+  const v = wfFieldValue(c.field ?? '', ctx);
+  switch (c.op ?? 'truthy') {
+    case 'eq': return v === c.value;
+    case 'ne': return v !== c.value;
+    case 'lt': return Number(v) < Number(c.value);
+    case 'le': return Number(v) <= Number(c.value);
+    case 'gt': return Number(v) > Number(c.value);
+    case 'ge': return Number(v) >= Number(c.value);
+    case 'contains': return Array.isArray(v) ? v.includes(c.value) : String(v ?? '').includes(String(c.value ?? ''));
+    case 'matches': return Array.isArray(v) ? v.some((f) => anyGlobMatch(String(f), [String(c.value)])) : anyGlobMatch(String(v ?? ''), [String(c.value)]);
+    case 'falsy': return !v;
+    default: return !!v;
+  }
+}
+
+// 'next' is the normal (success) path; on-* edges fire on their outcome; an
+// edge's own condition must also hold. Every matching edge fires — that is
+// the fan-out. The 'else' edge runs only when nothing else matched.
+function wfMatchingEdges(g: WfGraph, fromId: string, ctx: { outcome: WfOutcome; task: Task }): { take: WfEdge[]; elseEdge?: WfEdge } {
+  const take: WfEdge[] = [];
+  let elseEdge: WfEdge | undefined;
+  const { outcome } = ctx;
+  const positive = outcome.status === 'success' && outcome.verdict !== 'reject';
+  const kindOk = (k: WfEdge['kind']): boolean =>
+    k === 'next' ? positive
+    : k === 'on-success' ? positive
+    : k === 'on-failure' ? outcome.status === 'failure'
+    : k === 'on-reject' ? (outcome.status === 'reject' || outcome.verdict === 'reject')
+    : false;
+  for (const e of wfFlowOut(g, fromId)) {
+    if (e.else) { elseEdge = e; continue; }
+    if (!kindOk(e.kind)) continue;
+    if (e.condition && !wfEvalCondition(e.condition, ctx)) continue;
+    take.push(e);
+  }
+  return { take, elseEdge };
+}
+
+const wfPurpose = (node: WfNode): WorkItemKind => (node.config?.purpose as WorkItemKind | undefined) ?? 'custom';
+
+// Pinned agent → Candidate through its workspace roles; role node → pickAgent.
+function wfCandidate(r: Run, task: Task | null, node: WfNode, kind: WorkItemKind, difficulty: number): Candidate | null {
+  if (node.agentId) {
+    const roles = q('SELECT DISTINCT role_id FROM memberships WHERE agent_id = ? AND workspace_id = ? AND active = 1', node.agentId, r.workspaceId);
+    for (const m of roles) {
+      const roleName = (q1('SELECT name FROM roles WHERE id = ?', m.role_id as string)?.name as string) ?? '';
+      const c = candidatesForRole(r.workspaceId, roleName).find((x) => x.agent.id === node.agentId && !x.blocked);
+      if (c) return c;
+    }
+    return null;
+  }
+  if (node.role) return pickAgent(r.workspaceId, node.role, task, kind, difficulty);
+  return pickAgent(r.workspaceId, roleNameFor(kind, task), task, kind, difficulty);
+}
+
+// A writer node needs the working tree: direct mode assigns the repo itself
+// and only one task may hold it; the loser parks and resumes on release.
+function wfEnsureTree(r: Run, task: Task, node: WfNode): boolean {
+  const repo = getRepo(r.repoId);
+  if (!repo) return false;
+  if (task.worktree) return true;
+  if (isDirect(r)) {
+    const other = q(`SELECT t.id FROM tasks t WHERE t.id != ? AND t.status NOT IN ('done','failed','cancelled','blocked')
+                     AND json_extract(t.meta, '$.generalCheckpointId') IS NOT NULL`, task.id)
+      .some((x) => { const h = getTask(x.id as string); return h ? holdsRepo(h) : false; });
+    if (other) {
+      const s = wfState(task);
+      s.held = node.id;
+      saveWfState(task, s);
+      setTaskStatus(task.id, 'assigned', 'engine', { parked: node.label });
+      emit('workflow.parked', 'engine', { taskId: task.id, nodeId: node.id, reason: 'writer waits for the repository' }, r.id, task.id);
+      return false;
+    }
+    const wt = { worktree: repo.path, branch: currentBranch(repo.path) ?? '(detached)' };
+    openTaskCheckpoint(r, repo, task);
+    run('UPDATE tasks SET worktree = ?, branch = ? WHERE id = ?', wt.worktree, wt.branch, task.id);
+    task.worktree = wt.worktree; task.branch = wt.branch;
+    return true;
+  }
+  const wt = task.worktree ? { worktree: task.worktree, branch: task.branch! } : createWorktree(repo, task.id);
+  run('UPDATE tasks SET worktree = ?, branch = ? WHERE id = ?', wt.worktree, wt.branch, task.id);
+  task.worktree = wt.worktree; task.branch = wt.branch;
+  return true;
+}
+
+// What a node receives: envelope only (default), the full previous output, or
+// the outputs of named earlier nodes.
+function wfInputsText(r: Run, task: Task, node: WfNode): string {
+  const inputs = node.config?.inputs ?? 'envelope';
+  if (inputs === 'envelope') return envelopeText(handoffEnvelope(task, node.role ?? 'pm'));
+  if (inputs === 'full') {
+    const last = q1(`SELECT result FROM work_items WHERE task_id = ? AND status = 'delivered' ORDER BY finished_at DESC LIMIT 1`, task.id);
+    return last?.result ? `PREVIOUS OUTPUT:\n${String(last.result).slice(0, 6000)}` : '';
+  }
+  if (Array.isArray(inputs)) {
+    return inputs.map((nid) => {
+      const wi = q1(`SELECT result FROM work_items WHERE task_id = ? AND workflow_node_id = ? AND status = 'delivered' ORDER BY finished_at DESC LIMIT 1`, task.id, nid);
+      const label = wfNode(graphFor(r)!.graph, nid)?.label ?? nid;
+      return wi?.result ? `<${label}>\n${String(wi.result).slice(0, 4000)}\n</${label}>` : '';
+    }).filter(Boolean).join('\n\n');
+  }
+  return '';
+}
+
+function dispatchAgentNode(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
+  task = getTask(task.id)!;                       // fresh: sibling edges may have saved state
+  const s = wfState(task);
+  const kind = wfPurpose(node);
+  const writable = node.config?.writable ?? WF_WRITER_KINDS.has(kind);
+  // one writer at a time on the same task too — later writers queue
+  if (writable && s.nodes.some((id) => id !== node.id && WF_WRITER_KINDS.has((wfNode(graphFor(r)!.graph, id)?.config?.purpose as WorkItemKind) ?? 'custom'))) {
+    s.queued = [...(s.queued ?? []), node.id];
+    saveWfState(task, s);
+    emit('workflow.parked', 'engine', { taskId: task.id, nodeId: node.id, reason: 'another writer step is still running' }, r.id, task.id);
+    return;
+  }
+  const tierDifficulty = node.config?.modelTier === 'strong' ? 5 : node.config?.modelTier === 'fast' ? 1 : task.difficulty;
+  const candidate = wfCandidate(r, task, node, kind, tierDifficulty);
+  if (!candidate) {
+    emit('workflow.deadend', 'engine', { taskId: task.id, nodeId: node.id, reason: `no eligible agent for role "${node.role ?? node.agentId}"` }, r.id, task.id);
+    requestApproval({ action: 'workflow.deadend', taskId: task.id, runId: r.id, requestedBy: 'engine', payload: { summary: `No agent can run "${node.label}" (${node.role ?? node.agentId})` } });
+    setTaskStatus(task.id, 'blocked', 'engine', { reason: `no eligible agent for ${node.label}` });
+    return;
+  }
+  if (!roleMayDo(candidate.role.name, kind)) emit('workflow.role.mismatch', 'engine', { taskId: task.id, nodeId: node.id, role: candidate.role.name, kind }, r.id, task.id);
+  if (writable && !wfEnsureTree(r, task, node)) return;
+  const repo = getRepo(r.repoId);
+  const budget = node.config?.budgetChars ?? (writable ? 16000 : 12000);
+  const pack = packFor(repo, task, candidate, budget, kind);
+  const s2 = wfState(task);
+  const lastReport = s2.lastOutcome?.report;
+  const prompt = renderPrompt({
+    kind, agent: candidate.agent, role: candidate.role, task, goal: r.goal, pack, adapterId: candidate.provider?.adapterId,
+    extra: {
+      handoff: wfInputsText(r, task, node),
+      nodeInstructions: node.config?.instructions,
+      approvedPrompt: approvedPromptFor(task.id),
+      changeNotes: writable ? undefined : changeNotes(task).slice(0, 3000),
+      checkResults: lastReport,
+      qaReport: kind === 'accept' ? lastReport?.slice(0, 4000) : undefined,
+      draft: kind === 'prompt-review' ? s2.draft?.text : undefined,
+      target: kind === 'prompt' || kind === 'prompt-review' ? `${node.label} (${kind})` : undefined,
+      inbox: inboxText(candidate, r.id, task.id),
+      handoffPath: writable ? handoffPath(task, isDirect(r)) : undefined,
+      kbNotes: writable ? lessonNotes(r, task) : undefined,
+      requirementsChanged: takeRequirementNote(task),
+      revisionNotes: kind === 'prompt' && (s2.draft?.revision ?? 0) > 0 ? 'The reviewer asked for changes — address them and re-emit the brief.' : undefined,
+    },
+  });
+  // an approved draft replaces the writer's prompt — like dispatchApprovedPrompt
+  let promptText = prompt.text;
+  const packHash = pack.hash;
+  if (writable && s2.draft?.approved) {
+    const body = s2.draft.text.includes('OUTPUT CONTRACT') ? s2.draft.text : `## Brief (approved)\n${s2.draft.text.trim()}\n\n${prompt.text}`;
+    promptText = finalizeApprovedPrompt(body, kind, candidate.provider?.adapterId, inboxText(candidate, r.id, task.id), candidate.role, handoffPath(task, isDirect(r)), budget).text;
+  }
+  const wi = createWorkItemRecord(r.id, task, kind, candidate, promptText, packHash);
+  run('UPDATE work_items SET workflow_node_id = ?, workflow_edge_id = ? WHERE id = ?', node.id, viaEdge?.id ?? null, wi.id);
+  wi.workflowNodeId = node.id;
+  wi.workflowEdgeId = viaEdge?.id ?? null;
+  // re-entering a node that already delivered means a retry — the result
+  // cache would replay the identical verdict and the loop could never make
+  // progress, so the re-dispatch must really run
+  if (s2.fired.includes(node.id)) { run('UPDATE work_items SET cache_key = NULL WHERE id = ?', wi.id); wi.cacheKey = null; }
+  // an analyse step right after a check failure inherits the failing run —
+  // its delivery files the analyst-informed report like the fixed pipeline
+  if (kind === 'analyse' && s2.lastOutcome?.checkRunId) {
+    pendingAnalysis.set(wi.id, { checkRunId: s2.lastOutcome.checkRunId, taskId: task.id, checkName: s2.lastOutcome.checkName ?? '', files: s2.lastOutcome.files ?? [] });
+  }
+  s2.nodes = [...new Set([...s2.nodes.filter((id) => id !== node.id), node.id])];
+  s2.held = s2.held === node.id ? undefined : s2.held;
+  saveWfState(task, s2);
+  emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, kind, agent: candidate.agent.name, via: viaEdge?.id ?? null }, r.id, task.id);
+  if (task.status !== 'verifying' && task.status !== 'in-review') setTaskStatus(task.id, 'assigned', 'engine', { agent: candidate.agent.name, node: node.label });
+  void executeWorkItem(wi, candidate, promptText, writable ? task.worktree : null);
+}
+
+// 'message' edges deliver a structured message to the target agent's next
+// prompt — no extra model call. waitForReply pauses the sender's step.
+function wfFireMessageEdges(r: Run, task: Task, node: WfNode, fromAgentId: string, outcome: WfOutcome): { waiting: boolean; s: WfState } {
+  const s = wfState(task);
+  for (const e of wfMsgOut(graphFor(r)!.graph, node.id)) {
+    const target = wfNode(graphFor(r)!.graph, e.to);
+    const cand = target ? wfCandidate(r, task, target, 'custom', 1) : null;
+    const toAgent = cand?.agent.id ?? target?.agentId;
+    if (!toAgent) continue;
+    postMessage({
+      runId: r.id, taskId: task.id, from: fromAgentId, to: toAgent, kind: 'handoff',
+      text: outcome.report ?? outcome.output?.summary as string ?? `Step "${node.label}" finished (${outcome.status}).`,
+    });
+    emit('workflow.message', 'engine', { taskId: task.id, edgeId: e.id, from: fromAgentId, to: toAgent }, r.id, task.id);
+    if (e.waitForReply) {
+      s.awaiting = { kind: 'reply', nodeId: node.id, edgeId: e.id, at: now() };
+      scheduleTimer(r.id, e.timeoutMin ?? 15, 'wf.reply.timeout', { taskId: task.id, edgeId: e.id });
+      setTaskStatus(task.id, 'waiting-input', 'engine', { reason: `waiting for a reply from ${cand?.agent.name ?? toAgent}` });
+    }
+  }
+  return { waiting: !!s.awaiting, s };
+}
+
+function graphEnter(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null): void {
+  task = getTask(task.id)!;
+  const s = wfState(task);
+  switch (node.type) {
+    case 'agent': dispatchAgentNode(r, task, node, viaEdge); return;
+    case 'end': {
+      emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, done: true }, r.id, task.id);
+      setTaskStatus(task.id, 'approved', 'engine', { reason: `workflow reached ${node.label}` });
+      s.nodes = s.nodes.filter((id) => id !== node.id);
+      saveWfState(task, s);
+      void proceedMerge(task.id);
+      return;
+    }
+    case 'human': {
+      // record the gate BEFORE asking — requestApproval can auto-approve inline
+      s.awaiting = { kind: 'human', nodeId: node.id, at: now() };
+      saveWfState(task, s);
+      emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label, human: true }, r.id, task.id);
+      const a = requestApproval({ action: 'workflow.human', taskId: task.id, runId: r.id, requestedBy: 'engine',
+        payload: { summary: node.config?.instructions || `Owner approval: ${node.label}`, nodeId: node.id, nodeLabel: node.label } });
+      const fresh = getTask(task.id)!;
+      const s2 = wfState(fresh);
+      if (s2.awaiting?.nodeId === node.id) {
+        s2.awaiting = { ...s2.awaiting, approvalId: a.id };
+        saveWfState(fresh, s2);
+        setTaskStatus(task.id, 'waiting-input', 'engine', { reason: `approval gate: ${node.label}` });
+      }
+      return;
+    }
+    case 'merge': {
+      const arrived = s.arrived[node.id] ?? [];
+      if (viaEdge && !arrived.includes(viaEdge.id)) s.arrived[node.id] = [...arrived, viaEdge.id];
+      const mode = node.config?.mergeMode ?? 'all';
+      const expected = graphFor(r)!.graph.edges.filter((e) => e.to === node.id && e.kind !== 'message' && (s.fired.includes(e.from) || s.nodes.includes(e.from))).length;
+      const done = mode === 'any' ? s.arrived[node.id]!.length >= 1 : s.arrived[node.id]!.length >= Math.max(1, expected);
+      emit('workflow.merge', 'engine', { taskId: task.id, nodeId: node.id, arrived: s.arrived[node.id]!.length, expected, mode }, r.id, task.id);
+      if (!done) {
+        // nothing else in flight and the merge can't complete — stall guard
+        if (!s.nodes.length && !s.awaiting) {
+          s.deadEndNode = node.id;
+          emit('workflow.deadend', 'engine', { taskId: task.id, nodeId: node.id, reason: `merge "${node.label}" starved (${s.arrived[node.id]!.length}/${expected})` }, r.id, task.id);
+          requestApproval({ action: 'workflow.deadend', taskId: task.id, runId: r.id, requestedBy: 'engine', payload: { summary: `Merge "${node.label}" is waiting for branches that never ran.` } });
+          setTaskStatus(task.id, 'blocked', 'engine', { reason: 'workflow merge starved' });
+        }
+        saveWfState(task, s);
+        return;
+      }
+      saveWfState(task, s);
+      graphAdvanceFrom(r, task, node, s.lastOutcome ?? { status: 'success' }, null);
+      return;
+    }
+    case 'condition': {
+      emit('workflow.step', 'engine', { taskId: task.id, nodeId: node.id, label: node.label }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, s.lastOutcome ?? { status: 'success' }, null);
+      return;
+    }
+    case 'start': {
+      graphAdvanceFrom(r, task, node, s.lastOutcome ?? { status: 'success' }, null);
+      return;
+    }
+  }
+}
+
+// Traverse from a node: message edges fire, matching edges are followed
+// (bounded by maxLoops), else the else-edge, else a dead-end Needs-you.
+function graphAdvanceFrom(r: Run, task: Task, node: WfNode | null, outcome: WfOutcome, fromAgentId: string | null): void {
+  task = getTask(task.id)!;
+  const g = graphFor(r)!;
+  const s = wfState(task);
+  if (node) {
+    s.nodes = s.nodes.filter((id) => id !== node.id);
+    if (!s.fired.includes(node.id)) s.fired.push(node.id);
+    s.lastOutcome = outcome;
+    if (fromAgentId) {
+      const { waiting } = wfFireMessageEdges(r, task, node, fromAgentId, outcome);
+      if (waiting) { saveWfState(task, s); return; }
+    }
+  }
+  const ctx = { outcome, task };
+  let edges: WfEdge[] = [];
+  if (node) {
+    const { take, elseEdge } = wfMatchingEdges(g.graph, node.id, ctx);
+    edges = take.length ? take : elseEdge ? [elseEdge] : [];
+    emit('workflow.branch', 'engine', { taskId: task.id, from: node.id, edges: edges.map((e) => e.id), status: outcome.status, verdict: outcome.verdict ?? null }, r.id, task.id);
+  }
+  for (const e of edges) {
+    const cap = e.maxLoops ?? (WF_LOOP_KINDS.includes(e.kind) ? DEFAULT_MAX_LOOPS : undefined);
+    const used = s.loops[e.id] ?? 0;
+    if (cap != null && used >= cap) {
+      s.awaiting = { kind: 'human', nodeId: node?.id ?? '', edgeId: e.id, at: now() };
+      saveWfState(task, s);
+      emit('workflow.loop', 'engine', { taskId: task.id, edgeId: e.id, loops: used, exhausted: true }, r.id, task.id);
+      const a = requestApproval({ action: 'workflow.loop', taskId: task.id, runId: r.id, requestedBy: 'engine',
+        payload: { summary: `The retry loop through "${node?.label ?? e.from}" hit its limit (${cap}). Approve to allow one more pass, reject to stop the task.`, edgeId: e.id, nodeId: e.to } });
+      const fresh = getTask(task.id)!;
+      const s2 = wfState(fresh);
+      if (s2.awaiting?.edgeId === e.id) {
+        s2.awaiting = { ...s2.awaiting, approvalId: a.id };
+        saveWfState(fresh, s2);
+        setTaskStatus(task.id, 'waiting-input', 'engine', { reason: 'loop bound reached' });
+      }
+      return;
+    }
+    if (WF_LOOP_KINDS.includes(e.kind) || cap != null) s.loops[e.id] = used + 1;
+  }
+  // a finished writer releases the oldest queued writer node on this task
+  const queued = (s.queued ?? []).filter((id) => !s.nodes.includes(id));
+  if (queued.length && !s.nodes.some((id) => WF_WRITER_KINDS.has((wfNode(g.graph, id)?.config?.purpose as WorkItemKind) ?? 'custom'))) {
+    s.queued = queued.slice(1);
+    saveWfState(task, s);
+    const next = wfNode(g.graph, queued[0]);
+    if (next) graphEnter(r, getTask(task.id)!, next, null);
+  } else {
+    s.queued = queued;
+    saveWfState(task, s);
+  }
+  if (!edges.length) {
+    if (!s.nodes.length && !s.awaiting) {
+      const s2 = wfState(task);
+      s2.deadEndNode = node?.id;
+      saveWfState(task, s2);
+      emit('workflow.deadend', 'engine', { taskId: task.id, nodeId: node?.id, reason: 'no edge matched and nothing is in flight' }, r.id, task.id);
+      requestApproval({ action: 'workflow.deadend', taskId: task.id, runId: r.id, requestedBy: 'engine', payload: { summary: `"${task.title}" reached a dead end at "${node?.label ?? 'start'}" (${outcome.status}). Approve to retry the step.` } });
+      // auto-approve resumes inline and leaves the task 'ready' — only block
+      // when the request is actually pending
+      if (getTask(task.id)!.status !== 'ready') setTaskStatus(task.id, 'blocked', 'engine', { reason: 'workflow dead end' });
+    }
+    return;
+  }
+  const fresh = getTask(task.id)!;
+  for (const e of edges) {
+    const target = wfNode(g.graph, e.to);
+    if (target) graphEnter(r, fresh, target, e);
+  }
+}
+
+// Walk from start to the first task-scope nodes (run-scope nodes like plan
+// execute once per run, not per task). Exported for assignSweep + tests.
+export function wfEntryNodes(g: WfGraph, ctx: { outcome: WfOutcome; task: Task }): WfNode[] {
+  const start = g.nodes.find((n) => n.type === 'start');
+  if (!start) return [];
+  const out: WfNode[] = [];
+  const seen = new Set<string>();
+  const stack = [start];
+  while (stack.length && out.length < 16) {
+    const n = stack.pop()!;
+    if (seen.has(n.id)) continue;
+    seen.add(n.id);
+    if (n.type === 'agent' && (n.config?.scope ?? 'task') === 'task') { out.push(n); continue; }
+    if (n.type === 'human' || n.type === 'end' || n.type === 'merge') { out.push(n); continue; }
+    // start / condition / run-scope agent: walk its outgoing edges
+    const { take, elseEdge } = wfMatchingEdges(g, n.id, ctx);
+    for (const e of [...take, ...(elseEdge && !take.length ? [elseEdge] : [])]) {
+      const t = wfNode(g, e.to);
+      if (t) stack.push(t);
+    }
+  }
+  return out;
+}
+
+// A ready task enters the graph — or resumes where it left off (retry, parked
+// writer, human gate). Exported for assignSweep and tests.
+export function graphTaskEntry(r: Run, task: Task): void {
+  const g = graphFor(r);
+  if (!g) return;
+  const s = wfState(task);
+  if (s.awaiting) return;                                    // human/reply gates resume elsewhere
+  if (s.held) {                                              // parked writer: retry the tree
+    const node = wfNode(g.graph, s.held);
+    if (node) { s.held = undefined; saveWfState(task, s); dispatchAgentNode(r, getTask(task.id)!, node, null); }
+    return;
+  }
+  if (s.deadEndNode) {                                       // owner approved a retry of the stalled step
+    const node = wfNode(g.graph, s.deadEndNode);
+    s.deadEndNode = undefined;
+    saveWfState(task, s);
+    if (node) { dispatchAgentNode(r, getTask(task.id)!, node, null); return; }
+  }
+  if (s.nodes.length) {                                      // resume in-flight nodes (retry path)
+    for (const id of [...s.nodes]) {
+      const node = wfNode(g.graph, id);
+      if (node) dispatchAgentNode(r, getTask(task.id)!, node, null);
+    }
+    return;
+  }
+  const entries = wfEntryNodes(g.graph, { outcome: s.lastOutcome ?? { status: 'success' }, task });
+  if (!entries.length) {
+    emit('workflow.deadend', 'engine', { taskId: task.id, reason: 'no task-scope entry node after start' }, r.id, task.id);
+    setTaskStatus(task.id, 'blocked', 'engine', { reason: 'workflow has no entry for tasks' });
+    return;
+  }
+  emit('workflow.enter', 'engine', { taskId: task.id, nodes: entries.map((n) => n.id) }, r.id, task.id);
+  const fresh = getTask(task.id)!;
+  for (const n of entries) graphEnter(r, fresh, n, null);
+}
+
+// verifyDeliveredTask hands its check outcomes here for graph runs: engine
+// checks still decide pass/fail; the graph decides who runs next.
+async function graphChecksDone(wi: WorkItem, task: Task, results: { cr: ReturnType<typeof rowToCheckRun>; check: Check }[], files: string[]): Promise<void> {
+  const r = getRun(wi.runId)!;
+  const node = wfNode(graphFor(r)!.graph, wi.workflowNodeId);
+  const failed = results.filter((x) => x.cr.status === 'fail' || x.cr.status === 'error');
+  if (!failed.length) {
+    const passCr = results.find((x) => x.cr.status === 'pass')?.cr;
+    for (const er of q(`SELECT id FROM error_reports WHERE task_id = ? AND status IN ('open','assigned','fixing','verifying','reopened')`, task.id)) {
+      resolveError(er.id as string, null, passCr?.id ?? '', `Checks passed (${results.map((x) => `${x.check.name} ${x.cr.status}`).join(', ')})`, r.workspaceId);
+    }
+    const report = `Checks passed: ${results.map((x) => `${x.check.name} ${x.cr.status}`).join(', ') || 'no checks ran'}`;
+    graphAdvanceFrom(r, task, node, { status: 'success', checksPassed: true, files, report }, wi.agentId);
+    return;
+  }
+  const first = failed[0];
+  const { report } = fileErrorReport({
+    runId: r.id, cycleN: r.currentCycle, task, workItemId: wi.id,
+    checkRun: first.cr, checkName: first.check.name, checkCommand: first.check.command,
+    affectedFiles: files, workspaceId: r.workspaceId,
+  });
+  updateReportHistory(report.id, wi.id, first.cr.id, 'still-failing');
+  const reportText = `Checks failed: ${failed.map((x) => `${x.check.name} ${x.cr.status} — ${x.cr.summary}`).join('; ')}`;
+  graphAdvanceFrom(r, task, node, { status: 'failure', checksPassed: false, checkRunId: first.cr.id, checkName: first.check.name, files, report: reportText }, wi.agentId);
+}
+
+// Delivery routing for graph-dispatched work: parse per kind (same shapes as
+// the fixed pipeline), keep the useful side-effects, then let the graph's
+// edges decide the next step.
+async function graphDelivered(wi: WorkItem, result: NonNullable<WorkItem['result']>, usedAgentId: string, r: Run, task: Task): Promise<void> {
+  const g = graphFor(r)!;
+  const node = wfNode(g.graph, wi.workflowNodeId) ?? wfNode(g.graph, wfState(task).nodes[0]);
+  const raw = (result.raw ?? {}) as Record<string, any>;
+  const j = (raw.json ?? raw) as Record<string, any>;
+
+  switch (wi.kind) {
+    case 'implement': case 'fix': case 'test': case 'doc': case 'custom': {
+      await verifyDeliveredTask(wi, task, result);
+      return;
+    }
+    case 'qa': {
+      const findings = Array.isArray(j.findings) ? j.findings : [];
+      const failed = j.decision === 'fail';
+      const report = [`QA ${failed ? 'FAILED' : 'PASSED'}: ${[j.summary ?? result.summary, ...findings.map((f: any) => `- [${f.severity ?? '?'}/${f.kind ?? '?'}] ${f.message ?? ''}`)].join('\n')}`,
+        ...(Array.isArray(j.criteria) ? j.criteria.map((c: any) => `- criterion ${c.met ? 'met' : 'NOT met'}: ${c.criterion ?? ''}`) : [])].join('\n');
+      run('UPDATE tasks SET reviewer_agent_id = ? WHERE id = ?', usedAgentId, task.id);
+      emit('qa.decided', getAgent(usedAgentId)?.name ?? 'qa', { taskId: task.id, decision: failed ? 'fail' : 'pass', findings: findings.length }, r.id, task.id);
+      if (failed) setTaskMeta(task.id, 'qaFails', Number(task.meta?.qaFails ?? 0) + 1);
+      graphAdvanceFrom(r, task, node, { status: failed ? 'failure' : 'success', verdict: failed ? 'fail' : 'pass', report }, wi.agentId);
+      return;
+    }
+    case 'review': {
+      const decision = j.decision === 'request-changes' ? 'request-changes' : 'approve';
+      run('UPDATE tasks SET reviewer_agent_id = ? WHERE id = ?', usedAgentId, task.id);
+      emit('review.decided', getAgent(usedAgentId)?.name ?? 'reviewer', { taskId: task.id, decision, notes: j.notes }, r.id, task.id);
+      if (task.ownerAgentId) {
+        postMessage({ runId: r.id, taskId: task.id, workItemId: wi.id, from: usedAgentId, to: task.ownerAgentId, kind: 'handoff',
+          text: decision === 'approve' ? `Approved "${task.title}". ${j.notes ?? ''}`.trim() : `Changes requested on "${task.title}": ${j.notes ?? 'see review notes'}` });
+      }
+      if (decision !== 'approve' && j.notes) recordReviewerFlag({ workspaceId: r.workspaceId, repoId: r.repoId, flag: j.notes, files: task.affectedPaths });
+      graphAdvanceFrom(r, task, node, { status: 'success', verdict: decision === 'approve' ? 'approve' : 'reject', report: `REVIEW ${decision === 'approve' ? 'PASSED' : 'FAILED'}: ${j.notes ?? ''}`, output: j }, wi.agentId);
+      return;
+    }
+    case 'accept': {
+      const accepted = j.decision === 'accept';
+      if (accepted && j.commit?.title) setTaskMeta(task.id, 'commitProposal', { title: String(j.commit.title), body: String(j.commit.body ?? '') });
+      emit('accept.decided', getAgent(usedAgentId)?.name ?? 'pm', { taskId: task.id, decision: accepted ? 'accept' : 'rework', notes: j.notes ?? null }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, { status: 'success', verdict: accepted ? 'approve' : 'reject', report: j.notes ?? '', output: j }, wi.agentId);
+      return;
+    }
+    case 'prompt': {
+      const draft = [j.brief, j.prompt, raw.text].find((x) => typeof x === 'string' && x.trim()) as string | undefined ?? '';
+      const s = wfState(task);
+      s.draft = { text: draft, approved: false, revision: (s.draft?.revision ?? 0) + 1 };
+      saveWfState(task, s);
+      emit('prompt.drafted', getAgent(usedAgentId)?.name ?? 'prompt', { taskId: task.id, nodeId: node?.id, revision: s.draft.revision }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, { status: 'success', output: j }, wi.agentId);
+      return;
+    }
+    case 'prompt-review': {
+      const approved = j.decision === 'approve';
+      const s = wfState(task);
+      if (approved && s.draft) { s.draft.approved = true; saveWfState(task, s); }
+      emit('prompt.reviewed', getAgent(usedAgentId)?.name ?? 'pm', { taskId: task.id, decision: approved ? 'approve' : 'revise', notes: j.notes ?? null }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, { status: 'success', verdict: approved ? 'approve' : 'reject', output: j }, wi.agentId);
+      return;
+    }
+    case 'analyse': {
+      const pending = pendingAnalysis.get(wi.id);
+      pendingAnalysis.delete(wi.id);
+      if (pending) {
+        const cr = q1('SELECT * FROM check_runs WHERE id = ?', pending.checkRunId);
+        if (cr) {
+          fileErrorReport({
+            runId: r.id, cycleN: r.currentCycle, task, workItemId: wi.id,
+            checkRun: { id: cr.id as string, checkId: cr.check_id as string, workItemId: cr.work_item_id as string | null, taskId: cr.task_id as string | null, runId: r.id, commitSha: cr.commit_sha as string | null, ref: cr.ref as string, status: cr.status as never, durationMs: cr.duration_ms as number, evidenceRefs: parseJson(cr.evidence_refs as string, []), summary: cr.summary as string, failures: parseJson(cr.failures as string, []), createdAt: cr.created_at as string },
+            checkName: pending.checkName, checkCommand: (q1('SELECT command FROM checks WHERE id = ?', cr.check_id)?.command as string) ?? '',
+            affectedFiles: pending.files, workspaceId: r.workspaceId,
+            analyst: { title: j.title, suspectedCause: j.suspectedCause, steps: j.steps, suggestedFix: j.suggestedFix },
+          });
+        }
+      }
+      emit('task.analysed', getAgent(usedAgentId)?.name ?? 'analyst', { taskId: task.id }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, { status: 'success', output: j }, wi.agentId);
+      return;
+    }
+    case 'diagnose': {
+      // the strategy answer is advisory under a graph — the edges decide what
+      // runs next; the diagnosis still lands on the task record
+      emit('task.diagnosed', getAgent(usedAgentId)?.name ?? 'pm', { taskId: task.id, diagnosis: j.diagnosis ?? null, strategy: j.strategy ?? 'graph' }, r.id, task.id);
+      graphAdvanceFrom(r, task, node, { status: 'success', output: j }, wi.agentId);
+      return;
+    }
+    default: {
+      graphAdvanceFrom(r, task, node, { status: 'success', output: j }, wi.agentId);
+      return;
+    }
+  }
+}
+
+// Resume a task parked at a human gate or a spent loop after the owner
+// decides. Called from the approval.decided wiring.
+function graphResume(r: Run, task: Task, approved: boolean, approval?: { action: string; payload: Record<string, unknown> }): void {
+  const s = wfState(task);
+  const awaiting = s.awaiting;
+  s.awaiting = undefined;
+  // loop approval: approving allows one more pass on that edge — replay the
+  // outcome that exhausted it so the same edge matches again
+  if (approval?.action === 'workflow.loop') {
+    if (!approved) {          // owner declined the extra pass — the loop stops
+      emit('workflow.loop', 'engine', { taskId: task.id, edgeId: approval.payload?.edgeId, exhausted: true, stopped: 'owner' }, r.id, task.id);
+      setTaskStatus(task.id, 'blocked', 'owner', { reason: 'loop limit declined by owner' });
+      return;
+    }
+    const edgeId = approval.payload?.edgeId as string | undefined;
+    if (edgeId) s.loops[edgeId] = Math.max(0, (s.loops[edgeId] ?? 0) - 1);
+    saveWfState(task, s);
+    const node = wfNode(graphFor(r)!.graph, awaiting?.nodeId ?? '');
+    setTaskStatus(task.id, 'assigned', 'owner', { reason: 'loop bound extended' });
+    graphAdvanceFrom(r, task, node, s.lastOutcome ?? { status: 'success' }, null);
+    return;
+  }
+  saveWfState(task, s);
+  const node = awaiting ? wfNode(graphFor(r)!.graph, awaiting.nodeId) : null;
+  setTaskStatus(task.id, 'assigned', 'owner', { reason: approved ? 'gate approved' : 'gate rejected' });
+  graphAdvanceFrom(r, task, node, { status: approved ? 'success' : 'reject', verdict: approved ? 'approve' : 'reject' }, null);
 }
 
 export function wireEngineEvents(): void {
@@ -2509,6 +3197,17 @@ export function wireEngineEvents(): void {
       if (!job) { setTaskStatus(taskId, 'ready', 'owner', { reason: 'prompt re-prepared after restart' }); void maybeAdvanceRun(task.runId); return; }
       if (e.payload.approved) dispatchApprovedPrompt(job);
       else { setTaskStatus(taskId, 'assigned', 'owner'); startPromptDraft({ ...job, revision: 0, notes: `Owner: ${reason}` }); }
+      return;
+    }
+    // workflow gates: human nodes, exhausted loops, dead ends
+    if (['workflow.human', 'workflow.loop', 'workflow.deadend'].includes(decided.action as string) && decided.task_id) {
+      const task = getTask(decided.task_id as string);
+      const rr = task ? getRun(task.runId) : null;
+      if (!task || !rr || !graphFor(rr)) return;
+      const s = wfState(task);
+      if (s.awaiting) { graphResume(rr, task, !!e.payload.approved, { action: decided.action as string, payload: parseJson(decided.payload as string, {}) }); void maybeAdvanceRun(rr.id); return; }
+      if (s.deadEndNode && e.payload.approved) { setTaskStatus(task.id, 'ready', 'owner', { reason: 'dead-end retry approved' }); void maybeAdvanceRun(rr.id); return; }
+      if (e.payload.approved && task.status === 'blocked') { setTaskStatus(task.id, 'ready', 'owner'); void maybeAdvanceRun(rr.id); }
       return;
     }
   });
