@@ -2,268 +2,231 @@
 
 # Oficina
 
-**A local-first AI agent router — a deterministic workflow engine runs the build loop, AI agents do the work inside it.**
+**A team of AI helpers that builds software for you, on your own computer.**
 
-![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5%2022.5-339933?logo=node.js&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
-![SQLite](https://img.shields.io/badge/SQLite-node%3Asqlite-003B57?logo=sqlite&logoColor=white)
+You say what you want. They plan it, build it, and test it.
+You stay the boss.
 
-<img src="docs/screenshots/dashboard.png" alt="Oficina dashboard showing a finished run with its Definition of Done, spend and agent roster" width="900">
+<img src="docs/screenshots/dashboard.png" alt="The dashboard after a finished job, with every goal checked off" width="900">
 
 </div>
 
-> Screenshots in this README were captured from a real local instance running the bundled **scripted demo agents** (no model calls, no cost), so the activity and task data come from the demo run rather than a production workload.
+## What is this?
 
----
+Think of a small office. Each worker is an AI. One makes the plan. One writes the code. One tests it. One checks the work.
 
-## Overview
+You tell the office what you want. They do the job. Nothing is kept until you say yes.
 
-Most agent tools let a model decide what happens next. Oficina inverts that: **the engine owns the loop, the agents own the judgement.** A goal is turned into a *Definition of Done* — a checklist of machine-checkable criteria — and the engine repeats plan → assign → build → verify → review → merge until every check passes or a limit stops it. Git and a local verification runner are the ground truth; "done" is measured, never self-reported by a model.
-
-Because the engine is deterministic and event-sourced, every agent — including the PM — is replaceable, runs are replayable, and loops are bounded instead of spinning forever.
-
-## Features
-
-| | |
-|---|---|
-| **Deterministic workflow engine** | A durable state machine drives the loop. Agents are called at defined decision points; loops are bounded (3 attempts, then you decide). |
-| **Definition of Done** | Acceptance criteria map to checks: commands that must `exit 0`, zero open high/critical error reports, reviews approved by a *different* agent, required README sections, and more. |
-| **Visual workflow editor** | Edit the pipeline as a graph (agent, condition, merge, human and end nodes; success/failure/reject/message edges). Validate, dry-run with no model calls, version, clone and activate it — or pick a workflow per request. |
-| **CLI session reuse** | A CLI agent (Claude Code, cursor-agent, Devin) keeps using the same CLI session from task to task instead of opening a new one for every task. Per agent you choose: reuse its session, a new one each time, or one pinned session; what to do when it is busy (start an additional session or wait); and when to rotate. A manager lists every session, lets you assign them to agents, create more and import existing ones. |
-| **Quick requests & queue** | Click the tray icon, type a prompt and pick the office: it joins that office's queue, which the whole app sees (the Dashboard lists it, Requests shows a badge). Start a queued request by hand, or let an office start them itself when it's idle (opt-in, one at a time). |
-| **Reference files & attachments** | Specs, design guidelines and coding standards (Markdown and more) are filed in your repository's `documents/` folder by audience (`all-agents/`, `pm/`, `dev/`, …); the PM can point a task at one. Drop screenshots, scripts and documents onto a task or into Ready, or use **+** on Live activity (files, paste a screenshot, or write a note). Agents get a short list and open only what applies; nothing running restarts. |
-| **Tasks board** | Put tasks **on hold** (kept, never picked up), delete them, drag between On hold and Ready; In progress / In review / Done / Failed are set by the workflow, never by hand. New tasks take work items with instructions and files. |
-| **Request intake** | The Request node of a workflow can name any agent to analyse a request before the run starts. On **New run** you describe what you need and attach files; that agent — in a CLI session of its own — turns it into features, technologies, issues to fix, references and constraints, and lists what is unclear. You tick what is right (kept items never change), remove or reword items, add your own, answer its questions and ask for another pass that touches only the open items. Approve to start the run with the reviewed breakdown. |
-| **Human approval** | A workflow node where an agent launches your app on the right screen and writes a report (changes, tests, issues, logs) that the engine double-checks, then you approve or reject with feedback; rejections go to the agents to investigate and fix, then back for another review. Every decision is recorded. |
-| **Multiple offices** | Each office is its own set of agents, desks and workflows. Create one blank or by copying another, switch from the sidebar, and every page follows the choice. Export or import a whole office, or a single workflow, as portable JSON. |
-| **Smart model routing** | Per work item, picks the cheapest model option strong enough for the job — plan-billed CLI logins first, then lowest metered price — with circuit breakers, quota windows, budgets and failover. |
-| **Bring your own backend** | Claude Code, cursor-agent and Devin CLIs (their own logins), Devin's cloud API, OpenAI-compatible APIs (OpenAI, Ollama, LM Studio), the Anthropic API, or a scripted demo agent. |
-| **Works in your repository** | Agents edit your checked-out branch like a coding CLI. Your uncommitted changes are preserved; the office never runs `reset`, `checkout`, `clean` or force-push. |
-| **Checkpoints, undo & redo** | Task- and agent-level checkpoints stored as git tree objects, proven readable when created. Undo/redo/restore work file by file after a dry run (edits you made nearby are merged, overlapping files are left alone, a failed write rolls back) — no model is called. |
-| **Live repository timeline** | Commits from every branch and every tool (agents, VS Code, a terminal) appear within seconds, with branch switches, rewrites, checkpoints, task results and your approvals, plus a live view of HEAD, ahead/behind and uncommitted files. |
-| **Typed hand-offs** | Agents pass structured envelopes (summary, files changed, checks run, open questions, blockers) instead of whole outputs; decision roles answer in validated JSON with one repair retry. |
-| **Separation of duties** | An author can't review their own work, and the UI shows which permissions change before you move an agent between roles. |
-| **Observable & replayable** | Live per-agent activity parsed locally from CLI output, plus a hash-chained event log you can scrub through to replay a run's task board. |
-| **Human in the loop** | Approval modes (`always-ask`, `ask-when-risky`, `auto`), a "Needs you" inbox, spend and time ceilings that pause rather than kill, and tray notifications on Windows. |
-
-## Screenshots
-
-### Workflow editor
-Build or clone a pipeline as a graph; the palette on the left lists only the open office's agents, colored by role to match the nodes it creates. Export saves a flow as a file any office can import. While a run of the open workflow is ongoing, node rings and taken edges show its progress live; finished runs are replayed under Run replay, so an idle workflow shows as a plain graph.
-
-<img src="docs/screenshots/workflow.png" alt="Workflow editor showing a custom graph with a condition branch, loops and a message edge, with node states from a finished run" width="900">
-
-### Routing
-The flow is derived from the saved active workflow and reads top to bottom: numbered steps colored by role, branch lanes with their conditions, and loop, send-back and message links on each step. Per-node model tier and budget overrides sit below it.
-
-<img src="docs/screenshots/routing.png" alt="Routing page showing the active workflow as a numbered vertical flow with a two-lane branch, followed by per-agent model options" width="900">
-
-### Live activity
-What each agent's CLI reports — prompts, messages, checks and hand-offs — with no extra model calls.
-
-<img src="docs/screenshots/activity.png" alt="Live activity feed showing review, acceptance and verification check results" width="900">
-
-### Timeline & replay
-Every event in the run's hash-chained log, by actor lane. Scrub or play the playhead to see the task board as it was at any point; replay never re-executes anything.
-
-<img src="docs/screenshots/timeline.png" alt="Timeline and replay page with event lanes and an event table" width="900">
-
-### Tasks
-The run's tasks by state, with an overall progress bar.
-
-<img src="docs/screenshots/tasks.png" alt="Tasks board with a progress bar and columns for ready, in progress, in review, done and failed" width="900">
-
-### Offices
-Create, copy, rename, export and import offices; the sidebar switcher scopes the rest of the app to one. Only that office's agents are on its desks, and agents from other offices can be dragged in. Dragging an agent to a desk shows the permission change before anything happens.
-
-<img src="docs/screenshots/office.png" alt="Office page showing roles as desks with agents assigned to them" width="900">
-
-### Creating an office
-The New office dialog explains what an office is, offers a blank start or a copy of an existing office, and spells out what happens next. A duplicate name is flagged as you type.
-
-<img src="docs/screenshots/new-office.png" alt="New office dialog with a name field, a blank-or-copy choice and a what-happens-next list" width="900">
-
-A new office shows a setup checklist until it has its core agents: add agents, fill the PM, developer and reviewer/QA desks, optionally choose a workflow, then send a first request.
-
-<img src="docs/screenshots/office-setup.png" alt="Offices page for an empty office showing a four-step setup checklist above its empty desks" width="900">
-
-### Quick requests from the tray
-Left-click the tray icon, write a prompt, choose the office, and press Ctrl+Enter. It is added to that office's queue; nothing runs until you start it, unless the office has auto-start on. The popup keeps an unsent draft and remembers the last office you used.
-
-<img src="docs/screenshots/tray-quick-request.png" alt="Quick request popup from the system tray with an office picker and a prompt" width="480">
-
-Right-click gives a themed menu that follows the Windows light/dark setting and shows the daemon status and how many requests are queued.
-
-<img src="docs/screenshots/tray-menu.png" alt="System tray right-click menu with status, new request, open, queue and quit" width="280">
-
-**Appearance** in that menu switches the tray between *Match Windows* (default), *Light* and *Dark*. The choice is remembered and applies to both the menu and the popup.
-
-<img src="docs/screenshots/tray-appearance.png" alt="Tray menu with the Appearance submenu open showing Match Windows, Light and Dark" width="460">
-
-The queue appears on the Dashboard. **Start…** opens the New request form with the queued text (so you still pick the repository, budget and workflow); the checkbox lets the office start the next one automatically when it has no run in progress.
-
-<img src="docs/screenshots/queue.png" alt="Dashboard queue panel listing three queued requests with Start and remove buttons and an auto-start checkbox" width="900">
-
-### CLI sessions and the model tier
-Each CLI agent can keep using its own CLI session across tasks, so it remembers earlier work and you don't collect a new session per task. The agent's settings drawer chooses how (reuse, new each time, or pinned), what to do when the session is busy, and when to retire a long one; the **CLI sessions** list on the Agents page assigns sessions to agents and creates or imports more.
-
-<img src="docs/screenshots/cli-session-settings.png" alt="Agent settings drawer showing the model tier choice and the CLI session options" width="560">
-
-<img src="docs/screenshots/cli-sessions.png" alt="CLI sessions list with sessions assigned to agents, usage counts and an in-use state" width="900">
-
-The model tier can be forced per workflow step and per agent. All four choices are visible at once instead of hiding in a dropdown.
-
-<img src="docs/screenshots/tier-override.png" alt="Routing page with the model tier choice (Auto, Fast, Standard, Strong) for a step and for an agent" width="900">
-
-### Dropdowns
-Selects are a styled, keyboard-accessible dropdown that opens over modals and panels instead of the browser's native list.
-
-<img src="docs/screenshots/dropdown.png" alt="Hire agent dialog with the observability dropdown open" width="900">
+A worker is called an **agent**. A group of agents is a **team**. Each team has its own **office**.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    R([Request]) --> PM1[PM<br/>tasks + criteria]
-    PM1 --> PC[Prompt Creator<br/>drafts prompt]
-    PC --> PM2[PM<br/>reviews prompt]
-    PM2 --> DEV[Developer<br/>edits the repo]
-    DEV --> CHK{{Local checks<br/>build / tests}}
-    CHK -- pass --> QA[QA / Reviewer<br/>checks vs approved prompt]
-    CHK -- fail --> FIX[Correction prompt]
-    QA -- findings --> FIX
-    FIX --> DEV
-    QA -- ok --> PM3[PM<br/>accepts]
-    PM3 --> C([Commit])
-```
+1. **You ask.** Type what you want. For example: "Add a dark mode button."
+2. **They plan.** The planner breaks your idea into small jobs.
+3. **They build.** The coder changes the files in your project.
+4. **They check.** Your project's own tests run. Then a tester looks it over.
+5. **You decide.** You say yes or no before anything is saved. You can always undo.
 
-| Step | Role | Does | Never |
-|---|---|---|---|
-| 1 | `pm` | turns the request into tasks and acceptance criteria | write, review or test code |
-| 2 | `prompt-creator` | drafts the implementation-ready prompt | — |
-| 3 | `pm` | reviews the draft — approves it or sends it back | — |
-| 4 | `developer` | edits the repository, self-checks, writes change notes | — |
-| 5 | `qa` / `reviewer` | checks the work against the approved prompt, criteria and tests | edit code |
-| 6 | `pm` | accepts (→ commit per policy) or reworks via a correction prompt | read code |
+## Start in 3 minutes
 
-This is the default pipeline. The **Workflow** page can replace it with your own graph; with no custom workflow active, the flow above is unchanged. The PM runs only when a decision is needed, not continuously.
+First, install two free things: Node.js (version 22.5 or newer) and Git.
 
-**Design principles**
-
-- **Engine owns the loop.** If a provider fails, the engine fails over to another option or pauses only the affected work.
-- **Done is measured.** Check results come from a deterministic verification service, never a model's opinion.
-- **Git is the hand-off surface.** Commits contain only the task's own files, and your hooks, signing and identity apply.
-- **Local by default.** The daemon listens on `127.0.0.1`; state lives in a local SQLite database.
-
-The full design rationale is in [`spec/AI-Agent-Office-Spec.md`](spec/AI-Agent-Office-Spec.md), and the behaviour of each subsystem is documented in the [detailed guide](docs/guide.md).
-
-## Getting started
-
-### Prerequisites
-
-- **Node.js 22.5 or newer** — the daemon uses the built-in `node:sqlite` module (declared in `package.json` `engines`).
-- **npm** (workspaces are used; no other package manager is configured).
-- **Git** on your `PATH` — agents work in git repositories.
-- *Optional:* a coding-agent CLI (`claude`, `agent`/cursor-agent, `devin`), a Devin API key, an OpenAI-compatible endpoint such as [Ollama](https://ollama.com), or an Anthropic API key. The bundled scripted agents need none of these.
-
-> Developed and tested on Windows 11. The `.bat`/tray launchers are Windows-only; the npm scripts are plain Node, but other platforms have not been verified.
-
-### Install and run
+Then open a command window in this folder and type:
 
 ```bash
-git clone <this-repository-url>
-cd Oficina
-
 npm install
-npm run build -w ui     # builds the React UI into ui/dist
-npm run dev             # starts the daemon on http://localhost:4780
+npm run build -w ui
+npm start
 ```
 
-Open <http://localhost:4780>. On first start the daemon seeds a **Demo Office** workspace with five scripted agents (PM, Developer, Reviewer, Analyst, Docs) and creates a small demo git repository at `demo-repo/`.
+Open http://localhost:4780 in your browser. Click **New run**.
 
-### Try the demo run
+A demo team is ready to try. It uses pretend AI. You don't need an account and it costs nothing.
 
-1. On the Dashboard, start a **New run** with a goal.
-2. Approve the Definition of Done in the **Needs you** inbox.
-3. Watch the loop run — plan, assign, build, verify, review, merge — under **Live activity**, and replay it later under **Run replay**.
+On Windows, you can double-click `start-office.bat` instead. Or double-click `start-office-tray.bat` to put a small Oficina icon by your clock.
 
-### Windows launchers
+## A tour, one feature at a time
 
-- `start-office.bat` — starts the daemon in a console window and opens the UI (installs dependencies and builds the UI first if needed).
-- `start-office-tray.bat` — runs the daemon hidden with a system-tray icon. **Left-click** the icon to type a quick request into the queue; **right-click** for the menu (new request, open Oficina, queue, appearance, quit). Quit stops the daemon.
+### Ask for something
 
-### Configuration
+Type what you want. Press **Send to PM**. The planner takes it from there.
 
-| What | Where |
-|---|---|
-| Port, UI directory, providers | `daemon/office.yaml` (default port `4780`) |
-| Runtime data (SQLite DB, blobs, API keys) | `daemon/data/` — git-ignored. Override with the `OFFICE_DATA_DIR` environment variable |
-| Backends and API keys | **Providers** page in the UI. Keys are written to `daemon/data/secrets.json`, never to the repository |
+You can also add files, like a design or a list of rules. The agents will read them.
 
-### Connecting a real backend
+<img src="docs/screenshots/new-run.png" alt="The New run box with a request typed in" width="900">
 
-Open **Providers → Add backend**, then point an agent at it on the **Agents** page. Log in to a CLI first (`claude auth login`, `agent login`, `devin auth login`).
+### Save ideas for later
 
-| Backend | Kind | Notes |
-|---|---|---|
-| Claude Code / cursor-agent / Devin CLI | `cli` | No API key; uses each CLI's own login. Add backend detects installed CLIs and reads the model list from the CLI itself. |
-| Devin (cloud) | `devin` | Uses the REST API (`cog_…` key). Work comes back as a `devin/…` branch pushed to the repo's `origin`, so the repo needs a remote Devin can reach. |
-| OpenAI-compatible | `openai-compatible` | OpenAI, Ollama, LM Studio, … |
-| Anthropic API | `anthropic` | API key. |
+Not ready yet? Press **Queue for later**. Your idea waits in a list. Press **Start** when you want it done.
 
-Command presets, placeholders and per-CLI details are in the [detailed guide](docs/guide.md#adding-a-backend-providers-page).
+You can also type an idea from the small icon by your clock.
 
-## Project structure
+<img src="docs/screenshots/queue.png" alt="A waiting list of three ideas, each with a Start button" width="900">
 
-```text
-Oficina/
-├── daemon/                 TypeScript daemon (Express + WebSocket, SQLite)
-│   ├── src/engine/         fixed pipeline + workflow-graph executor, prompt builder
-│   ├── src/services/       router, workflow graphs, checkpoints, commits, verification, skills, usage…
-│   ├── src/adapters/       scripted, openai-compatible/anthropic (llm), cli, devin, manual
-│   ├── src/api/            REST + WebSocket server
-│   ├── tests/              node:test suites
-│   ├── scripts/            bench.mjs, demo-workflow.mjs
-│   └── office.yaml         port, UI dir, providers
-├── ui/                     React 18 + Vite + Tailwind + React Flow
-│   └── src/pages/          Dashboard, Workflow, Routing, Activity, Timeline, Tasks, …
-├── spec/                   technical spec and UI design notes
-├── docs/                   detailed guide and screenshots
-├── start-office.bat        Windows launcher
-└── start-office-tray.bat   Windows tray launcher (office-tray.ps1)
-```
+<img src="docs/screenshots/tray-quick-request.png" alt="The clock icon popup where you type a quick idea" width="420">
+<img src="docs/screenshots/tray-menu.png" alt="The menu you get when you right-click the clock icon" width="260">
 
-**Stack:** Node.js ≥ 22.5, TypeScript, Express, `ws`, `node:sqlite` (WAL), React 18, Vite, Tailwind CSS, React Flow.
+### It learns what your project is made of
 
-## Development
+Oficina looks at your files. It can tell if you have a website, a phone app, a game, a small device, or a server. Then it tells the agents what matters most.
+
+It also finds your tests and runs them after every change. Green means the test must pass. Yellow means the test was already broken, so Oficina won't blame the agents.
+
+<img src="docs/screenshots/project.png" alt="A project with an API, a dashboard and device code, and the tests found for each" width="900">
+
+### Watch the team work
+
+See who is working and who is waiting. Read what each agent says and does, as it happens. Changes to your files show up on the right.
+
+<img src="docs/screenshots/activity.png" alt="Live activity: working agents on the left, their steps in the middle" width="900">
+
+### You say yes or no
+
+Before a change is saved, you get to look at it. You see which files changed and what the note says. Press **Approve** or **Reject**. If you reject, tell the agent what to do differently.
+
+<img src="docs/screenshots/needs-you.png" alt="An approval panel showing the changed files and the note, with Reject and Approve buttons" width="900">
+
+### See every task
+
+Each job gets a card. The cards move across the board as the work goes on.
+
+<img src="docs/screenshots/tasks.png" alt="The task board with columns from On hold to Done" width="900">
+
+Click a card to see the details and the exact code that changed.
+
+<img src="docs/screenshots/task-detail.png" alt="One task, with its goals and the lines of code that changed" width="900">
+
+### Replay what happened
+
+Everything is written down. Slide back in time. Press play and watch the whole job again, step by step. Nothing runs twice.
+
+<img src="docs/screenshots/timeline.png" alt="A timeline with one row for each agent and a play button" width="900">
+
+### Undo anything
+
+Every change is saved as it happens. You can take back a whole job, or just one file. You can put it back again too.
+
+<img src="docs/screenshots/checkpoints.png" alt="A list of saved points with Undo and Redo buttons" width="900">
+
+This page shows everything that happens to your project. That includes changes by the AI and changes by you.
+
+<img src="docs/screenshots/repo-timeline.png" alt="A list of every change to the project, from the AI and from you" width="900">
+
+### Choose how the work flows
+
+There is a standard flow. Plan, write, build, test, check, done.
+
+<img src="docs/screenshots/workflow.png" alt="The standard flow drawn as boxes and arrows" width="900">
+
+You can draw your own. Add steps. Add choices, like "if it is a docs job, go this way." Add loops, like "if the test fails, try again." Add stops where you say yes or no.
+
+<img src="docs/screenshots/workflow-custom.png" alt="A custom flow that splits docs jobs and code jobs, with try-again loops" width="900">
+
+### Pick the right AI for each step
+
+Easy jobs go to a fast, cheap AI. Hard or risky jobs go to a smarter one. This page shows who does each step. You can pick the AI level for any step, or for any agent: Auto, Fast, Standard or Strong.
+
+<img src="docs/screenshots/routing.png" alt="The flow as a numbered list, with the agent for each step" width="900">
+
+<img src="docs/screenshots/tier-override.png" alt="Choices for how smart the AI should be: Auto, Fast, Standard, Strong" width="900">
+
+### Use any AI you like
+
+Claude Code, Cursor, Devin, OpenAI, Ollama, LM Studio or Anthropic. Each agent can use a different one.
+
+Add one on the Providers page. If you use Claude Code, Cursor or Devin, log in to that tool first. You don't need to paste in a key.
+
+<img src="docs/screenshots/providers.png" alt="The list of AI providers you can use" width="900">
+
+<img src="docs/screenshots/add-backend.png" alt="The form for adding a new AI provider" width="900">
+
+### Meet your agents
+
+Each agent has one job and its own AI. You can change the AI, set a spending limit, or send the agent a message.
+
+<img src="docs/screenshots/agents.png" alt="Cards for each agent with their job, AI and limits" width="900">
+
+<img src="docs/screenshots/agent-settings.png" alt="Agent settings: the AI to use, how smart it should be, and how it keeps its chat" width="900">
+
+### Agents remember
+
+Each agent keeps one chat going, so it does not forget your project from one job to the next. You can open the same chat in a command window and keep talking to it yourself.
+
+<img src="docs/screenshots/sessions.png" alt="A list of agent chats, with how many times each was used" width="900">
+
+### Agents talk to each other
+
+They pass notes, questions and warnings. You can read all of it. You can also send your own note to any agent.
+
+<img src="docs/screenshots/messages.png" alt="The team conversation, with notes passed between agents" width="900">
+
+### A running summary
+
+One page tells you the goal, the plan, who does what, how far along it is, and what was decided. It is written for you, and you can download it.
+
+<img src="docs/screenshots/project-record.png" alt="A summary page with the goals, the plan and the decisions" width="900">
+
+### Problems get written down
+
+When a test fails, Oficina makes a report. It shows how bad it is and whether it is fixed. It also remembers fixes from before.
+
+<img src="docs/screenshots/errors.png" alt="A list of reports about failed tests, marked resolved" width="900">
+
+### Teach agents your habits
+
+Write a short rule, like "keep changes small." Give it to every agent, or just one job. Agents follow it.
+
+<img src="docs/screenshots/skills.png" alt="Your rules for agents, listed by job" width="900">
+
+### One office for each project
+
+Each project gets its own office. Each office has its own team and its own flow. Drag agents between desks to change what they are allowed to do.
+
+<img src="docs/screenshots/office.png" alt="An office with agents sitting at their desks" width="900">
+
+Make a new office. Start empty, or copy a team you already have.
+
+<img src="docs/screenshots/new-office.png" alt="The new office form with Blank and Copy choices" width="900">
+
+A new office tells you what to do next.
+
+<img src="docs/screenshots/office-setup.png" alt="An empty office with a four-step to-do list" width="900">
+
+### Small extras
+
+Press Ctrl+K to jump to any page, task or agent.
+
+<img src="docs/screenshots/command-palette.png" alt="The search box that jumps to any page" width="900">
+
+There is a dark mode too.
+
+<img src="docs/screenshots/dark-mode.png" alt="Live activity in dark mode" width="900">
+
+## You stay in charge
+
+- Say yes or no to plans and saves.
+- Set limits on time and money.
+- Pause or stop at any time.
+- Undo any change.
+- Your data stays on your computer.
+
+## Want more?
+
+- [Full guide](docs/guide.md): every feature and setting.
+- [Design notes](spec/AI-Agent-Office-Spec.md): why it is built this way.
+
+<details>
+<summary><b>For developers</b></summary>
 
 ```bash
-npm run dev                    # daemon with auto-reload (tsx watch)
-npm run dev:ui                 # Vite dev server with HMR, proxying to :4780
-npm run typecheck -w daemon    # type-check the daemon
-npm test -w daemon             # run the test suite (node:test)
-npm run build -w ui            # type-check and build the UI
-npm run bench -w daemon        # scripted end-to-end scenario (no model calls)
-npm run demo:workflow -w daemon  # end-to-end run on a custom workflow graph
+npm run dev               # run with auto-reload
+npm run dev:ui            # UI with hot reload
+npm test -w daemon        # run the tests
+npm run bench -w daemon   # full demo run, no AI calls
 ```
 
-At the time of writing the daemon type-checks cleanly and the suite passes (168 tests).
+The code lives in two folders: `daemon/` (the engine) and `ui/` (the web page). Your data stays on your computer, in `daemon/data/`.
 
-## Status and limitations
+</details>
 
-Working end to end with the scripted agents: run lifecycle, deterministic checks, error reports with signature dedupe, separation of duties, merge handling, pause/stop, usage and quota windows, circuit breakers, and the hash-chained event log.
-
-Known limits, stated plainly:
-
-- The risk and failure classifiers are **pattern-based**; unusual provider error text degrades to bounded transient retries, and a novel risky change shape could pass `auto` approval.
-- The scope guard is advisory — the PM decides whether extra files belong.
-- Benchmarks use scripted agents, so real-provider latency will dominate in practice.
-- **Partial / scaffolded:** sandboxed verification, hosted-agent adapters, embeddings and code intelligence, and a Tauri shell (the browser UI is used instead).
-- Workflow conditions are deterministic field/operator checks, not free-form code.
-
-## Documentation
-
-- [Detailed guide](docs/guide.md) — workflow editor, routing, checkpoints, commits, skills, reliability
-- [Technical specification](spec/AI-Agent-Office-Spec.md)
-- [UI design notes](spec/DESIGN-figma.md)
+<sub>The screenshots use the demo team, so no real AI was used.</sub>
