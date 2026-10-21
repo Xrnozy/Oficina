@@ -8,7 +8,7 @@ import type { AdapterCtx } from '../adapters/types.ts';
 import type { WorkItemResult } from '../types.ts';
 import { recordUsage, circuitFailure, circuitSuccess, markRateLimited, upsertWindowsFromHeaders } from './usage.ts';
 import { modelSettings } from './models.ts';
-import { EFFORT_FOR_TIER, estimateWorkItemCost, requiredTier, routeChain } from './routing.ts';
+import { EFFORT_FOR_TIER, estimateWorkItemCost, riskFloor, routeChain, tierWithFloor } from './routing.ts';
 import { run } from '../db.ts';
 
 // Router (spec 8.4): picks an eligible agent for each work item under
@@ -297,11 +297,15 @@ export async function dispatchThroughAdapter(
   const agentTier = modelSettings(candidate.agent.settings).tierOverride ?? undefined;
   const forcedTier = node?.requiredTier ?? agentTier;
   const tierSource: 'node' | 'agent' = node?.requiredTier ? 'node' : 'agent';
-  const required = forcedTier ?? requiredTier(wi.kind, baseCtx.task?.difficulty ?? 3);
+  // risky work (security, concurrency/hardware, migrations, a failure that survived a fix) never goes to the lightest tier
+  const t = baseCtx.task;
+  const priorFixes = t ? ((q1(`SELECT COUNT(*) c FROM work_items WHERE task_id = ? AND kind = 'fix' AND id != ?`, t.id, wi.id)?.c as number) ?? 0) : 0;
+  const floor = t ? riskFloor(wi.kind, `${t.title}\n${t.description}\n${t.acceptanceCriteria.join('\n')}`, priorFixes) : null;
+  const required = forcedTier ?? tierWithFloor(wi.kind, t?.difficulty ?? 3, floor);
   if (routingStrategy(workspaceId) === 'smart') {
-    const d = routeChain(ownChain, wi.kind, baseCtx.task?.difficulty ?? 3, forcedTier, tierSource);
+    const d = routeChain(ownChain, wi.kind, t?.difficulty ?? 3, forcedTier, tierSource, floor);
     ownChain = d.ordered;
-    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, tierSource: forcedTier ? tierSource : 'auto', options: ownChain.length, ...(node ? { nodeId: node.id, node: node.label } : {}) }, wi.runId, wi.id);
+    emit('model.routed', 'router', { agent: candidate.agent.name, kind: wi.kind, required: d.required, chosen: ownChain[0] ? backendLabel(ownChain[0]) : null, reason: d.reason, tierSource: forcedTier ? tierSource : 'auto', options: ownChain.length, ...(floor && !forcedTier ? { floor: floor.why } : {}), ...(node ? { nodeId: node.id, node: node.label } : {}) }, wi.runId, wi.id);
   }
   const others = fallbacks.filter((f) => f.agent.id !== candidate.agent.id && !f.blocked);
   const chain = [...ownChain, ...others];
@@ -319,7 +323,8 @@ export async function dispatchThroughAdapter(
   };
   // a stopped run (or a cancelled item) must not go on to the next backend: the owner's Stop already killed the process,
   // and a fallback started afterwards would be a fresh agent writing files for work nobody wants any more
-  const cancelled = () => q1('SELECT status FROM work_items WHERE id = ?', wi.id)?.status === 'cancelled' || q1('SELECT status FROM runs WHERE id = ?', wi.runId)?.status === 'stopped';
+  // (interrupted: the stuck detector stopped this item and already re-queued its task)
+  const cancelled = () => ['cancelled', 'interrupted'].includes(q1('SELECT status FROM work_items WHERE id = ?', wi.id)?.status as string) || q1('SELECT status FROM runs WHERE id = ?', wi.runId)?.status === 'stopped';
   for (const c of chain) {
     if (cancelled()) throw new Error('cancelled: the run was stopped');
     const provider = c.provider;
@@ -372,6 +377,8 @@ export async function dispatchThroughAdapter(
       return { result, usedAgent: c.agent, usedBackend: label };
     } catch (e: any) {
       lastErr = e;
+      // killed on purpose (stop, abort, stuck): not the backend's fault — no circuit-breaker strike, no fallback
+      if (cancelled()) throw e;
       const headers = (e as { headers?: Record<string, string> }).headers;
       if (c.account && headers) upsertWindowsFromHeaders(c.account.id, c.model?.id ?? null, headers);
       const limitSec = e?.kind === 'rate-limit' || rateLimitRetryAfterSec(String(e?.message ?? '')) != null

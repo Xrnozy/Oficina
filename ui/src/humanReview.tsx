@@ -70,14 +70,14 @@ export function HumanReview({ approval, onChanged }: { approval: any; onChanged?
               )}
               {r.url && (
                 <>
-                  <a className="btn btn-xs" href={r.url} target="_blank" rel="noreferrer"><ExternalLink size={11} /> Open</a>
+                  <a className="btn btn-xs" href={r.reviewUrl ?? r.url} target="_blank" rel="noreferrer"><ExternalLink size={11} /> Open</a>
                 </>
               )}
             </li>
           ))}
           {!(p.routes ?? []).length && <li className="text-xs text-fg-4">No screens were proposed.</li>}
         </ul>
-        {pending && app?.url && running && <button className="btn btn-sm mt-2" disabled={busy} onClick={() => control('open', p.routes?.[0]?.url)}><Play size={12} /> Open the first screen in my browser</button>}
+        {pending && app?.url && running && <button className="btn btn-sm mt-2" disabled={busy} onClick={() => control('open', p.routes?.[0]?.reviewUrl ?? p.routes?.[0]?.url)}><Play size={12} /> Open the app with the review panel</button>}
       </div>
 
       {(rep.howToTest ?? []).length > 0 && (

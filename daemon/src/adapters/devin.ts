@@ -193,12 +193,17 @@ export const devinAdapter: Adapter = {
     const v3 = session.apiVersion === 3;
     for (;;) {
       await sleep(pollMs);
+      // stopped, aborted or taken over by the stuck detector meanwhile: stop polling (the session keeps its own record)
+      const mine = q1('SELECT status FROM work_items WHERE id = ?', ctx.workItem.id)?.status as string | undefined;
+      if (mine && mine !== 'running') throw new Error(`cancelled: the work item is ${mine}`);
       info = await fetchDevinSession(base, apiKey, session);
       const status = devinStatusLine(info, v3);
+      // every successful poll proves the session is alive — beating only on a status change let a long, steady
+      // "working" stretch look like a dead agent to the stuck detector
+      ctx.emit('agent.heartbeat', { session: session.session_id, status });
       if (status !== lastStatus) {
         lastStatus = status;
         ctx.emit('agent.output', { line: `[devin] ${status}` });
-        ctx.emit('agent.heartbeat', { session: session.session_id, status });
         if (devinSessionBlocked(info, v3)) ctx.emit('agent.output', { line: '[devin] waiting on input — message this agent from Live activity to unblock it' });
       }
       if (devinSessionDone(info, v3)) break;

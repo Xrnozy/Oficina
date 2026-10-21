@@ -28,8 +28,20 @@ function relinkSkills(): void {
   try { relinkSkillContent(); } catch { /* not fatal */ }
 }
 
+// One workflow node, one persistent session: agents saved with the earlier defaults (an additional session when busy,
+// a new one after 30 tasks — the agent form stored them even when nobody chose them) get the new ones once. A value the
+// owner sets afterwards is kept: the flag makes this run a single time.
+function sessionDefaultsOnce(): void {
+  run('CREATE TABLE IF NOT EXISTS app_flags (name TEXT PRIMARY KEY, at TEXT)');
+  if (q1(`SELECT 1 FROM app_flags WHERE name = 'cli-session-node-defaults'`)) return;
+  run(`UPDATE agents SET settings = json_set(settings, '$.cliSession.whenBusy', 'wait', '$.cliSession.rotateAfter', 0)
+       WHERE json_valid(settings) AND json_extract(settings, '$.cliSession.whenBusy') = 'new' AND json_extract(settings, '$.cliSession.rotateAfter') = 30`);
+  run(`INSERT INTO app_flags (name, at) VALUES ('cli-session-node-defaults', ?)`, now());
+}
+
 export function migrate(): void {
   relinkSkills();
+  sessionDefaultsOnce();
   const qa = q1('SELECT * FROM roles WHERE id = ?', QA_ROLE.id);
   if (qa && OLD_QA_INSTRUCTIONS.includes(qa.default_instructions as string)) {
     run('UPDATE roles SET responsibilities = ?, allowed_actions = ?, default_instructions = ?, version = version + 1 WHERE id = ?',

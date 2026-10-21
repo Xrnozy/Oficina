@@ -12,6 +12,12 @@ ensureDir(path.join(DATA_DIR, 'blobs'));
 const db = new DatabaseSync(path.join(DATA_DIR, 'office.db'));
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
+// another connection (a backup, a script, the DB browser) holding a lock briefly makes a write wait instead of throwing
+// SQLITE_BUSY into whatever engine step was writing
+db.exec('PRAGMA busy_timeout = 5000');
+// WAL's default is FULL; NORMAL is still crash-safe for the database (a power cut can lose only the last commits) and
+// stops every one of the thousands of small writes a run makes from waiting on a disk flush
+db.exec('PRAGMA synchronous = NORMAL');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS events (
@@ -256,6 +262,14 @@ addColumn('repo_checkpoints', 'head_sha', `TEXT`);                 // the commit
 addColumn('repo_checkpoints', 'branch', `TEXT`);                   // …and the branch (null = detached)
 addColumn('repo_checkpoints', 'file_count', `INTEGER`);            // files in the snapshot
 addColumn('repo_checkpoints', 'skipped', `TEXT DEFAULT '[]'`);     // files git could not or would not store (too large, unindexable)                       // the repository that holds it, if any
+addColumn('cli_sessions', 'node_key', `TEXT`);           // the workflow node whose session this is ('pipeline' = the standard pipeline)
+addColumn('cli_sessions', 'node_label', `TEXT`);
+addColumn('work_items', 'cli_session_id', `TEXT`);        // the CLI session the item ran in (session history)
+addColumn('checks', 'origin', `TEXT DEFAULT 'owner'`);            // 'owner' | 'detected' (from the project profile)
+addColumn('checks', 'baseline', `TEXT DEFAULT ''`);                // a detected check's result on the untouched repository ('' = not measured)
+addColumn('checks', 'baseline_summary', `TEXT DEFAULT ''`);
+addColumn('checks', 'baseline_tree', `TEXT`);                      // the tree it was measured on
+addColumn('repos', 'profile', `TEXT`);                             // detected stacks, domains and checks (services/project-profile.ts)
 
 // Stage 7 indexes: the hot predicates that had only run_id indexes before
 db.exec(`CREATE INDEX IF NOT EXISTS idx_wi_task ON work_items(task_id, status)`);
@@ -266,14 +280,27 @@ export default db;
 
 type Row = Record<string, unknown>;
 
+// Prepared statements are reused: the same few hundred statements run thousands of times per run (every event is three
+// of them), and compiling each one again on every call was pure overhead. Bounded, since some SQL is built per call.
+const stmts = new Map<string, ReturnType<typeof db.prepare>>();
+function stmt(sql: string): ReturnType<typeof db.prepare> {
+  let s = stmts.get(sql);
+  if (!s) {
+    s = db.prepare(sql);
+    if (stmts.size >= 500) stmts.delete(stmts.keys().next().value!);
+    stmts.set(sql, s);
+  }
+  return s;
+}
+
 export function q(sql: string, ...params: unknown[]): Row[] {
-  return db.prepare(sql).all(...(params as never[])) as Row[];
+  return stmt(sql).all(...(params as never[])) as Row[];
 }
 export function q1(sql: string, ...params: unknown[]): Row | undefined {
-  return db.prepare(sql).get(...(params as never[])) as Row | undefined;
+  return stmt(sql).get(...(params as never[])) as Row | undefined;
 }
 export function run(sql: string, ...params: unknown[]): void {
-  db.prepare(sql).run(...(params as never[]));
+  stmt(sql).run(...(params as never[]));
 }
 export function tx<T>(fn: () => T): T {
   db.exec('BEGIN IMMEDIATE');

@@ -23,6 +23,29 @@ export function requiredTier(kind: WorkItemKind, difficulty = 3): Tier {
   }
 }
 
+// Work whose mistakes are expensive never runs on the lightest tier, however
+// small the PM rated it: security-sensitive code, concurrency and hardware
+// code, data migrations — and a failure that already survived one fix.
+const RISK_PATTERNS: [RegExp, string][] = [
+  [/\b(auth\w*|login|password|passw|credential|oauth|jwt|session token|access token|api key|secret|encrypt\w*|decrypt\w*|crypto\w*|permission|rbac|acl|csrf|xss|injection|sanitiz\w*|payment|billing|pii|gdpr)\b/i, 'security-sensitive'],
+  [/\b(race condition|deadlock|mutex|semaphore|thread[- ]safe\w*|concurren\w*|interrupt|isr|rtos|dma|firmware|bootloader|ota update|memory leak|watchdog|real[- ]time)\b/i, 'concurrency or hardware'],
+  [/\b(migration|schema change|data loss|backward[- ]compat\w*|breaking change)\b/i, 'data or API compatibility'],
+];
+const FLOOR_KINDS: WorkItemKind[] = ['implement', 'fix', 'test', 'review', 'qa', 'analyse'];
+
+export function riskFloor(kind: WorkItemKind, taskText: string, priorFixes = 0): { tier: Tier; why: string } | null {
+  if (!FLOOR_KINDS.includes(kind)) return null;
+  if ((kind === 'fix' || kind === 'analyse') && priorFixes >= 1) return { tier: 'standard', why: 'repeat failure' };
+  for (const [re, why] of RISK_PATTERNS) if (re.test(taskText)) return { tier: 'standard', why };
+  return null;
+}
+
+/** The tier a work item needs: kind and difficulty, raised to the risk floor. */
+export function tierWithFloor(kind: WorkItemKind, difficulty: number, floor: { tier: Tier } | null): Tier {
+  const base = requiredTier(kind, difficulty);
+  return floor && TIER_RANK[floor.tier] > TIER_RANK[base] ? floor.tier : base;
+}
+
 export const EFFORT_FOR_TIER: Record<Tier, 'low' | 'medium' | 'high'> = { fast: 'low', standard: 'medium', strong: 'high' };
 
 const EST_COST: Record<WorkItemKind, number> = {
@@ -60,8 +83,10 @@ export interface RouteDecision<C> { ordered: C[]; required: Tier; reason: string
 
 // requiredOverride: a workflow node's modelTier — the node the work item came
 // from pins what "strong enough" means, instead of kind+difficulty.
-export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind, difficulty = 3, requiredOverride?: Tier, overrideSource: 'node' | 'agent' = 'node'): RouteDecision<C> {
-  const required = requiredOverride ?? requiredTier(kind, difficulty);
+export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind, difficulty = 3, requiredOverride?: Tier, overrideSource: 'node' | 'agent' = 'node', floor: { tier: Tier; why: string } | null = null): RouteDecision<C> {
+  const auto = requiredTier(kind, difficulty);
+  const required = requiredOverride ?? tierWithFloor(kind, difficulty, floor);
+  const raised = !requiredOverride && required !== auto;
   const usable = chain.filter((c) => !c.blocked && c.provider);
   const tierOf = (c: C) => TIER_RANK[c.model?.strengthTier ?? 'standard'];
   const need = TIER_RANK[required];
@@ -79,7 +104,7 @@ export function routeChain<C extends RouteOption>(chain: C[], kind: WorkItemKind
   const ordered = [...ranked.map((x) => x.c), ...chain.filter((c) => !usable.includes(c))];
   const top = ranked[0];
   const reason = !top ? 'no option available'
-    : `${required} work${requiredOverride ? ` (set on the ${overrideSource})` : ''} → ${top.c.model?.name ?? 'default'} (${top.c.model?.strengthTier ?? 'standard'}, ${top.cost === 0 ? 'plan-billed' : `~$${top.cost.toFixed(3)}`})${top.gap < 0 ? ' — no stronger option available' : ''}`;
+    : `${required} work${requiredOverride ? ` (set on the ${overrideSource})` : raised ? ` (raised from ${auto}: ${floor!.why})` : ''} →${top.c.model?.name ?? 'default'} (${top.c.model?.strengthTier ?? 'standard'}, ${top.cost === 0 ? 'plan-billed' : `~$${top.cost.toFixed(3)}`})${top.gap < 0 ? ' — no stronger option available' : ''}`;
   return { ordered, required, reason };
 }
 

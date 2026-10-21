@@ -7,7 +7,7 @@ import { TierPicker } from '../tier';
 import { AgentFiles } from '../attachments';
 import { DEFAULT_SESSION, SessionSettings, SessionsPanel, useCliSessions, type CliSessionSettings } from '../cliSessions';
 import { Avatar, Drawer, Empty, KV, Modal, ObsBadge, PageHeader, Segmented, Skeleton, StatusChip, Tag, act, fmtUsd, roleLabel, toast } from '../components';
-import { ArrowDown, ArrowUp, Cpu, Plus, Send, SlidersHorizontal, UserMinus, UserPlus, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Cpu, Plus, Send, SlidersHorizontal, Square, UserMinus, UserPlus, X } from 'lucide-react';
 
 function modelLabel(m: any): string {
   return m?.label ?? m?.supports?.displayName ?? m?.name ?? '';
@@ -40,8 +40,10 @@ function sessionSummary(agent: any, sessions: { agentId: string | null; status: 
   return mode === 'new' ? label : `${label} · ${n} session${n === 1 ? '' : 's'}`;
 }
 
-const EFFORTS = ['default', 'auto', 'off', 'low', 'medium', 'high'] as const; // auto: the router sizes it per task
-const SUPPORT_NOTE: Record<string, string> = { model: 'Only some models accept this.', engine: 'Applied by the Office, not the provider.' };
+const EFFORTS = ['default', 'auto', 'off', 'low', 'medium', 'high', 'xhigh', 'max'] as const; // auto: the router sizes it per task
+const CLI_EFFORTS = ['default', 'auto', 'low', 'medium', 'high', 'xhigh', 'max'] as const; // Claude Code's --effort levels; there is no off
+const API_EFFORTS = ['default', 'auto', 'off', 'low', 'medium', 'high'] as const;
+const SUPPORT_NOTE: Record<string, string> = { model: 'Only some models or tools accept this (Claude Code takes effort and max output; no CLI takes a temperature).', engine: 'Applied by the Office, not the provider.' };
 
 // Per-agent model configuration (spec 3): provider/account, actual model,
 // reasoning effort, parameters, fallback chain and spend caps. Fields the
@@ -173,7 +175,7 @@ function ModelSettings({ agent, providers, onClose, onSaved }: { agent: any; pro
 
         <section className="space-y-3.5">
           <h3 className="eyebrow">Model parameters</h3>
-          {field('reasoningEffort', 'Reasoning effort', <div className={off('reasoningEffort') ? 'pointer-events-none' : ''}><Segmented value={effort} options={EFFORTS} onChange={setEffort} /></div>)}
+          {field('reasoningEffort', 'Reasoning effort', <div className={off('reasoningEffort') ? 'pointer-events-none' : ''}><Segmented value={effort} options={isCli ? CLI_EFFORTS : API_EFFORTS} onChange={setEffort} /></div>)}
           <div className="grid grid-cols-3 gap-3">
             {field('temperature', 'Temperature', <input className="input w-full num" placeholder="default" disabled={off('temperature')} value={temp} onChange={(e) => setTemp(e.target.value)} />)}
             {field('maxOutputTokens', 'Max output', <input className="input w-full num" placeholder="model max" disabled={off('maxOutputTokens')} value={maxOut} onChange={(e) => setMaxOut(e.target.value)} />)}
@@ -289,6 +291,12 @@ export default function Agents() {
               </dl>
               <div className="mt-3 pt-3 border-t border-line flex flex-wrap gap-2">
                 <button className="btn btn-sm flex-1" onClick={() => setConfig(a)}><SlidersHorizontal size={12} /> Model settings</button>
+                {a.status && a.status !== 'idle' && (
+                  <button className="btn btn-sm hover:!text-bad" title="Cancel what this agent is doing now; its task goes on hold" onClick={async () => {
+                    if (!confirm(`Stop ${a.name}? Its current work is cancelled and its task goes on hold.`)) return;
+                    if (await act(post(`/agents/${a.id}/stop`, {}), `${a.name} stopped`)) reload();
+                  }}><Square size={12} /> Stop</button>
+                )}
                 <button className="btn btn-sm" onClick={() => setMsgAgent(a)}><Send size={12} /> Message{a.unread ? <span className="num text-2xs text-fg-4">· {a.unread} queued</span> : null}</button>
                 {active.length > 0 && (
                   <button className="btn btn-ghost btn-sm btn-icon hover:!text-bad ml-auto" title="Unassign — remove from all desks" aria-label="Unassign" onClick={async () => {

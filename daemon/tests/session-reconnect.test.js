@@ -24,13 +24,18 @@ test('a session held by a dead work item is released on the next acquire and reu
   assert.equal(S.listSessions({ agentId: 'ag-x' }).length, 1);
 });
 
-test('a session held by a work item that is still running stays busy', async () => {
+test('a session held by a work item that is still running stays busy: the next one waits for it, then continues it', async () => {
   const s = S.listSessions({ agentId: 'ag-x' })[0];
   S.releaseSession(s.id, { itemId: 'wi-new', ok: true });
   run(`INSERT INTO work_items (id, run_id, kind, agent_id, status, idempotency_key, attempt) VALUES ('wi-live','r1','implement','ag-x','running','k2',1)`);
   run('UPDATE cli_sessions SET busy_item = ? WHERE id = ?', 'wi-live', s.id);
+  setTimeout(() => run(`UPDATE work_items SET status = 'delivered' WHERE id = 'wi-live'`), 600);
+  const t0 = Date.now();
   const got = await S.acquireSession({ ...base('wi-other'), agent: { ...agent, settings: { cliSession: { whenBusy: 'new' } } } });
-  assert.notEqual(got.session.id, s.id);
+  assert.equal(got.session.id, s.id);
+  assert.ok(Date.now() - t0 >= 500, 'it waited while the holder was running');
+  assert.equal(S.listSessions({ agentId: 'ag-x' }).length, 1);
+  S.releaseSession(s.id, { itemId: 'wi-other', ok: true });
 });
 
 test('the session id is saved as soon as it is known, once, and the session counts as started', () => {

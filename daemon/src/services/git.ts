@@ -11,10 +11,10 @@ import type { Repo } from '../types.ts';
 // Resolve the git binary once (Windows needs the .exe form for execFileSync).
 const GIT_BIN: string = (() => {
   for (const c of ['git.exe', 'git', 'git.cmd']) {
-    try { execFileSync(c, ['--version'], { stdio: 'pipe' }); return c; } catch { /* next */ }
+    try { execFileSync(c, ['--version'], { stdio: 'pipe', windowsHide: true }); return c; } catch { /* next */ }
   }
   try {
-    const out = execSync('where git', { encoding: 'utf8' }).trim().split('\n')[0].trim();
+    const out = execSync('where git', { encoding: 'utf8', windowsHide: true }).trim().split('\n')[0].trim();
     if (out) return out;
   } catch { /* fall through */ }
   return 'git';
@@ -22,8 +22,8 @@ const GIT_BIN: string = (() => {
 
 // NOTE: on Windows, spawning with an explicit cwd containing spaces can fail
 // with ENOENT. We therefore never pass `cwd`; `git -C <dir>` does the chdir.
-export function git(cwd: string, args: string[]): string {
-  return execFileSync(GIT_BIN, ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+export function git(cwd: string, args: string[], maxBuffer?: number): string {
+  return execFileSync(GIT_BIN, ['-C', cwd, ...args], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...(maxBuffer ? { maxBuffer } : {}) }).trim();
 }
 
 export function gitOk(cwd: string, args: string[]): { ok: boolean; out: string } {

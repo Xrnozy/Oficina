@@ -28,6 +28,7 @@ function writeFiles(worktree: string, files: ScriptFileMap): string[] {
 }
 
 const qaFailedOnce = new Set<string>(); // task ids whose first scripted QA run failed
+const dispatchFailedOnce = new Set<string>(); // task:kind pairs whose first dispatch already failed (script.failOnce)
 
 function delay(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -79,6 +80,12 @@ function intakeResult(ctx: AdapterCtx, script: Record<string, any>): WorkItemRes
 async function scriptedResult(ctx: AdapterCtx, script: Record<string, any>, kind: string): Promise<WorkItemResult> {
   await delay(script.latencyMs ?? 400);
   if (ctx.workItem.runId.startsWith('intake-')) return intakeResult(ctx, script);
+  // script.failOnce: ['qa', …] — the first dispatch of that kind per task fails like an unavailable backend would
+  const failKey = `${ctx.task?.id ?? ctx.workItem.runId}:${kind}`;
+  if (Array.isArray(script.failOnce) && script.failOnce.includes(kind) && !dispatchFailedOnce.has(failKey)) {
+    dispatchFailedOnce.add(failKey);
+    throw new Error(`server: scripted backend failure on the first ${kind}`);
+  }
   ctx.emit('agent.output', { line: `[scripted] ${ctx.agent.name} starting ${kind}` });
 
   switch (kind) {

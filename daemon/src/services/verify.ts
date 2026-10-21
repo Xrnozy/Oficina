@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { killProcessTree, spawnShell } from '../adapters/cli-resolve.ts';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import db, { q, q1, run, DATA_DIR } from '../db.ts';
@@ -33,7 +33,7 @@ function rowToCheck(r: Record<string, unknown>): Check {
     id: r.id as string, repoId: r.repo_id as string, name: r.name as string, kind: r.kind as Check['kind'],
     command: r.command as string, parser: r.parser as string, passRule: r.pass_rule as string,
     timeoutSec: r.timeout_sec as number, affectedPaths: parseJson(r.affected_paths as string, []),
-    protected: r.protected as number,
+    protected: r.protected as number, origin: (r.origin as Check['origin']) ?? 'owner', baseline: (r.baseline as string) ?? '',
   };
 }
 
@@ -46,23 +46,44 @@ function storeBlob(content: string): string {
 
 export function readBlob(ref: string): string | null {
   if (!ref.startsWith('blob:')) return null;
+  // blob names are hex hashes; anything else (`..\`, a drive path) would read outside the blob folder
+  if (!/^[0-9a-f]{8,64}$/i.test(ref.slice(5))) return null;
   const p = path.join(DATA_DIR, 'blobs', `${ref.slice(5)}.log`);
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
 }
 
-function runCommand(command: string, cwd: string, timeoutSec: number): Promise<{ code: number | null; output: string; timedOut: boolean; durationMs: number }> {
+const MAX_CHECK_OUTPUT = 8 * 1024 * 1024;
+
+// A check's command runs through the platform shell, like the agent CLIs (spawnShell: the command line reaches cmd.exe
+// verbatim, so quoted paths and arguments survive). It is finished when the command exits — a process it started that
+// keeps the output pipes open (a server a test never stopped) must not hold the check until its timeout. On timeout the
+// whole process tree is stopped, not just the shell.
+function runCommand(command: string, cwd: string, timeoutSec: number, env?: NodeJS.ProcessEnv): Promise<{ code: number | null; output: string; timedOut: boolean; durationMs: number }> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const isWin = process.platform === 'win32';
     // cwd is set via spawn options — embedding `cd /d "<path>"` into the
     // command line breaks on Windows when the path contains spaces.
-    const child = execFile(isWin ? 'cmd.exe' : '/bin/sh', isWin ? ['/d', '/s', '/c', command] : ['-c', command], {
-      cwd, timeout: timeoutSec * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
-    }, (err, stdout, stderr) => {
-      const output = `${stdout ?? ''}${stderr ?? ''}`;
-      const timedOut = !!err && (err as any).killed === true;
-      resolve({ code: typeof child.exitCode === 'number' ? child.exitCode : (err ? 1 : 0), output, timedOut, durationMs: Date.now() - started });
-    });
+    const child = spawnShell(command, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
+    let output = '';
+    const add = (d: Buffer) => { output += String(d); if (output.length > MAX_CHECK_OUTPUT) output = output.slice(-MAX_CHECK_OUTPUT); };
+    child.stdout?.on('data', add);
+    child.stderr?.on('data', add);
+    let timedOut = false;
+    let done = false;
+    const finish = (c: number | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(killer);
+      resolve({ code: typeof c === 'number' ? c : 1, output, timedOut, durationMs: Date.now() - started });
+    };
+    const killer = setTimeout(() => { timedOut = true; killProcessTree(child); }, timeoutSec * 1000);
+    child.on('close', finish);
+    child.on('exit', (c) => setTimeout(() => {
+      if (done) return;
+      try { child.stdout?.destroy(); child.stderr?.destroy(); } catch { /* already closed */ }
+      finish(c);
+    }, 2500));
+    child.on('error', (e) => { output += String(e); finish(null); });
   });
 }
 
@@ -156,8 +177,11 @@ export async function runCheck(opts: {
   let code: number | null = 0;
   let durationMs = 0;
 
+  // a check the engine detected (not one the owner wrote) runs with CI=1: test runners then run once instead of
+  // watching, and tools never stop to ask a question nobody is there to answer
+  const env = check.origin === 'detected' ? { ...process.env, CI: '1' } : undefined;
   if (check.command) {
-    const r = await runCommand(check.command, worktree, check.timeoutSec);
+    const r = await runCommand(check.command, worktree, check.timeoutSec, env);
     output = r.output; code = r.code; durationMs = r.durationMs;
     if (r.timedOut) { status = 'error'; summary = `timed out after ${check.timeoutSec}s`; }
     const ev = evalPassRule(check, code, output, worktree, runId);
@@ -171,7 +195,7 @@ export async function runCheck(opts: {
 
   // flaky detection: one automatic re-run for test-ish checks that failed
   if (status === 'fail' && check.command && ['unit', 'integration', 'e2e'].includes(check.kind)) {
-    const r2 = await runCommand(check.command, worktree, check.timeoutSec);
+    const r2 = await runCommand(check.command, worktree, check.timeoutSec, env);
     const ev2 = evalPassRule(check, r2.code, r2.output, worktree, runId);
     if (ev2.pass) {
       status = 'flaky';

@@ -311,6 +311,9 @@ export function renderPrompt(opts: {
     stable.push(brief.join('\n'));
   }
   if (extra.approvedPrompt) stable.push(dataBlock('APPROVED_PROMPT', String(extra.approvedPrompt).slice(0, 8000)));
+  // the project's stacks and the engineering concerns of their domains (engine-detected; same for every item of a task)
+  const profile = extra.profile ?? pack.profile;
+  if (profile) stable.push(String(profile));
 
   switch (kind) {
     case 'plan': stable.push(PLAN_CONTRACT); break;

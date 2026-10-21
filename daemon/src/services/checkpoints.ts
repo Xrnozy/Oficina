@@ -67,7 +67,7 @@ function logOp(cp: Checkpoint, op: string, ok: boolean, detail: string, files: u
 // ---------------------------------------------------------------- recording
 
 const gitOut = (repo: string, args: string[]): string | null => {
-  try { return execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return null; }
+  try { return execFileSync('git', [...RAW, '-C', repo, ...args], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return null; }
 };
 
 /**
@@ -187,7 +187,7 @@ function effectiveAfter(repo: string, cp: Checkpoint): string {
   if (cp.kind !== 'general' || !kids.some((k) => k.status === 'undone')) return cp.afterTree;
   const tmp = path.join(os.tmpdir(), `oc-eff-${process.pid}-${Date.now()}`);
   const env = { ...process.env, GIT_INDEX_FILE: tmp };
-  const g = (args: string[], input?: string) => execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', env, input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
+  const g = (args: string[], input?: string) => execFileSync('git', [...RAW, '-C', repo, ...args], { windowsHide: true, encoding: 'utf8', env, input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
   try {
     g(['read-tree', cp.beforeTree]);
     for (const k of kids) {
@@ -344,7 +344,7 @@ export function pruneCheckpoints(repoId: string, keep = 500): number {
   if (!old.length) return 0;
   const repo = repoPath(repoId);
   for (const r of old) {
-    for (const side of ['before', 'after']) { try { execFileSync('git', ['-C', repo, 'update-ref', '-d', `refs/officechain/cp/${r.id}/${side}`], { stdio: 'ignore' }); } catch { /* gone */ } }
+    for (const side of ['before', 'after']) { try { execFileSync('git', ['-C', repo, 'update-ref', '-d', `refs/officechain/cp/${r.id}/${side}`], { stdio: 'ignore', windowsHide: true }); } catch { /* gone */ } }
     run('DELETE FROM repo_checkpoints WHERE id = ?', r.id);
     run('DELETE FROM checkpoint_ops WHERE checkpoint_id = ?', r.id);
   }

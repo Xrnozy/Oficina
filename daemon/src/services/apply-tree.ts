@@ -31,9 +31,9 @@ export interface TransitionPlan {
 }
 
 const gitText = (repo: string, args: string[], input?: string | Buffer): string =>
-  execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
+  execFileSync('git', [...RAW, '-C', repo, ...args], { windowsHide: true, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
 const gitBuf = (repo: string, args: string[]): Buffer =>
-  execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as Buffer;
+  execFileSync('git', [...RAW, '-C', repo, ...args], { windowsHide: true, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as Buffer;
 
 const isBinary = (b: Buffer): boolean => b.subarray(0, 8000).includes(0);
 const EMPTY_OID = '0'.repeat(40);
@@ -92,7 +92,7 @@ function mergeText(current: Buffer, base: Buffer, other: Buffer): { clean: boole
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-merge-'));
   try {
     const f = (n: string, b: Buffer) => { const p = path.join(dir, n); fs.writeFileSync(p, b); return p; };
-    const r = spawnSync('git', ['merge-file', '-p', '-L', 'current', '-L', 'recorded', '-L', 'target', f('cur', current), f('base', base), f('oth', other)], { maxBuffer: 256 * 1024 * 1024 });
+    const r = spawnSync('git', ['merge-file', '-p', '-L', 'current', '-L', 'recorded', '-L', 'target', f('cur', current), f('base', base), f('oth', other)], { maxBuffer: 256 * 1024 * 1024, windowsHide: true });
     const code = r.status ?? -1;
     if (code < 0 || code > 127) return { clean: false, regions: 1, merged: current };
     return { clean: code === 0, regions: code, merged: r.stdout as Buffer };

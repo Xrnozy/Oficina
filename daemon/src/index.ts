@@ -13,6 +13,8 @@ import { seedIfEmpty } from './seed.ts';
 import { migrate } from './migrate.ts';
 import { adapterHash } from './config.ts';
 import { ulid, now } from './util.ts';
+import { emit } from './bus.ts';
+import { killAllCliChildrenSync, reapOrphanedCliChildren } from './adapters/cli.ts';
 
 // Entry point: config → db → seed → engine reconcile → HTTP/WS server.
 
@@ -35,10 +37,26 @@ function acquireLock(): void {
   fs.writeFileSync(lock, String(process.pid));
   const release = () => { try { if (fs.readFileSync(lock, 'utf8').trim() === String(process.pid)) fs.rmSync(lock); } catch { /* gone */ } };
   process.on('exit', release);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => { release(); process.exit(0); });
+  // agent CLIs are stopped with the daemon: left behind they kept editing the repository unsupervised, and the next
+  // daemon re-dispatched the same task to a second agent alongside them
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => { try { killAllCliChildrenSync(); } catch { /* best effort */ } release(); process.exit(0); });
+}
+
+// One failing promise or stream must not take the whole daemon down: every agent in flight, its CLI session and the
+// UI connection went with it, and the work came back only as "interrupted" after a restart. Most engine steps are fired
+// without awaiting, so a rejection there used to be fatal (Node's default). It is logged and recorded instead.
+function guardProcess(): void {
+  const report = (kind: string, e: unknown) => {
+    console.error(`[office] ${kind}:`, e);
+    try { emit('daemon.error', 'engine', { kind, error: String((e as Error)?.stack ?? e).slice(0, 1500) }); } catch { /* the database itself may be the problem */ }
+  };
+  process.on('unhandledRejection', (e) => report('unhandled rejection', e));
+  process.on('uncaughtException', (e) => report('uncaught exception', e));
 }
 
 acquireLock();
+guardProcess();
+try { const n = reapOrphanedCliChildren(); if (n) console.log(`[office] stopped ${n} agent CLI process(es) left running by the previous daemon`); } catch (e) { console.warn('[office] orphan check skipped:', String(e).slice(0, 120)); }
 const config = loadConfig();
 seedIfEmpty(config);
 migrate();

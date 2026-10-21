@@ -29,7 +29,8 @@ const rows = (f = {}) => S.listSessions({ includeArchived: true, ...f });
 // ---------- settings ----------
 
 test('session settings default to reuse; bad values are rejected', () => {
-  assert.deepEqual(cliSessionSettings({}), { mode: 'reuse', pinnedId: null, whenBusy: 'new', rotateAfter: 30 });
+  // one node, one persistent session: waited for when busy, never rotated unless the owner sets a limit
+  assert.deepEqual(cliSessionSettings({}), { mode: 'reuse', pinnedId: null, whenBusy: 'wait', rotateAfter: 0 });
   assert.equal(cliSessionSettings({ cliSession: { mode: 'new', whenBusy: 'wait', rotateAfter: 0 } }).mode, 'new');
   assert.equal(cliSessionSettings({ cliSession: { mode: 'bogus' } }).mode, 'reuse');
   assert.match(validateModelSettings({ cliSession: { mode: 'pinned' } }).join(), /choose the session/);
@@ -104,26 +105,31 @@ test('sessions are per folder and per backend', async () => {
   S.releaseSession(otherBackend.session.id, { itemId: 'z', ok: true, started: true });
 });
 
-test('a busy session: the agent gets an additional one, or waits, as configured', async () => {
-  const a = agent('ag-busy', { mode: 'reuse', whenBusy: 'new', rotateAfter: 0 });
-  const one = await S.acquireSession({ ...base(), agent: a, itemId: item() });         // in use (not released yet)
-  const two = await S.acquireSession({ ...base(), agent: a, itemId: item() });
-  assert.notEqual(two.session.id, one.session.id);
-  assert.match(two.note, /busy, so an additional session/);
-  S.releaseSession(one.session.id, { itemId: 'x', ok: true, started: true });
-  S.releaseSession(two.session.id, { itemId: 'y', ok: true, started: true });
-  assert.equal(rows({ agentId: 'ag-busy' }).length, 2);
+test('a busy session is waited for, never duplicated — even for an agent saved with "start an additional one"', async () => {
+  for (const [id, whenBusy] of [['ag-busy', 'new'], ['ag-wait', 'wait']]) {
+    const w = agent(id, { mode: 'reuse', whenBusy, rotateAfter: 0 });
+    const held = await S.acquireSession({ ...base(), agent: w, itemId: item() });
+    setTimeout(() => S.releaseSession(held.session.id, { itemId: 'z', ok: true, started: true }), 700);
+    const t0 = Date.now();
+    const notes = [];
+    const after = await S.acquireSession({ ...base(), agent: w, itemId: item(), onWait: (n) => n && notes.push(n) });
+    assert.equal(after.session.id, held.session.id, 'waited and continued the same session');
+    assert.ok(Date.now() - t0 >= 600, 'it really waited');
+    assert.equal(after.resumed, true);
+    assert.match(notes[0], /waiting for session .* finishing another work item/);
+    S.releaseSession(after.session.id, { itemId: 'q', ok: true, started: true });
+    assert.equal(rows({ agentId: id }).length, 1);
+  }
+});
 
-  const w = agent('ag-wait', { mode: 'reuse', whenBusy: 'wait', rotateAfter: 0 });
-  const held = await S.acquireSession({ ...base(), agent: w, itemId: item() });
-  setTimeout(() => S.releaseSession(held.session.id, { itemId: 'z', ok: true, started: true }), 700);
-  const t0 = Date.now();
-  const after = await S.acquireSession({ ...base(), agent: w, itemId: item() });
-  assert.equal(after.session.id, held.session.id, 'waited and continued the same session');
-  assert.ok(Date.now() - t0 >= 600, 'it really waited');
-  assert.equal(after.resumed, true);
-  S.releaseSession(after.session.id, { itemId: 'q', ok: true, started: true });
-  assert.equal(rows({ agentId: 'ag-wait' }).length, 1);
+test('a work item stopped while waiting for its session gives up instead of starting another', async () => {
+  const a = agent('ag-stopwait');
+  const held = await S.acquireSession({ ...base(), agent: a, itemId: item() });
+  run(`INSERT INTO work_items (id, run_id, kind, agent_id, status, idempotency_key, attempt) VALUES ('wi-waiter','r','qa','ag-stopwait','running','kw',1)`);
+  setTimeout(() => run(`UPDATE work_items SET status = 'cancelled' WHERE id = 'wi-waiter'`), 300);
+  await assert.rejects(S.acquireSession({ ...base(), agent: a, itemId: 'wi-waiter' }), /cancelled/);
+  S.releaseSession(held.session.id, { itemId: 'x', ok: true, started: true });
+  assert.equal(rows({ agentId: 'ag-stopwait' }).length, 1);
 });
 
 test('a session is retired after the configured number of work items', async () => {
@@ -141,19 +147,23 @@ test('a session is retired after the configured number of work items', async () 
   assert.equal(rows({ agentId: 'ag-rotate' }).filter((r) => r.status === 'active').length, 1, 'nothing piles up');
 });
 
-test('a pinned session is shared by agents; one from another folder is not used', async () => {
-  const pin = S.createSession({ accountId: 'acct-a', preset: 'claude', agentId: null, cwd: repo, externalId: 'pin-ext', started: true, label: 'shared' });
-  const p1 = await S.acquireSession({ ...base(), agent: agent('ag-p1', { mode: 'pinned', pinnedId: pin.id, whenBusy: 'new' }), itemId: item() });
+test('a pinned session belongs to one agent: another agent pinning it gets its own, never a share', async () => {
+  const pin = S.createSession({ accountId: 'acct-a', preset: 'claude', agentId: null, cwd: repo, externalId: 'pin-ext', started: true, label: 'chosen' });
+  const p1 = await S.acquireSession({ ...base(), agent: agent('ag-p1', { mode: 'pinned', pinnedId: pin.id }), itemId: item() });
   assert.equal(p1.session.id, pin.id);
   assert.equal(p1.resumed, true);
-  const p2 = await S.acquireSession({ ...base(), agent: agent('ag-p2', { mode: 'pinned', pinnedId: pin.id, whenBusy: 'new' }), itemId: item() });
-  assert.notEqual(p2.session.id, pin.id, 'in use by the other agent, so an additional session');
+  assert.equal(S.getSession(pin.id).agentId, 'ag-p1', 'pinning claims it');
   S.releaseSession(p1.session.id, { itemId: 'x', ok: true, started: true });
+  const notes = [];
+  const p2 = await S.acquireSession({ ...base(), agent: agent('ag-p2', { mode: 'pinned', pinnedId: pin.id }), itemId: item(), onWait: (n) => n && notes.push(n) });
+  assert.notEqual(p2.session.id, pin.id, 'free, but another agent\'s conversation');
+  assert.match(notes[0], /belongs to another agent/);
   S.releaseSession(p2.session.id, { itemId: 'y', ok: true, started: true });
 
-  const wrongFolder = await S.acquireSession({ ...base({ cwd: other }), agent: agent('ag-p3', { mode: 'pinned', pinnedId: pin.id }), itemId: item() });
+  const wrong = [];
+  const wrongFolder = await S.acquireSession({ ...base({ cwd: other }), agent: agent('ag-p1', { mode: 'pinned', pinnedId: pin.id }), itemId: item(), onWait: (n) => n && wrong.push(n) });
   assert.notEqual(wrongFolder.session.id, pin.id);
-  assert.match(wrongFolder.note, /another folder/);
+  assert.match(wrong[0], /another folder/);
   S.releaseSession(wrongFolder.session.id, { itemId: 'z', ok: true, started: true });
 });
 
@@ -285,18 +295,43 @@ test('adapter: a CLI whose session id cannot be read leaves no session row to pi
   assert.equal(rows({ agentId: 'fa-5' }).length, 0);
 });
 
-test('adapter: two work items at once use two sessions, or share one when told to wait', async () => {
+test('adapter: one agent on two workflow nodes keeps two conversations, each continued on its next turn', async () => {
   reset();
+  run(`INSERT INTO workflow_versions (id, workflow_id, n, graph) VALUES ('wv-a', 'wf-a', 1, ?)`, JSON.stringify({ nodes: [{ id: 'pm', label: 'PM' }, { id: 'pm1', label: 'PM1' }] }));
+  run(`INSERT INTO runs (id, workspace_id, goal, workflow_version_id) VALUES ('r-nodes', 'ws', 'g', 'wv-a')`);
+  const a = agent('fa-nodes');
+  const turn = async (node) => {
+    const id = `fw-${++wi}`;
+    run(`INSERT INTO work_items (id, run_id, kind, status, idempotency_key, attempt, workflow_node_id) VALUES (?, 'r-nodes', 'qa', 'running', ?, 1, ?)`, id, `k-${id}`, node);
+    const ctx = { workItem: { id, kind: 'qa', runId: 'r-nodes', attempt: 1, workflowNodeId: null }, task: { id: 't', title: 'T' }, prompt: 'go', worktree: repo, repo: { path: repo },
+      agent: a, account: { id: 'acct-fake', config: { command: `"${process.execPath}" "${fake}"`, ...ASSIGN } }, model: null, emit: () => {} };
+    const res = await cliAdapter.dispatch(ctx);
+    return { res, row: q1('SELECT cli_session_id FROM work_items WHERE id = ?', id).cli_session_id };
+  };
+  const pm = await turn('pm'); const pm1 = await turn('pm1'); const pmAgain = await turn('pm'); const pm1Again = await turn('pm1');
+  assert.notEqual(pm.res.raw.cliSession.id, pm1.res.raw.cliSession.id, 'PM and PM1 are separate conversations');
+  assert.equal(pmAgain.res.raw.cliSession.id, pm.res.raw.cliSession.id);
+  assert.equal(pm1Again.res.raw.cliSession.id, pm1.res.raw.cliSession.id);
+  assert.equal(pmAgain.res.raw.cliSession.resumed, true);
+  assert.equal(pm.row, pm.res.raw.cliSession.id, 'the work item records the session it ran in');
+  const c = calls();
+  assert.equal(c[2].resume, c[0].assigned);
+  assert.equal(c[3].resume, c[1].assigned);
+  assert.equal(rows({ agentId: 'fa-nodes' }).length, 2);
+  assert.deepEqual(rows({ agentId: 'fa-nodes' }).map((r) => r.nodeLabel).sort(), ['PM', 'PM1']);
+});
+
+test('adapter: two work items at once take turns on the one session — never a second conversation', async () => {
   process.env.FAKE_DELAY = '400';
   try {
-    const a = agent('fa-6', { mode: 'reuse', whenBusy: 'new', rotateAfter: 0 });
-    await Promise.all([dispatch(a, ASSIGN), dispatch(a, ASSIGN)]);
-    assert.equal(rows({ agentId: 'fa-6' }).length, 2, 'the second one got an additional session instead of disturbing the first');
-    reset();
-    const w = agent('fa-7', { mode: 'reuse', whenBusy: 'wait', rotateAfter: 0 });
-    await Promise.all([dispatch(w, ASSIGN), dispatch(w, ASSIGN)]);
-    assert.equal(rows({ agentId: 'fa-7' }).length, 1, 'waited its turn on the same session');
-    const c = calls();
-    assert.equal(c[1].resume, c[0].assigned);
+    for (const [id, whenBusy] of [['fa-6', 'new'], ['fa-7', 'wait']]) {
+      reset();
+      const w = agent(id, { mode: 'reuse', whenBusy, rotateAfter: 0 });
+      const [x, y] = await Promise.all([dispatch(w, ASSIGN), dispatch(w, ASSIGN)]);
+      assert.equal(rows({ agentId: id }).length, 1, 'waited its turn on the same session');
+      const c = calls();
+      assert.equal(c[1].resume, c[0].assigned);
+      assert.ok([...x.events, ...y.events].some((e) => /waiting for session/.test(e.payload.text ?? '')), 'the wait is shown, not silent');
+    }
   } finally { delete process.env.FAKE_DELAY; }
 });

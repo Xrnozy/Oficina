@@ -25,7 +25,9 @@ rem Open the browser once the daemon has had a moment to come up.
 start "" /min cmd /c "timeout /t 3 /nobreak >nul & start """" http://localhost:4780"
 
 echo Starting daemon on http://localhost:4780  (close this window to stop)
-call npm run dev
+rem npm run start, not dev: dev mode (tsx watch) restarts the daemon whenever a source file changes, and every agent
+rem in flight dies with it. Developers who want auto-reload run "npm run dev" themselves.
+call npm run start
 goto :eof
 
 :fail

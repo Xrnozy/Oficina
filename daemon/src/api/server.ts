@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from 'express';
-import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, updateSession } from '../services/cli-sessions.ts';
+import { cliBackends, createAdditionalSession, deleteSession, getSession, importSessions, listSessions, resetSession, updateSession } from '../services/cli-sessions.ts';
+import { openInTerminal, sessionDetails } from '../services/cli-session-view.ts';
 import { enqueue, listQueue, markStarted, removeQueued } from '../services/queue.ts';
 import { appInfo, appLog } from '../services/app-launcher.ts';
 import { approvable, discardDraft, getDraft, intakeAgents, intakeSessions, listDrafts, markApproved, reviseDraft, startDraft } from '../services/intake.ts';
@@ -16,10 +17,11 @@ import { now, parseJson, sha256, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
 import { getError, rowToError } from '../services/errors.ts';
 import { readBlob } from '../services/verify.ts';
+import { detectProfile, ownerConfiguredChecks, storedProfile, syncDetectedChecks } from '../services/project-profile.ts';
 import {
   adoptLatestForRun, approveDod, assignSweep, createRun, createUserTask, deleteTask, moveTask, reviewAppControl, setRunWorkflow, evaluateDodOnIntegration, getRun, getTask,
   maybeAdvanceRun, messageAgent, ownerApproveTask, ownerEditDod, ownerEditTask,
-  pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopRun, getRepo, getWorkspace,
+  pauseRun, proceedMerge, resumeRun, simulateWorkflow, stopAgent, stopRun, getRepo, getWorkspace,
 } from '../engine/engine.ts';
 import { decideApproval, requestApproval } from '../services/policy.ts';
 import { ensureIntegration, ensureRepo, gitOk } from '../services/git.ts';
@@ -59,13 +61,61 @@ function rowToRepo(r: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+// Only this machine may use the API. Listening on 127.0.0.1 is not enough on its own: any web page the owner has open
+// can send requests to localhost, and a DNS-rebinding page can read the answers too. Through this API a page could set
+// the shell command an agent runs, or approve every pending commit. So:
+//  - the Host header must name this machine (a rebinding page arrives under its own host name);
+//  - a browser request that changes something, and the event stream (prompts, code, logs), must come from this app's
+//    own pages: the daemon's origin, or the Vite dev server's. Requests without an Origin (the tray, scripts, curl) pass.
+// OFFICE_ALLOWED_ORIGINS (comma-separated) adds origins for other setups.
+const LOOPBACK = /^(localhost|127\.0\.0\.1|\[::1\])$/i;
+export function isLocalHostHeader(host: string | undefined): boolean {
+  if (!host) return false;
+  const m = host.match(/^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/);
+  return !!m && LOOPBACK.test(m[1]);
+}
+export function isAllowedOrigin(origin: string | undefined, port: number): boolean {
+  if (!origin) return true;
+  const extra = String(process.env.OFFICE_ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (extra.includes(origin)) return true;
+  try {
+    const u = new URL(origin);
+    const p = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    return /^https?:$/.test(u.protocol) && LOOPBACK.test(u.hostname) && (p === port || p === 5173);
+  } catch { return false; }
+}
+
 export function createServer(port: number, uiDir: string): http.Server {
   const app = express();
+  app.use((req, res, next) => {
+    if (!isLocalHostHeader(req.headers.host)) return res.status(403).json({ error: 'this daemon only answers requests addressed to localhost' });
+    const changes = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if (changes && (!isAllowedOrigin(req.headers.origin, port) || req.headers['sec-fetch-site'] === 'cross-site')) {
+      return res.status(403).json({ error: 'requests from other sites are not accepted' });
+    }
+    next();
+  });
   app.use(express.json({ limit: '8mb' }));
+  // async handlers: Express 4 does not catch a rejected promise — it became an unhandled rejection and the request
+  // never got an answer. A rejection now goes to the error handler at the end like a thrown error does.
+  for (const m of ['get', 'post', 'put', 'delete', 'patch'] as const) {
+    const orig = (app[m] as (...a: unknown[]) => unknown).bind(app);
+    (app as unknown as Record<string, unknown>)[m] = (p: unknown, ...handlers: unknown[]) => {
+      if (!handlers.length) return orig(p);                         // app.get('setting')
+      return orig(p, ...handlers.map((h) => (typeof h === 'function' && h.length < 4
+        ? (req: Request, res: Response, next: (e?: unknown) => void) => {
+          try { const r = (h as (...a: unknown[]) => unknown)(req, res, next); if (r && typeof (r as Promise<unknown>).catch === 'function') (r as Promise<unknown>).catch(next); } catch (e) { next(e); }
+        }
+        : h)));
+    };
+  }
   registerHistoryRoutes(app);
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({
+    server, path: '/ws',
+    verifyClient: (info: { origin?: string; req: http.IncomingMessage }) => isLocalHostHeader(info.req.headers.host) && isAllowedOrigin(info.origin || undefined, port),
+  });
   // Big event payloads (a prompt's `detail` can be 12k chars) go to every
   // client on every event — the wire gets a capped copy; the full event stays
   // in the DB and /api/events/:seq serves it on demand.
@@ -128,6 +178,24 @@ export function createServer(port: number, uiDir: string): http.Server {
     const r = updateSession(req.params.id, { agentId: req.body?.agentId, label: req.body?.label, status: req.body?.status });
     if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 409, r.error);
     ok(res, getSession(req.params.id));
+  });
+  // one session in full: node, agent, backend, the work it did, its conversation, and the command that continues it
+  app.get('/api/cli-sessions/:id', (req, res) => {
+    const d = sessionDetails(req.params.id);
+    if (!d) return err(res, 404, 'session not found');
+    ok(res, d);
+  });
+  // continue this exact conversation in a terminal window; its agent waits until the terminal is closed
+  app.post('/api/cli-sessions/:id/open', (req, res) => {
+    const r = openInTerminal(req.params.id);
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 409, r.error);
+    ok(res, r);
+  });
+  // start the node's conversation over (the old one is archived, never deleted from the CLI)
+  app.post('/api/cli-sessions/:id/reset', (req, res) => {
+    const r = resetSession(req.params.id);
+    if ('error' in r) return err(res, r.error.includes('not found') ? 404 : 409, r.error);
+    ok(res, r);
   });
   app.delete('/api/cli-sessions/:id', (req, res) => {
     const r = deleteSession(req.params.id);
@@ -206,6 +274,17 @@ export function createServer(port: number, uiDir: string): http.Server {
     ok(res, rows.map(rowToRepo));
   });
 
+  // The project profile: detected stacks, domains and checks (with their baseline). ?detect=1 detects again first.
+  app.get('/api/repos/:id/profile', async (req, res) => {
+    const row = q1('SELECT * FROM repos WHERE id = ?', req.params.id);
+    if (!row) return err(res, 404, 'repo not found');
+    const repo = getRepo(req.params.id)!;
+    const stored = req.query.detect ? await syncDetectedChecks(repo) : storedProfile(repo.id);
+    const checks = q('SELECT name, kind, command, origin, baseline, baseline_summary FROM checks WHERE repo_id = ? ORDER BY rowid', repo.id)
+      .map((c) => ({ ...c, gating: c.origin !== 'detected' || c.baseline === 'pass' }));
+    ok(res, { ...(stored ?? { profile: detectProfile(repo.path), checks: [], at: null, ownerChecks: ownerConfiguredChecks(repo) }), registeredChecks: checks });
+  });
+
   app.post('/api/repos', (req, res) => {
     try {
       const { workspaceId, path: rawPath, buildCmd, testCmd } = req.body ?? {};
@@ -245,6 +324,8 @@ export function createServer(port: number, uiDir: string): http.Server {
       // direct mode (the default) works in this folder as it is; only isolated mode needs the integration branch
       if (parseJson<Record<string, unknown>>(ws.settings as string, {}).workMode === 'isolated') ensureIntegration(getRepo(repoId)!);
       emit('repo.registered', 'owner', { repoId, path: abs, remote: repo.remote_url }, null, null);
+      // what it is built with and which checks it offers — in the background, the answer does not wait for tool probes
+      void syncDetectedChecks(getRepo(repoId)!).catch(() => { /* detected again at the first plan */ });
       ok(res, rowToRepo(q1('SELECT * FROM repos WHERE id = ?', repoId)!));
     } catch (e) { err(res, 500, `${String(e)}\n${(e as Error)?.stack ?? ''}`); }
   });
@@ -798,8 +879,11 @@ export function createServer(port: number, uiDir: string): http.Server {
     if (queueBudgetUsd != null && !(typeof queueBudgetUsd === 'number' && queueBudgetUsd > 0 && queueBudgetUsd <= 100000)) return err(res, 400, 'queueBudgetUsd must be a positive number');
     const approvalMode = req.body?.approvalMode;
     if (approvalMode != null && !['always-ask', 'ask-when-risky', 'auto'].includes(approvalMode)) return err(res, 400, 'approvalMode must be always-ask | ask-when-risky | auto');
+    const detectChecks = req.body?.detectChecks;
+    if (detectChecks != null && typeof detectChecks !== 'boolean') return err(res, 400, 'detectChecks must be true or false');
     const settings = {
       ...parseJson<Record<string, unknown>>(ws.settings as string, {}),
+      ...(detectChecks != null ? { detectChecks } : {}),
       ...(mode != null ? { promptReview: mode } : {}),
       ...(selfReview != null ? { selfReview } : {}),
       ...(confirmPlan != null ? { confirmPlan } : {}),
@@ -852,6 +936,13 @@ export function createServer(port: number, uiDir: string): http.Server {
     ok(res, getAgent(id));
   });
 
+  // stop what one agent is doing now; the run goes on without it (its task is put on hold)
+  app.post('/api/agents/:id/stop', (req, res) => {
+    const a = getAgent(req.params.id);
+    if (!a) return err(res, 404, 'agent not found');
+    ok(res, stopAgent(a.id));
+  });
+
   app.post('/api/agents/:id/fire', (req, res) => {
     const a = getAgent(req.params.id);
     if (!a) return err(res, 404, 'agent not found');
@@ -872,8 +963,9 @@ export function createServer(port: number, uiDir: string): http.Server {
 
   // Create a provider (+ model + account) in one call — the "add backend" form.
   app.post('/api/providers', async (req, res) => {
-    const { kind, name, baseUrl, model, apiKey, monthlyBudgetUsd, command, timeoutSec, orgId, resumeArgs, newSessionArgs, sessionIdPattern } = req.body ?? {};
+    const { kind, name, baseUrl, model, apiKey, monthlyBudgetUsd, command, timeoutSec, orgId, resumeArgs, newSessionArgs, sessionIdPattern, idleTimeoutSec } = req.body ?? {};
     if (!kind) return err(res, 400, 'kind required');
+    if (idleTimeoutSec != null && idleTimeoutSec !== '' && !(Number(idleTimeoutSec) >= 0)) return err(res, 400, 'idleTimeoutSec must be a number of seconds (0 turns the stall watchdog off)');
     if (sessionIdPattern) { try { new RegExp(String(sessionIdPattern)); } catch { return err(res, 400, 'the session id pattern is not a valid regular expression'); } }
     if (resumeArgs && !String(resumeArgs).includes('{session}')) return err(res, 400, 'the resume arguments must contain {session}');
     // id is just a slug for you to recognize the backend — derive it when blank.
@@ -910,7 +1002,8 @@ export function createServer(port: number, uiDir: string): http.Server {
     run(`INSERT INTO accounts (id, provider_id, label, secret_ref, billing, monthly_budget_usd, enabled, config)
          VALUES (?,?,?,?,'payg',?,1,?)`, accountId, id, `${name ?? id} account`, secretRef, monthlyBudgetUsd ?? null,
       JSON.stringify({ baseUrl, command, timeoutSec, orgId: orgId ? String(orgId).trim() : null,
-        ...(kind === 'cli' && resumeArgs ? { resumeArgs: String(resumeArgs).trim(), newSessionArgs: newSessionArgs ? String(newSessionArgs).trim() : undefined, sessionIdPattern: sessionIdPattern ? String(sessionIdPattern).trim() : undefined } : {}) }));
+        ...(kind === 'cli' && resumeArgs ? { resumeArgs: String(resumeArgs).trim(), newSessionArgs: newSessionArgs ? String(newSessionArgs).trim() : undefined, sessionIdPattern: sessionIdPattern ? String(sessionIdPattern).trim() : undefined } : {}),
+        ...(kind === 'cli' && idleTimeoutSec != null && idleTimeoutSec !== '' ? { idleTimeoutSec: Number(idleTimeoutSec) } : {}) }));
     emit('account.added', 'owner', { accountId, providerId: id });
     // The model list always comes from the provider itself (Devin needs its key first).
     let syncWarning: string | null = null;
@@ -1085,6 +1178,16 @@ export function createServer(port: number, uiDir: string): http.Server {
         run('UPDATE accounts SET config = ? WHERE id = ?', JSON.stringify(cfg), acct.id);
       }
     }
+    // the CLI stall watchdog: seconds without output (no tool running) before a CLI counts as stalled; 0 = off, null = default
+    if (req.body?.idleTimeoutSec !== undefined && p.adapterId === 'cli') {
+      const v = req.body.idleTimeoutSec;
+      if (v !== null && v !== '' && !(Number(v) >= 0)) return err(res, 400, 'idleTimeoutSec must be a number of seconds (0 turns the stall watchdog off)');
+      for (const acct of q('SELECT id, config FROM accounts WHERE provider_id = ?', p.id)) {
+        const cfg = parseJson(acct.config as string, {}) as Record<string, unknown>;
+        if (v === null || v === '') delete cfg.idleTimeoutSec; else cfg.idleTimeoutSec = Number(v);
+        run('UPDATE accounts SET config = ? WHERE id = ?', JSON.stringify(cfg), acct.id);
+      }
+    }
     emit('provider.updated', 'owner', { providerId: p.id, enabled: !!req.body?.enabled });
     ok(res, getProvider(p.id));
   });
@@ -1248,6 +1351,13 @@ export function createServer(port: number, uiDir: string): http.Server {
     app.use(express.static(uiPath));
     app.get(/^(?!\/api|\/ws).*/, (_req, res) => res.sendFile(path.join(uiPath, 'index.html')));
   }
+  // a failing route answers with its error as JSON (the UI shows `error`) instead of an HTML stack trace
+  app.use((e: unknown, _req: Request, res: Response, next: (e?: unknown) => void) => {
+    if (res.headersSent) return next(e);
+    console.error('[api]', e);
+    const status = Number((e as { status?: number })?.status) || 500;
+    res.status(status >= 400 && status < 600 ? status : 500).json({ error: String((e as Error)?.message ?? e).slice(0, 500) });
+  });
 
   server.listen(port, '127.0.0.1', () => console.log(`[office] daemon + UI on http://localhost:${port}`));
   return server;

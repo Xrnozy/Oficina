@@ -34,7 +34,7 @@ function run(repo: string, args: string[], opts: { env?: Record<string, string>;
   for (let attempt = 0; ; attempt++) {
     try {
       return execFileSync('git', [...RAW, '-C', repo, ...args], {
-        encoding: 'utf8', input: opts.input, maxBuffer: 256 * 1024 * 1024,
+        windowsHide: true, encoding: 'utf8', input: opts.input, maxBuffer: 256 * 1024 * 1024,
         env: { ...process.env, ...opts.env }, stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (e: any) {
@@ -114,7 +114,7 @@ function cacheExcludes(): string[] {
   if (!excludesFile) {
     let own = '';
     try {
-      const configured = execFileSync('git', ['config', '--global', '--path', 'core.excludesFile'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const configured = execFileSync('git', ['config', '--global', '--path', 'core.excludesFile'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       own = fs.readFileSync(configured, 'utf8');
     } catch {
       const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');

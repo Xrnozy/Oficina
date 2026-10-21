@@ -1,14 +1,14 @@
 import type { AgentModelSettings, CliSessionSettings, ModelRow } from '../types.ts';
 
-export const DEFAULT_CLI_SESSION: CliSessionSettings = { mode: 'reuse', pinnedId: null, whenBusy: 'new', rotateAfter: 30 };
+export const DEFAULT_CLI_SESSION: CliSessionSettings = { mode: 'reuse', pinnedId: null, whenBusy: 'wait', rotateAfter: 0 };
 
-/** An agent's CLI-session settings with defaults filled in: reuse its session, add one if it is busy, rotate after 30 work items. */
+/** An agent's CLI-session settings with defaults filled in: its node's session, waited for when busy, never rotated unless set. */
 export function cliSessionSettings(settings: Record<string, unknown> | undefined): CliSessionSettings {
   const c = ((settings ?? {}).cliSession ?? {}) as Partial<CliSessionSettings>;
   return {
     mode: c.mode === 'new' || c.mode === 'pinned' ? c.mode : 'reuse',
     pinnedId: typeof c.pinnedId === 'string' && c.pinnedId ? c.pinnedId : null,
-    whenBusy: c.whenBusy === 'wait' ? 'wait' : 'new',
+    whenBusy: c.whenBusy === 'new' ? 'new' : 'wait',
     rotateAfter: Number.isInteger(c.rotateAfter) && (c.rotateAfter as number) >= 0 ? (c.rotateAfter as number) : DEFAULT_CLI_SESSION.rotateAfter,
   };
 }
@@ -34,8 +34,8 @@ export function settingsSupport(adapterId: string | undefined): SettingsSupport 
       return { modelSelect: 'yes', reasoningEffort: 'model', temperature: 'yes', maxOutputTokens: 'yes', contextTokens: 'engine', fallbacks: 'engine',
         note: 'Models are listed live from the server /models endpoint (Sync from provider). Reasoning effort is sent as reasoning_effort; only reasoning models accept it.' };
     case 'cli':
-      return { modelSelect: 'model', reasoningEffort: 'no', temperature: 'no', maxOutputTokens: 'no', contextTokens: 'engine', fallbacks: 'engine',
-        note: 'Models are synced from the CLI (`agent --list-models` or Claude `/model`). Pick one here; it is passed as --model unless the command template contains {model}.' };
+      return { modelSelect: 'model', reasoningEffort: 'model', temperature: 'no', maxOutputTokens: 'model', contextTokens: 'engine', fallbacks: 'engine',
+        note: 'Models are synced from the CLI (`agent --list-models` or Claude `/model`). Pick one here; it is passed as --model unless the command template contains {model}. With Claude Code, reasoning effort is passed as --effort and max output as CLAUDE_CODE_MAX_OUTPUT_TOKENS; other CLIs ignore both, and no CLI takes a temperature.' };
     case 'devin':
       return { modelSelect: 'yes', reasoningEffort: 'no', temperature: 'no', maxOutputTokens: 'no', contextTokens: 'no', fallbacks: 'engine',
         note: 'Models are synced from Devin (list-models API). Pick one here; it is sent as devin_mode on session create. Set organization ID on the Devin backend if auto-detect fails.' };
@@ -74,12 +74,12 @@ export function contextBudget(settings: Record<string, unknown> | undefined, mod
   return Math.max(2000, Math.min(wanted, s.contextTokens ?? wanted, modelCap));
 }
 
-export const THINKING_BUDGET: Record<string, number> = { low: 2048, medium: 8192, high: 24576 };
+export const THINKING_BUDGET: Record<string, number> = { low: 2048, medium: 8192, high: 24576, xhigh: 24576, max: 24576 };
 
 // Validate an owner-supplied settings patch; returns problems for the UI.
 export function validateModelSettings(s: AgentModelSettings): string[] {
   const p: string[] = [];
-  if (s.reasoningEffort && !['auto', 'off', 'low', 'medium', 'high'].includes(s.reasoningEffort)) p.push('reasoningEffort must be auto|off|low|medium|high');
+  if (s.reasoningEffort && !['auto', 'off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(s.reasoningEffort)) p.push('reasoningEffort must be auto|off|low|medium|high|xhigh|max');
   if (s.temperature != null && (s.temperature < 0 || s.temperature > 2)) p.push('temperature must be between 0 and 2');
   if (s.maxOutputTokens != null && (s.maxOutputTokens < 256 || !Number.isInteger(s.maxOutputTokens))) p.push('maxOutputTokens must be an integer ≥ 256');
   if (s.contextTokens != null && (s.contextTokens < 2000 || !Number.isInteger(s.contextTokens))) p.push('contextTokens must be an integer ≥ 2000');

@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import path from 'node:path';
 
 /** Extra dirs where Cursor / Claude / Devin CLIs are commonly installed (daemon tray often lacks user PATH). */
@@ -84,7 +84,8 @@ export function prepareCliCommand(cmd: string): { cmd: string; env: NodeJS.Proce
  */
 export function spawnShell(cmd: string, opts: SpawnOptions): ChildProcess {
   if (process.platform === 'win32') {
-    return spawn('cmd.exe', ['/d', '/s', '/c', `"${cmd}"`], { ...opts, windowsVerbatimArguments: true });
+    // windowsHide: an agent run never opens a console window of its own
+    return spawn('cmd.exe', ['/d', '/s', '/c', `"${cmd}"`], { windowsHide: true, ...opts, windowsVerbatimArguments: true });
   }
   return spawn('/bin/sh', ['-c', cmd], opts);
 }
@@ -95,10 +96,19 @@ export function spawnShell(cmd: string, opts: SpawnOptions): ChildProcess {
 export function killProcessTree(child: ChildProcess): void {
   if (!child.pid) return;
   if (process.platform === 'win32') {
-    const tk = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    const tk = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     tk.on('error', () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } });
   } else {
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+/** The same by pid, waiting until it is done — for shutdown, when the daemon exits right after. */
+export function killPidTreeSync(pid: number): void {
+  if (process.platform === 'win32') {
+    try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* already gone */ }
+  } else {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 }
 
@@ -233,13 +243,42 @@ export function effectiveCliCommand(command: string | null | undefined): string 
  */
 export function buildCliCommand(template: string, v: { prompt: string; promptFile?: string | null; worktree: string; model?: string | null }): { cmd: string; stdin: boolean } {
   const model = v.model ?? '';
+  // function replacers: a `$&` or `$'` in the prompt or a path must stay literal text
   let cmd = template
-    .replace('{prompt}', v.prompt.replace(/[\r\n]+/g, ' ').replace(/"/g, "'"))
-    .replace('{promptFile}', v.promptFile ? `"${v.promptFile}"` : '')
-    .replace('{worktree}', v.worktree)
-    .replace('{model}', model);
+    .replace('{prompt}', () => promptArg(v.prompt, template))
+    .replace('{promptFile}', () => (v.promptFile ? `"${v.promptFile}"` : ''))
+    .replace('{worktree}', () => v.worktree)
+    .replace('{model}', () => model);
   if (model && !template.includes('{model}')) cmd += ` --model ${JSON.stringify(model)}`;
   // scrub a dangling --model left behind by an empty {model} substitution
   if (!model) cmd = cmd.replace(/\s--model(?=\s+-|\s*$)/, '').trimEnd();
   return { cmd, stdin: !template.includes('{prompt}') && !template.includes('{promptFile}') };
+}
+
+/**
+ * Claude Code takes the reasoning effort as --effort (low, medium, high, xhigh, max). Other CLIs have no such flag, 'off'
+ * and 'auto' mean no flag, and a template that already sets --effort keeps its own.
+ */
+export function withEffort(cmd: string, template: string, effort: string | null | undefined): string {
+  if (!effort || !['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) return cmd;
+  if (cliPresetOf(template) !== CLI_PRESETS.claude || /(^|\s)--effort(\s|=)/.test(template)) return cmd;
+  return `${cmd} --effort ${effort}`;
+}
+
+/**
+ * The prompt as one shell argument. The prompt carries repository text and other agents' output, so it is quoted:
+ * `&`, `|`, `<`, `>`, `;`, `$(…)` and backticks in it stay text instead of becoming commands. A template that already
+ * quotes the placeholder keeps its quotes.
+ */
+function promptArg(prompt: string, template: string): string {
+  const flat = prompt.replace(/[\r\n]+/g, ' ');
+  if (process.platform === 'win32') {
+    // cmd.exe: inside double quotes &|<>^ are literal; a quote in the text would end the argument, so it becomes '.
+    // Trailing backslashes are doubled so the program's argument parser does not read them as an escaped quote.
+    const text = flat.replace(/"/g, "'").replace(/(\\+)$/, '$1$1');
+    return template.includes('"{prompt}"') ? text : `"${text}"`;
+  }
+  if (template.includes("'{prompt}'")) return flat.replace(/'/g, `'\\''`);
+  if (template.includes('"{prompt}"')) return flat.replace(/(["\\$`])/g, '\\$1');
+  return `'${flat.replace(/'/g, `'\\''`)}'`;
 }

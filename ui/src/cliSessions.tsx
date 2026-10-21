@@ -9,12 +9,13 @@ import { Download, Plus, Trash2 } from 'lucide-react';
 // per-agent settings (shown in the agent's settings drawer) and the manager for the sessions themselves.
 
 export interface CliSessionSettings { mode: 'reuse' | 'new' | 'pinned'; pinnedId: string | null; whenBusy: 'new' | 'wait'; rotateAfter: number }
-export const DEFAULT_SESSION: CliSessionSettings = { mode: 'reuse', pinnedId: null, whenBusy: 'new', rotateAfter: 30 };
+export const DEFAULT_SESSION: CliSessionSettings = { mode: 'reuse', pinnedId: null, whenBusy: 'wait', rotateAfter: 0 };
 
 export interface SessionRow {
   id: string; accountId: string | null; preset: string; agentId: string | null; agentName: string | null; label: string; cwd: string;
   externalId: string | null; started: boolean; status: 'active' | 'archived'; busyItem: string | null; uses: number;
   createdAt: string; lastUsedAt: string | null; note: string;
+  nodeKey: string | null; nodeLabel: string | null;
 }
 export interface BackendInfo { accountId: string; label: string; preset: string; supported: boolean; canImport: boolean; idFrom: string | null }
 export interface SessionData { sessions: SessionRow[]; backends: BackendInfo[] }
@@ -25,9 +26,9 @@ export const shortPath = (p: string) => p.split(/[\\/]/).filter(Boolean).slice(-
 const sessionTitle = (s: SessionRow) => s.label || s.externalId || s.id.slice(-6);
 
 const MODES: { v: CliSessionSettings['mode']; title: string; body: string; tag?: string }[] = [
-  { v: 'reuse', title: 'Reuse its session', tag: 'recommended', body: "Keep using this agent's session from task to task, so the CLI remembers earlier work and you don't collect a new session for every task." },
+  { v: 'reuse', title: 'One session per workflow node', tag: 'recommended', body: 'Each node this agent works on keeps its own session across tasks, retries and loops, so the CLI remembers earlier work. A new one starts only for a new node or when you reset it.' },
   { v: 'new', title: 'New session every time', body: 'A fresh session for each task. Nothing carries over, and a session is left behind each time.' },
-  { v: 'pinned', title: 'Always one chosen session', body: 'Use one specific session you pick. Several agents can share it, one at a time.' },
+  { v: 'pinned', title: 'Always one chosen session', body: 'Use one specific session you pick (for example one you started yourself). It then belongs to this agent only.' },
 ];
 
 /** The agent-level controls: how it uses sessions, what to do when its session is busy, and when to rotate. */
@@ -69,26 +70,15 @@ export function SessionSettings({ value, onChange, backend, accountId, data }: {
 
       {supported && value.mode !== 'new' && (
         <>
-          <div>
-            <div className="field-label">If that session is busy with another task</div>
-            <div role="radiogroup" aria-label="When the session is busy" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {([['new', 'Start an additional session', 'The task runs now in a second session, and the first is left undisturbed.'], ['wait', 'Wait for it', 'The task waits its turn, so everything stays in one conversation.']] as const).map(([v, t, b]) => (
-                <button key={v} type="button" role="radio" aria-checked={value.whenBusy === v} onClick={() => set({ whenBusy: v })}
-                  className={`text-left rounded-xl border px-3 py-2 transition-colors ${value.whenBusy === v ? 'border-fg bg-raised' : 'border-line hover:border-line-strong'}`}>
-                  <span className="block text-sm font-medium text-fg">{t}</span>
-                  <span className="block text-xs text-fg-3 mt-0.5">{b}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="text-2xs text-fg-4">When the session is busy (another task of this node, or you have it open in a terminal) the task waits its turn: there is never a second conversation for the same node.</p>
           {value.mode === 'reuse' && (
             <label className="block">
               <span className="field-label">Start a fresh session after</span>
               <div className="flex items-center gap-2">
                 <input className="input w-24 num" type="number" min={0} max={1000} value={value.rotateAfter} onChange={(e) => set({ rotateAfter: Math.max(0, Math.min(1000, Math.round(Number(e.target.value) || 0))) })} />
-                <span className="text-xs text-fg-3">tasks {value.rotateAfter === 0 && <span className="text-fg-4">(never — the session keeps growing)</span>}</span>
+                <span className="text-xs text-fg-3">tasks {value.rotateAfter === 0 && <span className="text-fg-4">(never — recommended)</span>}</span>
               </div>
-              <span className="text-2xs text-fg-4 mt-1 block">A very long session gets slow and costly, so it is retired after this many tasks and a new one takes over.</span>
+              <span className="text-2xs text-fg-4 mt-1 block">Leave at 0 to keep one conversation per node. Set a number only if you want the session retired after that many tasks.</span>
             </label>
           )}
           <p className="text-2xs text-fg-4">Sessions are kept per folder: tasks that run in their own isolated worktree can't continue an earlier session, so they start fresh.</p>
@@ -106,6 +96,7 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
   const [showArchived, setShowArchived] = useState(false);
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
   const ids = new Set(agents.map((a) => a.id));
   const cliAgentIds = new Set(agents.filter((a) => data?.backends.some((b) => b.accountId === a.accountId)).map((a) => a.id));
   const rows = (data?.sessions ?? []).filter((s) => (s.agentId ? ids.has(s.agentId) : true) && (showArchived || s.status === 'active'));
@@ -113,7 +104,7 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
   const canImport = (data?.backends ?? []).some((b) => b.canImport);
   if (!data?.backends.length) return null;
 
-  const chip = (s: SessionRow) => s.status === 'archived' ? <Tag tone="idle">archived</Tag> : s.busyItem ? <Tag tone="info">in use</Tag> : s.started ? <Tag tone="ok">ready</Tag> : <Tag tone="idle">not started</Tag>;
+  const chip = (s: SessionRow) => s.status === 'archived' ? <Tag tone="idle">archived</Tag> : s.busyItem?.startsWith('terminal:') ? <Tag tone="warn">open in terminal</Tag> : s.busyItem ? <Tag tone="info">in use</Tag> : s.started ? <Tag tone="ok">ready</Tag> : <Tag tone="idle">not started</Tag>;
   const patch = async (id: string, body: Record<string, unknown>, msg?: string) => { if (await act(put(`/cli-sessions/${id}`, body), msg)) reload(); };
 
   return (
@@ -125,7 +116,7 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
         </div>}
         bodyClass="px-4 pb-4">
         <p className="text-xs text-fg-3 mb-3 max-w-[78ch]">
-          The conversations your CLI agents keep working in. An agent continues its own session from task to task instead of starting a new one each time; assign a session to a different agent, or add more when you want agents to work in parallel.
+          The conversations your CLI agents work in: one per workflow node and agent, continued across tasks, retries and loops. Click a session to see its work and conversation, or open it in a terminal to continue it yourself.
           Removing one here only forgets it in Oficina; the CLI keeps its own copy.
         </p>
         {rows.length === 0 && <Muted>No sessions yet. An agent's first task creates one, or press New session.</Muted>}
@@ -135,6 +126,7 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
               <thead>
                 <tr className="text-left text-2xs text-fg-4 border-b border-line">
                   <th className="font-medium py-2 pr-3">Session</th>
+                  <th className="font-medium px-3">Node</th>
                   <th className="font-medium px-3">Assigned to</th>
                   <th className="font-medium px-3 text-right">Tasks</th>
                   <th className="font-medium px-3">Last used</th>
@@ -148,20 +140,24 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
                     <td className="py-2 pr-3 min-w-0">
                       <input className="bg-transparent text-fg font-medium w-full max-w-[24ch] rounded px-1 -mx-1 hover:bg-raised focus:bg-raised outline-none truncate" defaultValue={sessionTitle(s)} aria-label="Session name"
                         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== sessionTitle(s)) void patch(s.id, { label: v }); }} />
-                      <div className="text-2xs text-fg-4 mono truncate max-w-[34ch]" title={`${s.cwd}${s.externalId ? `\n${s.externalId}` : ''}${s.note ? `\n${s.note}` : ''}`}>{s.preset} · {shortPath(s.cwd)}{s.externalId ? ` · ${s.externalId.slice(0, 8)}` : ''}</div>
+                      <button type="button" className="block text-2xs text-fg-4 mono truncate max-w-[34ch] hover:text-fg-2 hover:underline text-left" onClick={() => setOpen(s.id)}
+                        title={`Show this session\n${s.cwd}${s.externalId ? `\n${s.externalId}` : ''}${s.note ? `\n${s.note}` : ''}`}>{s.preset} · {shortPath(s.cwd)}{s.externalId ? ` · ${s.externalId.slice(0, 8)}` : ''}</button>
                     </td>
+                    <td className="px-3 text-xs text-fg-2 whitespace-nowrap">{s.nodeLabel ?? <span className="text-fg-4">—</span>}</td>
                     <td className="px-3">
                       <Select className="input input-sm !w-44" value={s.agentId ?? ''} disabled={!!s.busyItem || s.status === 'archived'} aria-label="Assign to agent"
                         title={s.busyItem ? 'In use right now' : 'Which agent uses this session'}
                         onChange={(e) => void patch(s.id, { agentId: e.target.value || null }, e.target.value ? 'Session assigned' : 'Session unassigned')}>
                         <option value="">Unassigned</option>
-                        {agents.filter((a) => cliAgentIds.has(a.id)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                        {/* the assigned agent is always listed, even after it moved to a non-CLI backend, so the choice never shows blank */}
+                        {agents.filter((a) => cliAgentIds.has(a.id) || a.id === s.agentId).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                       </Select>
                     </td>
                     <td className="px-3 text-right num text-fg-2">{s.uses}</td>
                     <td className="px-3 text-xs text-fg-3 whitespace-nowrap">{s.lastUsedAt ? fmtAgo(s.lastUsedAt) : 'never'}</td>
                     <td className="px-3">{chip(s)}</td>
                     <td className="text-right whitespace-nowrap">
+                      <button className="btn btn-ghost btn-xs" onClick={() => setOpen(s.id)}>Details</button>
                       <button className="btn btn-ghost btn-xs" disabled={!!s.busyItem} onClick={() => void patch(s.id, { status: s.status === 'archived' ? 'active' : 'archived' })}>{s.status === 'archived' ? 'Restore' : 'Archive'}</button>
                       <button className="btn btn-ghost btn-xs btn-icon hover:!text-bad" disabled={!!s.busyItem} aria-label="Remove" title="Forget this session in Oficina"
                         onClick={async () => { if (confirm(`Forget “${sessionTitle(s)}” in Oficina? The CLI keeps its own copy.`) && (await act(del(`/cli-sessions/${s.id}`), 'Session removed'))) reload(); }}><Trash2 size={12} /></button>
@@ -179,6 +175,7 @@ export function SessionsPanel({ agents, repoPath, data, reload }: {
         )}
       </Panel>
 
+      {open && <SessionDetailsDialog id={open} onClose={() => { setOpen(null); reload(); }} />}
       {creating && <NewSessionDialog agents={agents.filter((a) => cliAgentIds.has(a.id))} repoPath={repoPath} onClose={() => setCreating(false)} onDone={() => { setCreating(false); reload(); }} />}
       {importing && <ImportDialog backends={(data?.backends ?? []).filter((b) => b.canImport)} repoPath={repoPath} onClose={() => setImporting(false)} onDone={() => { setImporting(false); reload(); }} />}
     </div>
@@ -195,7 +192,7 @@ function NewSessionDialog({ agents, repoPath, onClose, onDone }: { agents: any[]
       <button className="btn btn-primary" disabled={!agentId || !cwd.trim()} onClick={async () => { if (await act(post('/cli-sessions', { agentId, label: label.trim() || undefined, cwd: cwd.trim() }), 'Session created')) onDone(); }}>Create session</button>
     </>}>
       <div className="space-y-4">
-        <p className="text-sm text-fg-2">An additional session for an agent, ready ahead of time. It starts a fresh conversation the first time it is used. Handy when you want two tasks to run side by side without sharing one conversation.</p>
+        <p className="text-sm text-fg-2">A session for an agent, ready ahead of time. It starts a fresh conversation the first time it is used, and the agent's next node that has no session yet takes it. To start an existing node over, use Reset in that session's details instead.</p>
         <label className="block"><span className="field-label">Assign to</span>
           <Select className="input w-full" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
             {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -235,6 +232,70 @@ function ImportDialog({ backends, repoPath, onClose, onDone }: { backends: Backe
           <input className="input w-full font-mono" value={cwd} onChange={(e) => setCwd(e.target.value)} />
         </label>
       </div>
+    </Modal>
+  );
+}
+
+interface SessionDetails {
+  session: SessionRow & { backend: string | null; provider: string | null };
+  resumeCommand: string | null; canOpen: boolean; whyNot: string | null;
+  work: { id: string; kind: string; status: string; task: string | null; startedAt: string | null; prompt: string; reply: string }[];
+  transcript: { source: string; turns: { role: string; text: string; at: string | null }[]; total: number } | null;
+}
+
+/** One session: who uses it for which node, what it did, its conversation, and a way into it from a terminal. */
+function SessionDetailsDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const { data: d, reload } = useQuery<SessionDetails>(`/cli-sessions/${id}`, [id]);
+  const [tab, setTab] = useState<'conversation' | 'work'>('conversation');
+  const s = d?.session;
+  const row = (k: string, v: React.ReactNode) => <div className="flex gap-3 py-1 text-sm"><span className="w-28 shrink-0 text-fg-4 text-xs pt-0.5">{k}</span><span className="min-w-0 break-words text-fg-2">{v}</span></div>;
+  return (
+    <Modal title={s ? sessionTitle(s) : 'Session'} onClose={onClose} width="max-w-3xl" footer={<>
+      {s && s.status === 'active' && <button className="btn btn-ghost" disabled={!!s.busyItem}
+        title={s.busyItem ? 'In use right now' : 'Archive this conversation; the node starts a new one next time'}
+        onClick={async () => { if (confirm(`Start “${sessionTitle(s)}” over? Its node's next work begins a new conversation; this one is kept, archived.`) && await act(post(`/cli-sessions/${id}/reset`, {}), 'Session reset')) reload(); }}>Reset</button>}
+      <button className="btn btn-ghost" onClick={onClose}>Close</button>
+      <button className="btn btn-primary" disabled={!d?.canOpen} title={d?.whyNot ?? 'Continue this exact conversation in a terminal window'}
+        onClick={async () => { if (await act(post(`/cli-sessions/${id}/open`, {}), 'Opened in a terminal — the agent waits until you close it')) reload(); }}>Open in terminal</button>
+    </>}>
+      {!d || !s ? <Muted>Loading…</Muted> : (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-line px-3.5 py-2">
+            {row('Node', s.nodeLabel ?? 'standard pipeline')}
+            {row('Agent', s.agentName ?? 'unassigned')}
+            {row('Backend', `${s.backend ?? s.accountId ?? '?'}${s.provider && s.provider !== s.backend ? ` (${s.provider})` : ''} · ${s.preset}`)}
+            {row('Session id', <span className="mono text-xs">{s.externalId ?? 'not known yet'}</span>)}
+            {row('Folder', <span className="mono text-xs">{s.cwd}</span>)}
+            {row('Status', <>{s.status}{s.busyItem ? (s.busyItem.startsWith('terminal:') ? ' · open in a terminal' : ' · in use by a work item') : ''} · {s.uses} task{s.uses === 1 ? '' : 's'} · last used {s.lastUsedAt ? fmtAgo(s.lastUsedAt) : 'never'}{s.note ? ` · ${s.note}` : ''}</>)}
+            {d.resumeCommand && row('Resume', <span className="mono text-xs select-all">{d.resumeCommand}</span>)}
+            {!d.canOpen && d.whyNot && row('Terminal', <span className="text-fg-3">{d.whyNot}</span>)}
+          </div>
+          <div className="flex gap-1.5">
+            {(['conversation', 'work'] as const).map((t) => <button key={t} className={`btn btn-xs ${tab === t ? 'btn-primary' : ''}`} onClick={() => setTab(t)}>{t === 'conversation' ? 'Conversation' : `Work (${d.work.length})`}</button>)}
+          </div>
+          {tab === 'conversation' && (d.transcript ? (
+            <div className="space-y-2 max-h-[46vh] overflow-y-auto pr-1">
+              {d.transcript.total > d.transcript.turns.length && <Muted>Showing the last {d.transcript.turns.length} of {d.transcript.total} messages.</Muted>}
+              {d.transcript.turns.map((t, i) => (
+                <div key={i} className={`rounded-lg px-3 py-2 text-xs whitespace-pre-wrap break-words ${t.role === 'user' ? 'bg-sunken/60' : 'border border-line'}`}>
+                  <div className="text-2xs text-fg-4 mb-0.5">{t.role}{t.at ? ` · ${fmtAgo(t.at)}` : ''}</div>{t.text}
+                </div>
+              ))}
+            </div>
+          ) : <Muted>{s.preset === 'claude' ? "Claude Code's transcript for this session isn't on this machine yet." : 'This CLI keeps its conversation in its own format; the Work tab shows what Oficina sent and what came back.'}</Muted>)}
+          {tab === 'work' && (d.work.length ? (
+            <div className="space-y-2 max-h-[46vh] overflow-y-auto pr-1">
+              {d.work.map((w) => (
+                <details key={w.id} className="rounded-lg border border-line px-3 py-2 text-xs">
+                  <summary className="cursor-pointer text-fg-2"><span className="font-medium">{w.kind}</span>{w.task ? ` · ${w.task}` : ''} · {w.status}{w.startedAt ? ` · ${fmtAgo(w.startedAt)}` : ''}</summary>
+                  <div className="mt-2 text-2xs text-fg-4">Prompt</div><pre className="whitespace-pre-wrap break-words text-fg-3">{w.prompt || '—'}</pre>
+                  <div className="mt-2 text-2xs text-fg-4">Reply</div><pre className="whitespace-pre-wrap break-words text-fg-3">{w.reply || '—'}</pre>
+                </details>
+              ))}
+            </div>
+          ) : <Muted>No work recorded in this session yet.</Muted>)}
+        </div>
+      )}
     </Modal>
   );
 }

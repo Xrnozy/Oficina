@@ -48,6 +48,8 @@ export default function Dashboard() {
 
       {run && <RunCard run={run} detail={detail} live={!!live} />}
 
+      {office && <ProjectPanel repoId={run?.repoId ?? null} workspaceId={office.id} />}
+
       {office && <QueuePanel office={office} items={queue ?? []} reload={reloadQueue} onStart={(it) => { setPrefill({ goal: it.text, queueId: it.id }); setComposing(true); window.scrollTo?.({ top: 0 }); document.getElementById('main')?.scrollTo?.({ top: 0, behavior: 'smooth' }); }} />}
 
       {office && <div id="references" className="scroll-mt-20"><ReferencesPanel workspaceId={office.id} runId={run && live ? run.id : null} officeName={office.name} /></div>}
@@ -138,6 +140,50 @@ export default function Dashboard() {
       {run && <TokenReportPanel report={tokenReport} />}
       {run && <RunSummaryPanel runId={run.id} done={['done', 'stopped'].includes(run.status)} />}
     </div>
+  );
+}
+
+// The project profile: what the repository is built with (found from its manifest files) and the checks that judge each
+// delivery — the owner's own, or the ones detected for its stacks, with whether each blocks a bad change.
+const DOMAIN_LABEL: Record<string, string> = { iot: 'IoT / embedded', game: 'Game', service: 'Service / backend', web: 'Web', mobile: 'Mobile', data: 'Data / ML', native: 'Native' };
+
+function ProjectPanel({ repoId, workspaceId }: { repoId: string | null; workspaceId: string }) {
+  const { data: repos } = useQuery<any[]>('/repos');
+  const id = repoId ?? (repos ?? []).find((r: any) => r.workspaceId === workspaceId)?.id ?? null;
+  const { data: p, reload } = useQuery<any>(id ? `/repos/${id}/profile` : null, [id]);
+  const [busy, setBusy] = useState(false);
+  if (!id || !p) return null;
+  const stacks: any[] = p.profile?.stacks ?? [];
+  const checks: any[] = (p.registeredChecks ?? []).filter((c: any) => c.command);
+  const skipped: any[] = (p.checks ?? []).filter((c: any) => !c.registered && !p.ownerChecks);
+  const state = (c: any) => c.origin !== 'detected' ? <Tag tone="info">your check</Tag>
+    : c.baseline === 'pass' ? <Tag tone="ok">blocks bad changes</Tag>
+      : c.baseline ? <Tag tone="warn" title={c.baseline_summary || undefined}>already failing · doesn't block</Tag> : <Tag tone="idle">not measured yet</Tag>;
+  return (
+    <Panel title="Project" action={<button className="btn btn-ghost btn-xs" disabled={busy}
+      onClick={async () => { setBusy(true); await act(fetch(`/api/repos/${id}/profile?detect=1`).then((r) => r.json()), 'Project detected again'); setBusy(false); reload(); }}>Detect again</button>}>
+      {!stacks.length ? <Muted>No build files found in this repository yet.</Muted> : (
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {stacks.map((s: any) => <Tag key={`${s.dir}|${s.id}`}>{s.label}{s.dir ? ` · ${s.dir}/` : ''}</Tag>)}
+            {(p.profile?.domains ?? []).map((d: string) => <Tag key={d} tone="info">{DOMAIN_LABEL[d] ?? d}</Tag>)}
+          </div>
+          {checks.length > 0 && (
+            <div className="divide-y divide-line">
+              {checks.map((c: any) => (
+                <div key={c.name} className="flex items-center gap-3 py-1.5 text-sm">
+                  <span className="w-36 shrink-0 text-fg truncate">{c.name}</span>
+                  <span className="flex-1 min-w-0 mono text-xs text-fg-3 truncate" title={c.command}>{c.command}</span>
+                  {state(c)}
+                </div>
+              ))}
+            </div>
+          )}
+          {skipped.map((c: any) => <div key={c.name} className="text-2xs text-fg-4">{c.name}: {c.why}</div>)}
+          <p className="text-2xs text-fg-4">{p.ownerChecks ? 'This repository uses the checks you set up.' : 'Found from the build files. A check that already failed before the work started is shown, but never blamed on the agents.'}</p>
+        </div>
+      )}
+    </Panel>
   );
 }
 

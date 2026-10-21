@@ -9,7 +9,7 @@ import { RAW, applyPatch, changedFilesBetween, checkPatch, ownPaths, patchBetwee
 // `git reset`, no history rewrite, no force-push.
 
 function git(repo: string, args: string[], input?: string): string {
-  return execFileSync('git', [...RAW, '-C', repo, ...args], { encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
+  return execFileSync('git', [...RAW, '-C', repo, ...args], { windowsHide: true, encoding: 'utf8', input, maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 function tryGit(repo: string, args: string[], input?: string): { ok: boolean; out: string; err: string } {
   try { return { ok: true, out: git(repo, args, input), err: '' }; }

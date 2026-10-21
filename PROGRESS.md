@@ -80,3 +80,86 @@
 - **Tests:** 85/85 pass; `npm run typecheck -w daemon` clean; `npm run build -w ui` clean. README "State of the implementation" rewritten + remaining risks listed.
 - Chose not to do: an A/B bench of perf changes alone (the pre-fix tree cannot finish the scenario — the hang dominates; the 27s completion vs 240s timeout is the honest before/after). No new tests for the parked-worktree fix — it is exercised end-to-end by the bench scenario (docs task parks then resumes).
 
+
+## Stage 8 — Reliability, security and performance audit — DONE
+
+Baseline: typecheck clean, 238/238 tests (42 s). Root causes were taken from the live database (read-only) and from the running daemon's process tree, then reproduced in tests before fixing.
+
+- **Stalled CLI agents** (`adapters/cli.ts`): in all three stalls in the live DB, cursor-agent printed `thinking completed` and then nothing, with no tool running, until the 900 s hard kill. The recorded error was the last reasoning fragment (`cli exited 1: {"type":"thinking"…}`). Normal gaps measured over 135 successful items: cursor max 88 s, Claude max 48 s. Added a no-output watchdog for stream-JSON CLIs: `idleTimeoutSec`, default 300 s, paused while a tool call is open, `0` = off, plain-text CLIs only when set. Hard timeouts and stalls now fail as `timeout: …` (retryable). `failureTail()` builds the error from stderr, result and error records.
+- **Stuck detector** (`engine.fireDueTimers`): it marked the item interrupted but left the CLI running. That CLI held its session and kept editing, its late result was recorded as a second delivery, and nothing re-advanced the run. It also fired only once and always used the API limit. Now it kills the process, frees the session and agent, goes through `handleWorkItemFailure` (attempt count, backoff, diagnosis, escalation), and re-schedules itself while the agent is alive. `executeWorkItem` records a result only while the item is still `running`.
+- **Daemon crashes**: a CLI exiting before reading its prompt raised an unhandled stdin EPIPE, which kills the process (reproduced). Added a stdin error handler and `unhandledRejection`/`uncaughtException` guards (logged plus a `daemon.error` event). Async Express routes now reach a JSON error handler.
+- **Orphaned agents**: a killed daemon left its CLIs editing the repo while the restarted daemon dispatched the same task again. Fixes: signal handlers stop all CLIs; live CLI pids are persisted and reaped at boot, matched by command line (pid reuse safe); `start-office.bat` runs `npm run start`, not watch mode; aborting or handing off a task kills its CLI.
+- **Workflow graphs**: a failed QA, analyse, prompt or prompt-review step took the fixed pipeline's special case. QA was skipped into a non-graph review (seen in the live DB); prompt steps were dropped silently. Graph steps now use the generic retry on the same node.
+- **Concurrent `maybeAdvanceRun`**: overlapping calls each began a cycle and dispatched a plan (reproduced: 3 calls gave 3 cycles). Now serialized per run, with re-triggers folded into one re-run.
+- **Restart**: tasks waiting on in-memory retry timers (backoff, prompt retry) sat "in progress" forever. `reconcileOnBoot` re-readies them; parked tasks and tasks waiting on the owner are untouched.
+- **Check runner** (`verify.ts`): `execFile` mangled quoted commands on Windows (`node -e "…"` exited 1). A command that leaves a process holding the pipes blocked until the check timeout (30 s in the test, 300 s by default). On timeout only `cmd.exe` died. Now `spawnShell` (verbatim), done on exit plus a 2.5 s drain, whole-tree kill.
+- **Security** (`api/server.ts`): Host-header check (DNS rebinding), Origin and `Sec-Fetch-Site` check on state-changing requests (CSRF, e.g. `approve-all`), WebSocket origin check (any page could read the event stream), blob path traversal (`..\`), and `{prompt}` passed as one quoted argument (`&`/`|` in a prompt ran as commands).
+- **Storage/perf**: the 15 s run-snapshot timer wrote a full run copy every tick; it was 632 MB of the 661 MB DB and nothing reads it. Snapshots are now written only on change (heartbeats ignored) and capped at 20 per run, with a boot prune (4015 → 262 rows; VACUUM would take a copy from 635 MB to 68 MB). Also: prepared-statement cache, `busy_timeout`, `synchronous=NORMAL` (3000 events 7.4 s → 0.86 s on a copy of the real DB), incremental chain verification with a full pass every 10 min (163 ms → 0 ms), Devin heartbeat on every poll plus stop on cancel, no circuit-breaker strike for a kill.
+- Tests: +27 (`check-runner`, `cli-reliability`, `workflow-recovery`, `run-state`, `api-security`). 265/265 pass, typecheck clean, UI builds. Bench and demo-workflow give the same work items, events and DoD on the old and new trees. The recovery tests fail on the old tree (verified).
+- Not done: no automatic VACUUM (rewrites the DB; run it with the daemon stopped). A tampered older event is caught by the 10-minute full pass, not immediately. `uncaughtException` keeps the daemon running instead of exiting.
+
+## Stage 9 — Any project type and size — DONE
+
+Baseline: typecheck clean, 265/265 tests; bench `done` in 16 s, 23 work items, 88,101 prompt chars, all six DoD items pass. Findings from the live DB (read-only):
+
+- **No verification on the owner's own repositories.** Checks existed only for the seeded demo; `ASR`, `GabAi - testing` and `testing-for-office` had none. AVAILABLE_CHECKS was `[]`, so DoD items could only use `file:`/`doc:` checks and no task delivery ever ran the project's build or tests. The ASR run that cycled five times (1.94M of the 2.48M prompt chars in the whole history) had only file-exists gates.
+- **The repo tour did not scale.** It was the first 120 names of a 400-file walk that skipped only `node_modules`/`dist`. On `GabAi - testing` it was 5,736 chars of `backend/depth_anything_v2/assets/*.jpg`/`.mp4` and never reached `frontend/` or `mobile/`. On ASR, 30 `.wav` clips and `experiments/tmp` filled it.
+
+Changes:
+
+- `services/repo-map.ts` (new): the file list follows Git (tracked files plus new ones; a new folder of up to 100 files is listed through `git ls-files` so its ignore rules apply, a bigger one stays a single entry). Media and binaries are counted by type, never listed. A repository with more than 120 source files gets its shape: top folders with counts and their largest sub-folders, key files (manifests, entry points, configs), and file types. `git()` takes a `maxBuffer` for very large repositories.
+- `services/project-profile.ts` (new): a table of detectors over manifest files covers Node, Python, Rust, Go, .NET, Maven, Gradle/Android, CMake, ESP-IDF, Zephyr, PlatformIO, Arduino, MicroPython, Unity, Unreal, Godot, Flutter/Dart, SwiftPM and Make.
+  - Each stack carries its folder, domains (iot, game, service, web, mobile, data, native) and commands.
+  - Nested and vendored manifests and toolchain-driven builds are not counted as separate stacks.
+  - `profileSection()` renders the stacks a task touches and per-domain engineering concerns into the stable prompt prefix of plan, implement, fix, QA, review and analyse (not accept, prompt drafting, prompt review, diagnose or docs). It is empty for a single root stack with no domain.
+- **Detected checks** (`syncDetectedChecks`):
+  - Registered as `origin='detected'` only when the owner has no command checks and no build/test command, only when the tool probe succeeds, and never when the workspace sets `detectChecks: false`.
+  - They are scoped to their folder, and their build output goes to the temp folder.
+  - At the first plan of a run they get a **baseline** on the untouched tree (background; skipped when the tree is unchanged). They gate a delivery only when the baseline passed. The PM sees the non-gating ones in AVAILABLE_CHECKS.
+  - In direct mode the first writer waits for the baseline (20 min cap), so it is measured before any change. Docs- and media-only changes skip detected checks, and detected checks run with `CI=1`.
+  - Done at repo registration too (background). API: `GET /api/repos/:id/profile[?detect=1]`.
+- **Routing risk floor** (`routing.ts riskFloor/tierWithFloor`):
+  - implement/fix/test/review/qa/analyse work that is security-sensitive, concurrency/hardware, or about data/API compatibility, plus fix/analyse after an earlier fix, is raised from `fast` to `standard` and never lowered.
+  - A node or agent tier still wins, and `model.routed` names the reason.
+- Schema (additive `addColumn`): `checks.origin/baseline/baseline_summary/baseline_tree`, `repos.profile`.
+
+Measured:
+
+- Repo tour: GabAi 5,736 → 1,446 chars, now covering every component; ASR 2,674 → 1,090 chars; a synthetic 1,000-file repository costs under 1,200 chars.
+- Detection takes 1–14 ms per repository and the summary 36–206 ms, memoized.
+- Standard bench: identical shape before and after (23 work items, 310 events, 20 check runs, DoD all pass, 88,101 → 88,103 prompt chars).
+- Bench scenario with the owner's checks removed:
+  - Old code: the plan cannot reference a build check, and 0 check runs.
+  - New code: build, lint and unit:all are detected. lint and build failed at baseline and do not gate; unit:all gates. The scripted developer's broken first delivery is caught by the detected `unit:all`, analysed and fixed (22 check runs).
+- Tests: +9 (`project-profile.test.js`); 274/274 pass; typecheck clean; UI builds.
+
+Not done:
+
+- Unity, Unreal, Zephyr and Arduino without an FQBN get no automatic check (they need an editor, an engine path or a board), so the profile says which check to add.
+- A bootstrap plan can be drafted before the baseline finishes, so a first DoD may reference a check that turns out not to pass yet. Re-plans see the note.
+- Detection runs at the first plan of a run, not mid-run.
+- Parallel writers in direct mode were not added: one writer at a time is what keeps every change attributable to one task. Isolated mode is the parallel option.
+
+## Stage 10 — One workflow node, one persistent CLI session — DONE
+
+Before: sessions were keyed by agent and folder. The same agent on two nodes shared one conversation. A busy session started an additional one by default (`whenBusy: 'new'`), a session was replaced after 30 tasks, and "pinned" let several agents share a session. Nothing showed a session's conversation, and nothing opened it in a terminal.
+
+- `services/cli-sessions.ts`: sessions are keyed by agent and node (`node_key` = `wf:<workflow>:<node>`, or `pipeline` for the standard pipeline; `nodeFor()` reads the node from the work item's row because the engine tags it after creating the item).
+  - Work a graph run makes outside any node continues the agent's node session.
+  - A busy session is waited for, never duplicated, with a keep-alive heartbeat and a single note; the wait gives up if the item is cancelled.
+  - Rotation happens only when `rotateAfter` is set. Pinned sessions are claimed by one agent and node.
+  - Sessions from before this, and imported ones, are adopted by the node. `resetSession()` archives a conversation.
+  - Terminal holds (`terminal:<session>:<pid>`) survive a restart while that process is alive.
+- `services/cli-session-view.ts` (new):
+  - details: node, agent, backend, id, folder, status, the work items that ran in the session (`work_items.cli_session_id`) with prompt and reply, and Claude Code's own transcript;
+  - the resume command;
+  - `openInTerminal()`: a new console in the session's folder running `<cli> --resume <id>` (`cmd /d /s /k "…"`; the unquoted form breaks on a quoted executable path, checked). The session is held until the window closes.
+- API: `GET /api/cli-sessions/:id`, `POST /api/cli-sessions/:id/open`, `POST /api/cli-sessions/:id/reset`. UI: a Node column, a details dialog (Conversation and Work tabs, Open in terminal, Reset), and settings copy for the rule. The "when busy" choice is gone.
+- Defaults are now `whenBusy: 'wait'`, `rotateAfter: 0`. A one-time migration (`app_flags`) moves agents saved with the exact old defaults; none in the live DB had stored settings.
+- Tests: 6 old tests rewritten to the new rule; +12 new (`node-sessions.test.js`, plus adapter tests: one agent on PM/PM1 keeps two conversations, each resumed; concurrent items take turns). 284/284 pass; typecheck clean; UI builds.
+
+Not done:
+- Isolated mode still cannot continue sessions: each task has its own worktree, and CLIs resume only from the folder that started a conversation.
+- A node whose agent does both desk work and repository work, or that falls back to another backend, has one session per folder or backend.
+- Open in terminal was not launched on the desktop during testing; only its command line and refusal paths were. macOS and Linux launches are best-effort, and on macOS the hold is not tracked.
+- Conversation history is the CLI's own only for Claude Code; for cursor-agent and Devin it is Oficina's record of prompts and replies.

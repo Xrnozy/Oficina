@@ -250,6 +250,78 @@ test('an unreachable app is reported as failed — never as fine — and the own
   } finally { setActiveWorkflow('ws-h', wf.workflowId); }
 });
 
+test('review window: the widget is added to the app\'s pages, the owner decides from it, a rejection keeps the tab for the next round', { timeout: 180000 }, async () => {
+  const { reviewProxyBase } = await import('../src/services/review-proxy.ts');
+  const r = createRun({ workspaceId: 'ws-h', goal: 'Widget test', oneShot: true });
+  const first = await waitFor(() => pending(r.id));
+  assert.ok(first);
+  const t = taskOf(r.id);
+  const base = reviewProxyBase(t.id);
+  assert.ok(base, 'a review window exists for the task');
+  const p = JSON.parse(first.payload);
+  assert.equal(p.routes[0].reviewUrl, `${base}/login`);
+
+  // pages come through the proxy with the widget; other content is untouched
+  const page = await fetch(`${base}/login`, { headers: { accept: 'text/html' } });
+  const html = await page.text();
+  assert.equal(page.status, 200);
+  assert.match(html, /<h1>\/login<\/h1>/);
+  const tag = html.match(/<script src="(\/__oficina\/widget\.js\?t=([0-9a-f]+))" defer><\/script>/);
+  assert.ok(tag, 'the widget script is injected');
+  const token = tag[2];
+  assert.equal((await fetch(`${base}/boom`)).status, 500, 'the app\'s own status codes pass through');
+  const js = await fetch(`${base}${tag[1]}`);
+  assert.equal(js.status, 200);
+  assert.match(await js.text(), /Request changes/);
+
+  // the state endpoint needs the token and shows the review
+  assert.equal((await fetch(`${base}/__oficina/state`)).status, 403);
+  const state = await (await fetch(`${base}/__oficina/state`, { headers: { 'x-oficina-token': token } })).json();
+  assert.equal(state.phase, 'ready');
+  assert.equal(state.approvalId, first.id);
+  assert.ok(state.report.summary && state.routes.length === 2);
+
+  // rejecting needs words; another site cannot decide
+  const decide = (body, extra = {}) => fetch(`${base}/__oficina/decide`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-oficina-token': token, ...extra }, body: JSON.stringify(body) });
+  assert.equal((await decide({ approve: false, reason: '  ' })).status, 400);
+  assert.equal((await decide({ approve: true }, { origin: 'http://evil.example' })).status, 403);
+  assert.equal(q1('SELECT status FROM approvals WHERE id = ?', first.id).status, 'pending');
+
+  const rej = await decide({ approve: false, reason: 'The save button is hidden on mobile', page: '/login' });
+  assert.equal(rej.status, 200);
+  assert.equal((await decide({ approve: true })).status, 409, 'a decision is recorded once');
+  const row = q1('SELECT status, reason FROM approvals WHERE id = ?', first.id);
+  assert.equal(row.status, 'rejected');
+  assert.match(row.reason, /save button is hidden on mobile/);
+  assert.match(row.reason, /\/login/, 'the page the owner was on goes to the agents');
+
+  // the same tab waits for the next round: the app is down, the page says so, the widget stays
+  const mid = await (await fetch(`${base}/__oficina/state`, { headers: { 'x-oficina-token': token } })).json();
+  assert.ok(['decided', 'preparing', 'ready'].includes(mid.phase));
+  const second = await waitFor(() => { const x = pending(r.id); return x && x.id !== first.id ? x : null; }, 120000);
+  assert.ok(second, 'a new review was raised');
+  assert.equal(reviewProxyBase(t.id), base, 'the review window kept its address');
+  const again = await (await fetch(`${base}/__oficina/state`, { headers: { 'x-oficina-token': token } })).json();
+  assert.equal(again.phase, 'ready');
+  assert.equal(again.approvalId, second.id);
+  assert.equal(again.round, 2);
+  assert.match(JSON.stringify(again.history), /save button is hidden on mobile/);
+
+  assert.equal((await decide({ approve: true, reason: 'good now' })).status, 200);
+  assert.ok(await waitFor(() => q1('SELECT status FROM runs WHERE id = ?', r.id)?.status === 'done'));
+  const done = await (await fetch(`${base}/__oficina/state`, { headers: { 'x-oficina-token': token } })).json();
+  assert.equal(done.phase, 'decided');
+  assert.equal(done.last.decision, 'approved');
+});
+
+test('the approval agent is given the project\'s run instructions', async () => {
+  const hints = L.launchHints(repoDir);
+  assert.match(hints, /Detected start command: npm start/);
+  assert.match(hints, /package\.json scripts:/);
+  assert.match(hints, /start: node server\.js/);
+  assert.match(L.launchHints(os.tmpdir()), /No start command detected/);
+});
+
 test('the decide route needs feedback to reject a human approval, and records a decision once', { timeout: 120000 }, async () => {
   const { createServer } = await import('../src/api/server.ts');
   const port = await freePort();

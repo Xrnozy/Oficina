@@ -52,13 +52,34 @@ export function listEvents(opts: { runId?: string; types?: string[]; sinceSeq?: 
   }));
 }
 
+// Verified prefix of the chain: events are append-only, so each check continues where the last one stopped instead of
+// re-hashing the whole log (the health endpoint did that on every call — seconds on a long-lived database).
+// A full pass still runs every FULL_PASS_MS, so an edit to an older, already verified row is caught too.
+let verified = { seq: 0, hash: GENESIS, count: 0 };
+let fullPassAt = 0;
+const FULL_PASS_MS = 10 * 60_000;
+
 export function verifyChain(): { ok: boolean; checked: number; brokenAt?: number } {
-  const evs = listEvents({ limit: 100000 });
-  let prev = GENESIS;
-  for (const ev of evs) {
-    const expect = sha256(ev.prevHash + ev.ts + ev.type + JSON.stringify(ev.payload));
-    if (ev.prevHash !== prev || ev.hash !== expect) return { ok: false, checked: ev.seq, brokenAt: ev.seq };
-    prev = ev.hash;
+  // the row at the verified point changed or went missing, or a full pass is due: start over from the beginning
+  const at = verified.seq ? q1('SELECT * FROM events WHERE seq = ?', verified.seq) : null;
+  const atOk = !verified.seq || (!!at && at.hash === verified.hash
+    && sha256(String(at.prev_hash) + String(at.ts) + String(at.type) + JSON.stringify(JSON.parse(String(at.payload || '{}')))) === verified.hash);
+  if (Date.now() - fullPassAt > FULL_PASS_MS || !atOk) {
+    verified = { seq: 0, hash: GENESIS, count: 0 };
+    fullPassAt = Date.now();
   }
-  return { ok: true, checked: evs.length };
+  let prev = verified.hash;
+  let count = verified.count;
+  for (;;) {
+    const evs = listEvents({ sinceSeq: verified.seq, limit: 5000 });
+    if (!evs.length) break;
+    for (const ev of evs) {
+      const expect = sha256(ev.prevHash + ev.ts + ev.type + JSON.stringify(ev.payload));
+      if (ev.prevHash !== prev || ev.hash !== expect) return { ok: false, checked: ev.seq, brokenAt: ev.seq };
+      prev = ev.hash;
+      count++;
+      verified = { seq: ev.seq, hash: ev.hash, count };
+    }
+  }
+  return { ok: true, checked: count };
 }

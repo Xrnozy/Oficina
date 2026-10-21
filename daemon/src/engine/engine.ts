@@ -1,6 +1,7 @@
 import { DATA_DIR, q, q1, run, tx } from '../db.ts';
 import { bindToRun, manifestFingerprint, manifestSection, removeAttachment } from '../services/attachments.ts';
-import { appInfo, appLog, diagnose, openBrowser, probeRoutes, safeRoutePath, startApp, stopApp, type AppInfo, type Diagnostics } from '../services/app-launcher.ts';
+import { appInfo, appLog, diagnose, launchHints, openBrowser, probeRoutes, safeRoutePath, safeUrl, startApp, stopApp, type AppInfo, type Diagnostics, type LaunchConfig } from '../services/app-launcher.ts';
+import { closeReviewProxy, ensureReviewProxy, reviewProxyBase, reviewTabOpen, setReviewTarget, type ReviewHooks } from '../services/review-proxy.ts';
 import { emit, onEvent } from '../bus.ts';
 import { anyGlobMatch, compactLog, minutesFromNow, now, parseJson, sha256, shortId, ulid } from '../util.ts';
 import { rowToCycle, rowToRun, rowToTask, rowToWorkItem } from '../rows.ts';
@@ -15,6 +16,7 @@ import {
 import { checkByName, deriveChecks, repoChecks, runCheck } from '../services/verify.ts';
 import { fileErrorReport, lessonsFor, openErrorBySignature, recordReviewerFlag, resolveError, rowToError } from '../services/errors.ts';
 import { buildContextPack, type ContextPack } from '../services/context.ts';
+import { isAsset } from '../services/repo-map.ts';
 import { finalizeApprovedPrompt, renderPrompt, type RenderedPrompt } from './prompts.ts';
 import {
   candidatesForRole, dispatchThroughAdapter, getAgent, getAccount, pickAgent,
@@ -25,14 +27,15 @@ import { extractMessages, formatInbox, postMessage, takeInbox } from '../service
 import { envelopeText, handoffEnvelope, STRICT_REPLY_KINDS, validateReply } from '../services/handoffs.ts';
 import { backoffDelayMs, classifyFailure, fixHintFor, notifyOnce } from '../services/failure.ts';
 import { getAdapter } from '../adapters/index.ts';
-import { killCliChildrenForRun } from '../adapters/cli.ts';
-import { classifyChangeRisk, requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
+import { killCliChildForWorkItem, killCliChildrenForRun } from '../adapters/cli.ts';
+import { classifyChangeRisk, decideApproval, requestApproval, resolveAction, scanDeliveredFiles } from '../services/policy.ts';
 import { AdapterError } from '../adapters/types.ts';
 import { beginCheckpoint, endCheckpoint, getCheckpoint, recoverInterruptedCheckpoints, setCheckpointCommit, type Checkpoint } from '../services/checkpoints.ts';
 import { changedFilesBetween, displayDiff, liveChanges, snapshotTree, snapshotTreeAsync, snapshotTreeRecent } from '../services/snapshot.ts';
 import { buildCommitMessage, commitPaths, currentBranch, dirtyPaths, planTaskCommit } from '../services/commits.ts';
 import { skillsFor } from '../services/skills.ts';
 import { finalizeRunSummary } from '../services/summary.ts';
+import { baselineSettled, gatingAllowed, nonGatingNotes, profileForPrompt, profileSection, startBaseline, syncDetectedChecks } from '../services/project-profile.ts';
 import {
   activeWorkflowFor, getWorkflowVersion, latestVersionOf, DEFAULT_MAX_LOOPS,
   type WfCondition, type WfEdge, type WfGraph, type WfNode,
@@ -101,7 +104,7 @@ function setRunStatus(runId: string, status: Run['status'], extra: Record<string
 
 function setTaskStatus(taskId: string, status: TaskStatus, actor = 'engine', extra: Record<string, unknown> = {}): void {
   run('UPDATE tasks SET status = ? WHERE id = ?', status, taskId);
-  if (['done', 'failed', 'cancelled', 'blocked'].includes(status)) { closeTaskCheckpoint(taskId); stopApp(taskId); }
+  if (['done', 'failed', 'cancelled', 'blocked'].includes(status)) { closeTaskCheckpoint(taskId); endReview(taskId); }
   const t = getTask(taskId);
   emit('task.status', actor, { taskId, status, title: t?.title, ...extra }, t?.runId ?? null, taskId);
 }
@@ -110,6 +113,7 @@ function setTaskStatus(taskId: string, status: TaskStatus, actor = 'engine', ext
 // downstream stages get only what the task changed. Desk jobs (accept, prompt
 // pipeline) get no repository context at all.
 const TASK_SCOPE_KINDS: WorkItemKind[] = ['qa', 'review', 'fix', 'analyse'];
+const PROFILE_SKIP_KINDS: WorkItemKind[] = ['accept', 'prompt', 'prompt-review', 'diagnose', 'doc'];
 
 // Context pack sized to the agent's configured context limit (spec 3).
 function packFor(repo: Repo | null | undefined, task: Task | null, c: Candidate, wanted: number, kind?: WorkItemKind, opts: { diffChars?: number } = {}): ContextPack {
@@ -133,6 +137,12 @@ function packFor(repo: Repo | null | undefined, task: Task | null, c: Candidate,
     repo: repo ?? null, task, tokenBudget: contextBudget(c.agent.settings, c.model, wanted),
     scope, changedFiles: changed, excerpts, basePath: task?.worktree ?? undefined,
   });
+  // what the project is built with and what good work means in its domain — for the work that plans, builds,
+  // tests, reviews or diagnoses it (desk work judging a report or a brief does not need it)
+  if (!kind || !PROFILE_SKIP_KINDS.includes(kind)) {
+    const profile = profileSection(profileForPrompt(repo), { paths: task?.affectedPaths, planning: !task });
+    if (profile) pack.profile = profile;
+  }
   // CLI agents (Claude Code, Cursor, Devin) open files with their own tools —
   // pasting excerpts too made every prompt pay for the same files twice. They
   // get the paths; API models (no tools) still get the excerpts.
@@ -491,7 +501,7 @@ export function deleteTask(taskId: string): { ok: true; title: string } | { erro
     run('DELETE FROM tasks WHERE id = ?', t.id);
   });
   try { fs.rmSync(path.join(DATA_DIR, 'handoff', `${t.id}.md`), { force: true }); } catch { /* notes are a courtesy */ }
-  stopApp(t.id);
+  endReview(t.id);
   emit('task.deleted', 'owner', { taskId: t.id, title: t.title, status: t.status }, t.runId, t.id);
   void maybeAdvanceRun(t.runId);
   return { ok: true, title: t.title };
@@ -547,13 +557,46 @@ export function stopRun(runId: string, reason = 'OWNER'): void {
   // cancelled first, so a process that dies now (and the router's fallback logic) sees that this was a stop
   for (const wi of open) run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
   killCliChildrenForRun(runId);
-  for (const t of q('SELECT id FROM tasks WHERE run_id = ?', runId)) stopApp(t.id as string);
+  for (const t of q('SELECT id FROM tasks WHERE run_id = ?', runId)) endReview(t.id as string);
   // nothing of this run is working any more: free its agents and the CLI sessions they were holding
   for (const wi of open) {
     run('UPDATE cli_sessions SET busy_item = NULL WHERE busy_item = ?', wi.id);
     const other = q1(`SELECT id FROM work_items WHERE agent_id = ? AND status IN ('queued','running') LIMIT 1`, wi.agent_id as string);
     if (!other) setAgentStatus(wi.agent_id as string, 'idle');
   }
+}
+
+/**
+ * Stop one agent's current work without stopping the run. Its process is killed, the work item is cancelled and the
+ * agent and its CLI session are freed. The task it was on is put on hold (otherwise the engine would hand it straight
+ * back to the same agent); work with no task (the planner) pauses the run instead. The owner releases it again from
+ * the task board or by resuming the run.
+ */
+export function stopAgent(agentId: string): { stopped: number; heldTasks: string[]; pausedRuns: string[] } {
+  const open = q(`SELECT id, run_id, task_id FROM work_items WHERE agent_id = ? AND status IN ('queued','running','waiting')`, agentId);
+  // cancelled first, so a process that dies now (and the router's fallback logic) sees that this was a stop
+  for (const wi of open) run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
+  for (const wi of open) killCliChildForWorkItem(wi.id as string);
+  const heldTasks: string[] = [];
+  const pausedRuns: string[] = [];
+  for (const wi of open) {
+    run('UPDATE cli_sessions SET busy_item = NULL WHERE busy_item = ?', wi.id);
+    emit('workitem.cancelled', 'owner', { agentId, stoppedAgent: true }, wi.run_id as string | null, wi.id as string);
+    const task = wi.task_id ? getTask(wi.task_id as string) : null;
+    if (task && !TERMINAL_TASK.includes(task.status)) {
+      if (task.status !== 'held' && !heldTasks.includes(task.id)) {
+        setTaskMeta(task.id, 'heldFrom', task.status);
+        setTaskStatus(task.id, 'held', 'owner', { reason: 'its agent was stopped by the owner' });
+        closeTaskCheckpoint(task.id);
+        heldTasks.push(task.id);
+      }
+    } else if (!task && wi.run_id && !pausedRuns.includes(wi.run_id as string)) {
+      const r = getRun(wi.run_id as string);
+      if (r?.status === 'running') { setRunStatus(r.id, 'paused'); pausedRuns.push(r.id); }
+    }
+  }
+  setAgentStatus(agentId, 'idle');
+  return { stopped: open.length, heldTasks, pausedRuns };
 }
 
 // ---------------------------------------------------------------------------
@@ -588,8 +631,18 @@ async function dispatchPlan(runId: string, bootstrap: boolean): Promise<void> {
   }
 
   const repo = getRepo(r.repoId);
+  // the first plan of a run: register the checks the project's stacks offer (when the owner configured none) and
+  // measure them on the untouched repository in the background, while the PM plans
+  if (bootstrap && repo) {
+    try { await syncDetectedChecks(repo); } catch (e) { emit('engine.error', 'engine', { where: 'checks.detect', error: String((e as Error)?.message ?? e).slice(0, 300) }, runId); }
+    void startBaseline(repo, runId, {
+      tree: () => snapshotTreeAsync(repo.path),
+      runCheck: async (row) => runCheck({ check: rowToCheckFromRow(row), worktree: repo.path, runId, ref: 'baseline' }),
+    });
+  }
   const pack = packFor(repo, null, candidate, 20000);
   const cycleSummary = lastCycleSummary(runId);
+  const notGating = repo ? nonGatingNotes(repo.id) : '';
   const dodRows = q1('SELECT items FROM dod WHERE id = ?', r.dodId);
   const prompt = renderPrompt({
     kind: 'plan', agent: candidate.agent, role: candidate.role, task: null, goal: r.goal, pack, adapterId: candidate.provider?.adapterId,
@@ -598,7 +651,7 @@ async function dispatchPlan(runId: string, bootstrap: boolean): Promise<void> {
       dodStatus: JSON.stringify(parseJson(dodRows?.items as string, [])),
       openErrors: JSON.stringify(q(`SELECT id, title, severity, status FROM error_reports WHERE run_id = ? AND status NOT IN ('resolved','wontfix')`, runId)),
       bootstrap,
-      availableChecks: JSON.stringify(repo ? repoChecks(repo.id).map((c) => c.name) : []),
+      availableChecks: JSON.stringify(repo ? repoChecks(repo.id).map((c) => c.name) : []) + (notGating ? `\n${notGating}` : ''),
       // progress tracking: who holds each task and in which role
       existingTasks: JSON.stringify(runTasks(runId).map((t) => ({
         id: t.id, title: t.title, type: t.type, status: t.status, role: roleNameFor('implement', t),
@@ -781,6 +834,12 @@ function shaKey(taskId: string, kind: string, prompt: string): string {
   return `${taskId}:${kind}:${prompt.length}:${sha256(prompt)}`;
 }
 
+// A work item's outcome may be recorded only while it is still 'running': cancelled (stop, abort), interrupted (stuck
+// detector, restart) or already delivered means another path owns it now.
+function isStillRunning(wiId: string): boolean {
+  return getWorkItem(wiId)?.status === 'running';
+}
+
 function scheduleTimer(runId: string | null, inMinutes: number, type: string, payload: Record<string, unknown>): void {
   run('INSERT INTO timers (id, run_id, fire_at, type, payload) VALUES (?,?,?,?,?)',
     ulid(), runId, minutesFromNow(inMinutes), type, JSON.stringify(payload));
@@ -790,6 +849,14 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   const r = getRun(wi.runId);
   if (!r) return;
   const repo = getRepo(r.repoId);
+  // direct mode: the baseline checks run in this same working tree — a writer starts once they are done, so the
+  // baseline describes the repository before any change (bounded wait; usually over while the PM plans)
+  if (repo && isDirect(r) && ['implement', 'fix', 'test', 'doc'].includes(wi.kind) && !(await baselineSettled(repo.id, 0))) {
+    emit('agent.activity', candidate.agent.name, { workItemId: wi.id, taskId: wi.taskId, kind: 'status', text: 'Waiting for the baseline checks to finish before changing the repository' }, wi.runId, wi.id);
+    await baselineSettled(repo.id);
+    // stopped meanwhile (stop and hard pause cancel queued items); a soft pause lets dispatched items finish, as ever
+    if (['cancelled', 'interrupted', 'failed'].includes(q1('SELECT status FROM work_items WHERE id = ?', wi.id)?.status as string)) return;
+  }
   const task = wi.taskId ? (getTask(wi.taskId) ?? null) : null;
   // Skills attached to this agent or its role, relevant to this work, ride
   // along with the prompt. The stored (approved) prompt stays as it was.
@@ -837,7 +904,7 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
   // prompt falls back to another PM, never to a specialist).
   const fallbacks = candidatesForRole(r.workspaceId, candidate.role.name).filter((c) => c.agent.id !== candidate.agent.id);
   const stuckMin = (candidate.provider?.tier === 1 && candidate.provider.kind === 'agent') ? r.limits.stuckAgentMinHosted : r.limits.stuckAgentMinApi;
-  scheduleTimer(wi.runId, stuckMin, 'heartbeat.missed', { workItemId: wi.id });
+  scheduleTimer(wi.runId, stuckMin, 'heartbeat.missed', { workItemId: wi.id, limitMin: stuckMin });
 
   try {
     // a Human approval node's agent was chosen by the owner for this: any hands-on role may do it, but not the PM or the Prompt Creator
@@ -914,9 +981,11 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
     );
 
     if (live) clearInterval(live);
-    // a stopped/hard-paused run killed this work item's process — the adapter
-    // resolved, but the result must not be recorded as a delivery
-    if (getWorkItem(wi.id)?.status === 'cancelled') {
+    // a stopped/hard-paused run killed this work item's process, or the stuck
+    // detector gave up on it and already re-queued the work — the adapter
+    // resolved, but the result must not be recorded as a delivery (it would
+    // advance the task a second time)
+    if (!isStillRunning(wi.id)) {
       if (agentCp) { try { endCheckpoint(agentCp.id, 'interrupted'); } catch { /* repo gone */ } agentCp = null; }
       setAgentStatus(candidate.agent.id, 'idle');
       return;
@@ -972,6 +1041,9 @@ async function executeWorkItem(wi: WorkItem, candidate: Candidate, approvedPromp
       setAgentStatus(candidate.agent.id, 'idle');
       return;
     }
+    // the stuck detector already took this item over (killed it, re-queued the task): handling the failure again
+    // would count the attempt twice and dispatch a second retry
+    if (getWorkItem(wi.id)?.status === 'interrupted') { setAgentStatus(candidate.agent.id, 'idle'); return; }
     run(`UPDATE work_items SET status = 'failed', finished_at = ? WHERE id = ?`, now(), wi.id);
     emit('workitem.failed', 'engine', { kind: wi.kind, error: msg.slice(0, 400) }, wi.runId, wi.id);
     // Surface the reason in live output too — workitem.failed isn't rendered
@@ -1061,7 +1133,8 @@ async function handleWorkItemFailure(wi: WorkItem, msg: string): Promise<void> {
       const transient = /^(rate-limit|server|timeout|network):/.test(msg);
       if (fails < 3 && transient) {
         emit('plan.retry', 'engine', { attempt: fails, error: msg.slice(0, 200) }, wi.runId);
-        void dispatchPlan(wi.runId, true);
+        // a re-plan mid-run is not the bootstrap plan (that one also drafts the Definition of Done)
+        void dispatchPlan(wi.runId, getRun(wi.runId)?.status === 'draft');
       } else {
         requestApproval({
           action: 'plan.escalate', runId: wi.runId, requestedBy: 'engine',
@@ -1075,9 +1148,14 @@ async function handleWorkItemFailure(wi: WorkItem, msg: string): Promise<void> {
   }
   const task = getTask(wi.taskId);
   if (!task) return;
+  // A step of a custom workflow goes down the generic path below, which retries the same step (the assign sweep resumes
+  // the task's in-flight node). The fixed pipeline's special cases would take the task out of the owner's graph (QA
+  // skipped into a pipeline review) or, for prompt steps, drop it silently — graph runs keep no prompt job.
+  const graphStep = !!wi.workflowNodeId && !!graphFor(getRun(wi.runId));
+  if (graphStep) { promptJobs.delete(wi.id); pendingAnalysis.delete(wi.id); }
   // A prompt stage that cannot run (every backend down) must not let the task
   // proceed on an unreviewed prompt — the owner decides instead.
-  if (wi.kind === 'prompt' || wi.kind === 'prompt-review') {
+  if (!graphStep && (wi.kind === 'prompt' || wi.kind === 'prompt-review')) {
     const job = promptJobs.get(wi.id);
     promptJobs.delete(wi.id);
     // provider hiccups (API errors, overload, rate limits, timeouts) are
@@ -1103,14 +1181,14 @@ async function handleWorkItemFailure(wi: WorkItem, msg: string): Promise<void> {
     return;
   }
   // a tester that cannot run must not reset the task — review it without QA
-  if (wi.kind === 'qa') {
+  if (!graphStep && wi.kind === 'qa') {
     emit('qa.skipped', 'engine', { taskId: task.id, reason: msg.slice(0, 200) }, wi.runId, task.id);
     setTaskStatus(task.id, 'in-review', 'engine', { reason: 'QA unavailable' });
     dispatchReview(task, [], `QA could not run: ${msg.slice(0, 300)}`);
     return;
   }
   // analyse items failing must not reset the task — file a rule-only report.
-  if (wi.kind === 'analyse') {
+  if (!graphStep && wi.kind === 'analyse') {
     const pending = pendingAnalysis.get(wi.id);
     pendingAnalysis.delete(wi.id);
     if (pending) {
@@ -1518,7 +1596,7 @@ async function handleDelivered(wi: WorkItem, result: NonNullable<WorkItem['resul
 // Verify → document → fix/review (phases 5–7)
 // ---------------------------------------------------------------------------
 
-function selectChecksForTask(repo: Repo, filesChanged: string[]): Check[] {
+export function selectChecksForTask(repo: Repo, filesChanged: string[]): Check[] {
   const all = repoChecks(repo.id);
   const intersects = (globs: string[]) =>
     globs.some((g) => {
@@ -1527,7 +1605,12 @@ function selectChecksForTask(repo: Repo, filesChanged: string[]): Check[] {
     });
   // Command checks run per-task, scoped by affectedPaths (empty = global code
   // check). errors:* and review:* are DoD gates — integration branch only.
-  const codeChecks = all.filter((c) => c.command && (!c.affectedPaths.length || intersects(c.affectedPaths)));
+  // A check detected from the project profile gates only when it passed on the
+  // untouched repository (a failure that was already there is not this task's),
+  // and is not run for a change that touched only documentation or assets.
+  const docsOnly = filesChanged.length > 0 && filesChanged.every((f) => /\.(md|mdx|txt|rst|adoc)$/i.test(f) || isAsset(f));
+  const codeChecks = all.filter((c) => c.command && (!c.affectedPaths.length || intersects(c.affectedPaths))
+    && gatingAllowed(c) && !(c.origin === 'detected' && docsOnly));
   // doc checks run per-task only when their target file was changed.
   const docChecks = all.filter((c) => !c.command && c.kind === 'doc').filter((c) => {
     const m = c.passRule.match(/\(([^,)]+)/);
@@ -1581,6 +1664,8 @@ async function verifyDeliveredTask(wi: WorkItem, task: Task, result: NonNullable
   }
 
   setTaskStatus(task.id, 'verifying');
+  // the baseline decides which detected checks gate: wait (bounded) if it is still being measured
+  await baselineSettled(repo.id);
   const checks = selectChecksForTask(repo, files);
   const results: { cr: ReturnType<typeof rowToCheckRun>; check: Check }[] = [];
   for (const check of checks) {
@@ -2349,6 +2434,7 @@ function rowToCheckFromRow(r: Record<string, unknown>): Check {
     id: r.id as string, repoId: r.repo_id as string, name: r.name as string, kind: r.kind as Check['kind'],
     command: r.command as string, parser: r.parser as string, passRule: r.pass_rule as string,
     timeoutSec: r.timeout_sec as number, affectedPaths: parseJson(r.affected_paths as string, []), protected: r.protected as number,
+    origin: (r.origin as Check['origin']) ?? 'owner', baseline: (r.baseline as string) ?? '',
   };
 }
 
@@ -2415,7 +2501,34 @@ export async function evaluateDodOnIntegration(runId: string): Promise<{ pass: n
   return { pass, total: required, items };
 }
 
-export async function maybeAdvanceRun(runId: string): Promise<void> {
+// One advance per run at a time. Deliveries, approvals, timers and the API all call this, and the body awaits DoD checks
+// part-way — two calls overlapping there both saw "every task finished" and each began a new cycle and dispatched a plan.
+// A call made while one is running is folded into a single re-run once it finishes, so no trigger is lost.
+const advancing = new Map<string, Promise<void>>();
+const advanceAgain = new Set<string>();
+
+export function maybeAdvanceRun(runId: string): Promise<void> {
+  const busy = advancing.get(runId);
+  if (busy) { advanceAgain.add(runId); return busy; }
+  const p = (async () => {
+    try {
+      for (let pass = 0; pass < 25; pass++) {
+        advanceAgain.delete(runId);
+        try { await advanceRunOnce(runId); }
+        catch (e) { console.error('[engine] advancing run failed', runId, e); emit('engine.error', 'engine', { where: 'advance', error: String((e as Error)?.message ?? e).slice(0, 400) }, runId); }
+        if (!advanceAgain.has(runId)) return;
+      }
+      // still being re-triggered after many passes: carry on from a fresh call instead of looping here
+      setTimeout(() => { void maybeAdvanceRun(runId); }, 1000);
+    } finally {
+      advancing.delete(runId);
+    }
+  })();
+  advancing.set(runId, p);
+  return p;
+}
+
+async function advanceRunOnce(runId: string): Promise<void> {
   const r0 = getRun(runId);
   if (r0?.status === 'running') retryPendingAdoption(runId);
   const r = getRun(runId);
@@ -2574,18 +2687,40 @@ function closeCycle(runId: string, res?: { pass: number; total: number }): void 
   }
 }
 
+// Run snapshots: the timer takes one every 15 s for each running run. Writing every one unconditionally stored a full
+// copy of every task and work item (results included) four times a minute — a long run grew the database by hundreds of
+// MB of identical rows. Now a snapshot is written only when the run's state changed (heartbeat timestamps don't count),
+// and each run keeps its newest RUN_SNAPSHOTS_KEPT.
+const RUN_SNAPSHOTS_KEPT = 20;
+const lastSnapshotHash = new Map<string, string>();
+
 export function checkpoint(runId: string): void {
+  const workItems = q('SELECT * FROM work_items WHERE run_id = ?', runId);
   const snapshot = {
     run: q1('SELECT * FROM runs WHERE id = ?', runId),
     tasks: q('SELECT * FROM tasks WHERE run_id = ?', runId),
-    workItems: q('SELECT * FROM work_items WHERE run_id = ?', runId),
+    workItems,
     dod: q1('SELECT * FROM dod WHERE run_id = ?', runId),
   };
+  const json = JSON.stringify(snapshot);
+  // (the run's own pointer to its latest snapshot changes with every write, so it is not part of the comparison)
+  const hash = sha256(JSON.stringify({ ...snapshot, run: snapshot.run && { ...snapshot.run, checkpoint_id: null }, workItems: workItems.map((w) => ({ ...w, heartbeat_at: null })) }));
+  if (lastSnapshotHash.get(runId) === hash) return;
+  lastSnapshotHash.set(runId, hash);
   const seq = (q1('SELECT MAX(seq) s FROM events')?.s as number) ?? 0;
   const id = ulid();
   run('INSERT INTO checkpoints (id, run_id, seq, snapshot, created_at) VALUES (?,?,?,?,?)',
-    id, runId, seq, JSON.stringify(snapshot), now());
+    id, runId, seq, json, now());
   run('UPDATE runs SET checkpoint_id = ? WHERE id = ?', id, runId);
+  run(`DELETE FROM checkpoints WHERE run_id = ? AND id NOT IN (SELECT id FROM checkpoints WHERE run_id = ? ORDER BY seq DESC, rowid DESC LIMIT ?)`, runId, runId, RUN_SNAPSHOTS_KEPT);
+}
+
+/** Boot: drop the surplus snapshots older versions piled up (the newest RUN_SNAPSHOTS_KEPT of every run stay). */
+function pruneRunSnapshots(): void {
+  try {
+    run(`DELETE FROM checkpoints WHERE rowid IN (
+           SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY seq DESC, rowid DESC) n FROM checkpoints) WHERE n > ?)`, RUN_SNAPSHOTS_KEPT);
+  } catch (e) { console.warn('[engine] pruning run snapshots skipped:', String(e).slice(0, 160)); }
 }
 
 // ---------------------------------------------------------------------------
@@ -2606,6 +2741,8 @@ export function ownerEditTask(taskId: string, edits: Partial<Task>, mode: 'finis
   if (mode === 'abort' || edits.status === 'cancelled') {
     for (const wi of q(`SELECT id FROM work_items WHERE task_id = ? AND status IN ('queued','running','waiting')`, taskId)) {
       run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
+      // the agent's process goes too — otherwise it keeps editing files for work that was just taken away from it
+      killCliChildForWorkItem(wi.id as string);
     }
     if (task.branch && !isDirect(getRun(task.runId))) {
       const repo = getRepo(getRun(task.runId)!.repoId)!;
@@ -2621,7 +2758,7 @@ export function ownerEditTask(taskId: string, edits: Partial<Task>, mode: 'finis
     apply(); // finish-then-apply: fields update now; in-flight work continues
     if (mode === 'handoff' && edits.ownerAgentId) {
       const wi = q1(`SELECT id FROM work_items WHERE task_id = ? AND status IN ('queued','running') ORDER BY started_at DESC LIMIT 1`, taskId);
-      if (wi) run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id);
+      if (wi) { run(`UPDATE work_items SET status = 'cancelled', finished_at = ? WHERE id = ?`, now(), wi.id); killCliChildForWorkItem(wi.id as string); }
       run('UPDATE tasks SET owner_agent_id = ?, status = ? WHERE id = ?', edits.ownerAgentId, 'ready', taskId);
       emit('task.handoff', 'owner', { taskId, to: edits.ownerAgentId }, task.runId, taskId);
     }
@@ -2732,18 +2869,25 @@ export function fireDueTimers(): void {
       if (wi && wi.status === 'running') {
         const lastBeat = wi.heartbeatAt ? Date.parse(wi.heartbeatAt) : 0;
         const r = wi.runId ? getRun(wi.runId) : null;
-        const limitMin = r?.limits.stuckAgentMinApi ?? 10;
-        if (Date.now() - lastBeat > limitMin * 60000 - 5000) {
+        // the limit the timer was scheduled with (hosted agents get longer), not always the API one
+        const limitMin = Number(payload.limitMin) || r?.limits.stuckAgentMinApi || 10;
+        const silentMs = Date.now() - lastBeat;
+        if (silentMs > limitMin * 60000 - 5000) {
+          // stop the agent before handing the work on: left running it kept editing the repository, held its CLI
+          // session, and its late result was recorded as a second delivery of work that had already been re-queued
+          const killed = killCliChildForWorkItem(wi.id);
           run(`UPDATE work_items SET status = 'interrupted', finished_at = ? WHERE id = ?`, now(), wi.id);
-          emit('agent.stuck', 'engine', { workItemId: wi.id, taskId: wi.taskId, kind: wi.kind, minutes: limitMin }, wi.runId, wi.id);
-          // a stuck plan (no task) is retried like any transient failure —
-          // before, nothing re-dispatched it and the run waited forever
-          if (!wi.taskId) { void handleWorkItemFailure(wi, `timeout: no output from the agent for ${limitMin} min`); continue; }
-          if (wi.taskId) {
-            const task = getTask(wi.taskId)!;
-            if (task.attempts + 1 < (r?.limits.sameErrorAttempts ?? 3)) setTaskStatus(task.id, 'ready', 'engine', { reason: 'stuck agent; retrying' });
-            else setTaskStatus(task.id, 'failed', 'engine', { reason: 'stuck agent, retries exhausted' });
-          }
+          run('UPDATE cli_sessions SET busy_item = NULL WHERE busy_item = ?', wi.id);
+          if (wi.agentId && !q1(`SELECT id FROM work_items WHERE agent_id = ? AND status IN ('queued','running') LIMIT 1`, wi.agentId)) setAgentStatus(wi.agentId, 'idle');
+          emit('agent.stuck', 'engine', { workItemId: wi.id, taskId: wi.taskId, kind: wi.kind, minutes: limitMin, killed }, wi.runId, wi.id);
+          emit('agent.output', 'engine', { workItemId: wi.id, taskId: wi.taskId, line: `[error] ${wi.kind}: no sign of life from the agent for ${limitMin} min — stopped it and retrying` }, wi.runId, wi.id);
+          // the same path as any failed dispatch: attempts are counted, backoff, retry on the same workflow step,
+          // PM diagnosis and a Needs-you item once retries run out (before, a task could just end up 'failed' silently)
+          void handleWorkItemFailure(wi, `timeout: no output from the agent for ${limitMin} min`).catch((e) => console.error('[engine] stuck-item recovery failed', e));
+        } else {
+          // still alive: look again when it would next count as silent (the timer used to fire once, so an agent that
+          // went quiet after the first check was never noticed)
+          scheduleTimer(wi.runId, Math.max(0.5, (limitMin * 60000 - silentMs) / 60000 + 0.1), 'heartbeat.missed', { workItemId: wi.id, limitMin });
         }
       }
     }
@@ -2789,6 +2933,19 @@ export function reconcileOnBoot(): void {
     emit('engine.reconciled', 'engine', { workItemId: wi.id, note: 'daemon restarted; work item re-queued' }, wi.run_id as string, wi.id as string);
     if (wi.task_id) setTaskStatus(wi.task_id as string, 'ready', 'engine', { reason: 'daemon restart' });
   }
+  // Tasks that were between two steps when the daemon stopped: a retry waiting out its backoff, a prompt stage pausing
+  // before its retry, checks running. Those waits live in memory, so after a restart nothing would ever pick the task up
+  // again — it sat "in progress" with no agent on it. Parked tasks (waiting for the repository) and tasks waiting on the
+  // owner keep their state.
+  for (const t of q(`SELECT t.id, t.meta FROM tasks t JOIN runs r ON r.id = t.run_id
+                     WHERE r.status IN ('running','pausing','paused','verifying') AND t.status IN ('assigned','in-progress','verifying')
+                       AND NOT EXISTS (SELECT 1 FROM work_items w WHERE w.task_id = t.id AND w.status IN ('queued','running','waiting'))`)) {
+    const meta = parseJson<Record<string, any>>(t.meta as string, {});
+    if (meta.treeWait || meta.promptReady || meta.parkedPrompt || meta.wf?.held || meta.wf?.awaiting) continue;
+    if (meta.wf?.queued?.length && !meta.wf?.nodes?.length) continue;
+    setTaskStatus(t.id as string, 'ready', 'engine', { reason: 'daemon restart: the step it was waiting on is picked up again' });
+  }
+  pruneRunSnapshots();
   for (const r of q(`SELECT id, status FROM runs WHERE status IN ('running','pausing','verifying')`)) {
     if (r.status === 'pausing') setRunStatus(r.id as string, 'paused');
     else { setRunStatus(r.id as string, 'running', { resumed: 'after restart' }); void maybeAdvanceRun(r.id as string); }
@@ -3164,6 +3321,9 @@ Your job:
 2. Read the app's state, its log tail and its error lines (open the log file if you need more) and look for runtime errors, crashed or
    missing background processes, failing routes and warnings that matter.
 3. Write the report the owner reads before testing.
+4. Know how to run this project. The engine tried to start it from the HOW TO RUN block below. If the app is not running or the
+   start command looks wrong, work out the right one from the repository (package.json scripts, README, Makefile, Docker or
+   framework files), install what is missing if you must, and report it in "run" so the engine can start it for the owner.
 
 OUTPUT CONTRACT (mandatory): respond with ONE json code block:
 \`\`\`json
@@ -3173,13 +3333,16 @@ OUTPUT CONTRACT (mandatory): respond with ONE json code block:
  "issues":[{"severity":"low|medium|high","message":"what you saw, and where"}],
  "appStatus":"ready|degraded|failed",
  "routes":[{"label":"Login page","path":"/login","why":"the request was about the login form"}],
- "howToTest":["step the owner should take"]}
+ "howToTest":["step the owner should take"],
+ "run":{"command":"how to start the app (only when the engine could not start it)","cwd":"folder inside the repository, or empty","url":"http://localhost:PORT it listens on, or empty","why":"where you found it"}}
 \`\`\`
 Rules:
 - "routes": paths on the app (they start with "/"), the most relevant first, at most 6. If the work has no screen, use "/" and say so in "why".
 - "testing" lists only what you really checked (the log, the engine's facts, the changed files). Never claim a test you did not do.
 - "issues" lists only what you really saw. An empty list is a valid answer. Never invent a problem to look thorough.
-- Do not edit any file and do not start or stop the app.
+- "run" is optional: leave it out when the app is already running. When you give it, it must be one command that stays in the
+  foreground and serves the app (a dev server), not a build or a command that exits.
+- Do not edit source files. Do not start or stop the app yourself: the engine does that.
 `.trim();
 
 type ApprovalRoute = { label: string; path: string; why: string };
@@ -3197,6 +3360,7 @@ function approvalFacts(r: Run, task: Task, repo: Repo, info: AppInfo, diag: Diag
     prior.length ? `EARLIER REJECTIONS BY THE OWNER (this is a re-review — check they were addressed):\n${prior.map((d, i) => `${i + 1}. ${d.feedback}`).join('\n')}` : '',
     `FILES CHANGED (${files.length}): ${files.slice(0, 40).join(', ') || 'none recorded'}`,
     `(You work in the repository folder: \`git status\` and \`git diff\` show the details.)`,
+    `HOW TO RUN THIS PROJECT (facts from the repository):\n${launchHints(repo.path)}`,
     `APP (started by the engine): ${diag.summary}`,
     `  command: ${info.command ?? 'none'}   folder: ${info.cwd}   log file: ${info.logFile}`,
     info.note ? `  note: ${info.note}` : '',
@@ -3222,7 +3386,7 @@ function approvalEnter(r: Run, task: Task, node: WfNode, viaEdge: WfEdge | null)
   setTaskStatus(task.id, 'verifying', 'engine', { reason: `starting the app for your review: ${node.label}`, node: node.label });
   void approvalPrepare(r, task.id, node, viaEdge).catch((e) => {
     emit('approval.failed', 'engine', { taskId: task.id, nodeId: node.id, error: String(e).slice(0, 300) }, r.id, task.id);
-    stopApp(task.id);
+    endReview(task.id);
     const t = getTask(task.id);
     if (t && !TERMINAL_TASK.includes(t.status)) {
       setTaskStatus(task.id, 'blocked', 'engine', { reason: `could not prepare the approval step: ${String(e).slice(0, 160)}` });
@@ -3236,12 +3400,13 @@ async function approvalPrepare(r: Run, taskId: string, node: WfNode, viaEdge: Wf
   if (!repo) throw new Error('the run has no repository');
   const cfg = node.config?.approval ?? {};
   emit('approval.preparing', 'engine', { taskId, nodeId: node.id, command: cfg.command || 'detect' }, r.id, taskId);
-  const info = await startApp(taskId, cfg, repo.path);
+  const info = await startApp(taskId, launchConfigFor(getTask(taskId), cfg), repo.path);
+  await syncReviewWindow(taskId, info);
   const diag = await diagnose(taskId);
   emit('approval.app', 'engine', { taskId, nodeId: node.id, state: info.state, url: info.url, note: info.note, summary: diag.summary }, r.id, taskId);
   const fresh = getTask(taskId);
   const live = getRun(r.id);
-  if (!fresh || TERMINAL_TASK.includes(fresh.status) || !live || ['done', 'stopped', 'failed'].includes(live.status)) { stopApp(taskId); return; }   // deleted, finished or stopped while the app was starting
+  if (!fresh || TERMINAL_TASK.includes(fresh.status) || !live || ['done', 'stopped', 'failed'].includes(live.status)) { endReview(taskId); return; }   // deleted, finished or stopped while the app was starting
   setTaskMeta(taskId, 'approvalApp', { state: info.state, url: info.url, command: info.command, note: info.note, logFile: info.logFile, startedAt: info.startedAt });
   dispatchAgentNode(live, fresh, node, viaEdge, { contract: APPROVAL_CONTRACT, facts: approvalFacts(live, fresh, repo, info, diag) });
 }
@@ -3252,7 +3417,23 @@ async function approvalReported(wi: WorkItem, result: NonNullable<WorkItem['resu
   const raw = (result.raw ?? {}) as Record<string, any>;
   const j = (raw.json ?? raw) as Record<string, any>;
   const cfg = node.config?.approval ?? {};
-  const info = appInfo(task.id);
+  let info = appInfo(task.id);
+
+  // the agent worked out how to run the project when the engine could not: start it that way, once
+  const alive = (i: AppInfo | null) => !!i && (i.state === 'ready' || i.state === 'starting');
+  const suggested = j.run as { command?: unknown; cwd?: unknown; url?: unknown; why?: unknown } | undefined;
+  const repoForRun = getRepo(r.repoId);
+  if (!alive(info) && repoForRun && typeof suggested?.command === 'string' && suggested.command.trim() && !cfg.command?.trim()) {
+    const attempt: LaunchConfig = {
+      command: asStr(suggested.command, 300), cwd: asStr(suggested.cwd, 200) || undefined,
+      url: suggested.url && safeUrl(String(suggested.url)) ? String(suggested.url) : cfg.url, readyTimeoutSec: cfg.readyTimeoutSec,
+    };
+    emit('approval.retry', usedAgentId, { taskId: task.id, nodeId: node.id, command: attempt.command, why: asStr(suggested.why, 200) }, r.id, task.id);
+    info = await startApp(task.id, attempt, repoForRun.path);
+    if (alive(info)) setTaskMeta(task.id, 'approvalRun', attempt);
+    setTaskMeta(task.id, 'approvalApp', { state: info.state, url: info.url, command: info.command, note: info.note, logFile: info.logFile, startedAt: info.startedAt });
+    await syncReviewWindow(task.id, info);
+  }
 
   // the screens to offer: the owner's own list first, then the agent's picks — plain paths only, never another site
   const routes: ApprovalRoute[] = [];
@@ -3289,7 +3470,8 @@ async function approvalReported(wi: WorkItem, result: NonNullable<WorkItem['resu
     howToTest: (Array.isArray(j.howToTest) ? j.howToTest : []).map((c: unknown) => asStr(c, 300)).filter(Boolean).slice(0, 10),
     agent: getAgent(usedAgentId)?.name ?? usedAgentId,
   };
-  const offered = routes.map((x, i) => ({ ...x, url: base ? `${base}${x.path}` : null, probe: probes[i] ? { status: probes[i].status, ms: probes[i].ms, error: probes[i].error } : null }));
+  const proxyBase = reviewProxyBase(task.id);
+  const offered = routes.map((x, i) => ({ ...x, url: base ? `${base}${x.path}` : null, reviewUrl: base && proxyBase ? `${proxyBase}${x.path}` : null, probe: probes[i] ? { status: probes[i].status, ms: probes[i].ms, error: probes[i].error } : null }));
   const app = { state: info?.state ?? 'none', url: base, command: info?.command ?? null, pid: info?.pid ?? null, note: info?.note ?? '', logFile: info?.logFile ?? null, listening: diag.listening };
   setTaskMeta(task.id, 'approvalReview', { at: now(), report, routes: offered, app, errorLines: diag.errorLines.slice(-8), logFile: info?.logFile ?? null });
 
@@ -3309,7 +3491,54 @@ async function approvalReported(wi: WorkItem, result: NonNullable<WorkItem['resu
     saveWfState(after, s2);
     setTaskStatus(task.id, 'waiting-input', 'engine', { reason: `waiting for your approval: ${node.label}` });
   }
-  if (cfg.openBrowser !== false && offered[0]?.url) openBrowser(offered[0].url);
+  // a review tab that is already open picks the new round up by itself; otherwise open one on the page with the review panel
+  if (cfg.openBrowser !== false && !reviewTabOpen(task.id)) { const first = offered[0]; const target = first?.reviewUrl ?? first?.url; if (target) openBrowser(target); }
+}
+
+/** The start settings for an app: what the owner configured wins, then what an agent worked out in an earlier round. */
+function launchConfigFor(task: Task | null | undefined, cfg: LaunchConfig): LaunchConfig {
+  const learned = (task?.meta?.approvalRun ?? {}) as LaunchConfig;
+  const own = Object.fromEntries(Object.entries(cfg).filter(([, v]) => v !== undefined && v !== ''));
+  return { ...learned, ...own };
+}
+
+/** Stop the app. The review window stays a little longer so its panel can show the last message. */
+function endReview(taskId: string): void { stopApp(taskId); closeReviewProxy(taskId, 45_000); }
+
+/** Create the review window (the proxy with the widget) for a task, pointed at the app when it is up. */
+async function syncReviewWindow(taskId: string, info: AppInfo | null): Promise<void> {
+  const up = !!info && (info.state === 'ready' || info.state === 'starting') && !!info.url;
+  try { await ensureReviewProxy(taskId, up ? info!.url : null, reviewHooks(taskId)); }
+  catch (e) { emit('approval.failed', 'engine', { taskId, error: `could not open the review window: ${String(e).slice(0, 160)}` }, null, taskId); }
+}
+
+function reviewHooks(taskId: string): ReviewHooks {
+  const pendingOf = () => q1(`SELECT id, payload FROM approvals WHERE task_id = ? AND action = 'human.approval' AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, taskId);
+  return {
+    state() {
+      const t = getTask(taskId);
+      const rn = t ? getRun(t.runId) : null;
+      const decisions = ((t?.meta?.humanDecisions ?? []) as { decision: 'approved' | 'rejected'; feedback: string; round: number }[]);
+      const last = decisions[decisions.length - 1];
+      const a = pendingOf();
+      if (a && t) {
+        const p = parseJson<Record<string, any>>(a.payload as string, {});
+        const routes = (p.routes ?? []).map((x: any) => ({ path: x.path, label: x.label, why: x.why, probe: x.probe }));
+        return { phase: 'ready', approvalId: a.id, title: t.title, report: p.report ?? {}, routes, round: decisions.length + 1, history: decisions.slice(-5) };
+      }
+      if (!t || !rn || ['done', 'stopped', 'failed'].includes(rn.status) || (TERMINAL_TASK.includes(t.status) && !last)) return { phase: last ? 'decided' : 'closed', last, title: t?.title ?? '', message: 'This review is over. The task or the run was stopped.' };
+      if (last) return { phase: 'decided', last, title: t.title };
+      return { phase: 'preparing', title: t.title };
+    },
+    decide(approve, reason, page) {
+      const a = pendingOf();
+      if (!a) return { error: 'This review was already decided or is not waiting for you any more.', status: 409 };
+      if (!approve && !reason) return { error: 'Say what is wrong or what should be better. The agents work from your words.', status: 400 };
+      const text = approve ? (reason || 'approved in the app') : `${reason}${page ? `\n(The owner was on this page of the app: ${page})` : ''}`;
+      decideApproval(a.id as string, approve, text);
+      return { ok: true };
+    },
+  };
 }
 
 // What the owner can do with the app while reviewing: start it again (after a crash, or to reset its state), stop it, or open a
@@ -3318,7 +3547,7 @@ export async function reviewAppControl(approvalId: string, action: 'restart' | '
   const a = q1('SELECT * FROM approvals WHERE id = ?', approvalId);
   if (!a || a.action !== 'human.approval' || !a.task_id) return { error: 'not an approval with an app to review', status: 404 };
   const taskId = a.task_id as string;
-  if (action === 'stop') { stopApp(taskId); return { ok: true, app: appInfo(taskId), log: appLogLines(taskId) }; }
+  if (action === 'stop') { stopApp(taskId); setReviewTarget(taskId, null); return { ok: true, app: appInfo(taskId), log: appLogLines(taskId) }; }
   if (a.status !== 'pending') return { error: 'this review has already been decided — the app was stopped', status: 409 };
   const task = getTask(taskId);
   const r = task ? getRun(task.runId) : null;
@@ -3328,12 +3557,15 @@ export async function reviewAppControl(approvalId: string, action: 'restart' | '
     const info = appInfo(taskId);
     if (!info?.url) return { error: 'the app has no address — restart it first', status: 409 };
     const target = url ? url : info.url;
-    if (target !== info.url && !target.startsWith(info.url + '/')) return { error: "that address is not part of the app under review", status: 400 };
+    const proxy = reviewProxyBase(taskId);
+    const inProxy = !!proxy && (target === proxy || target.startsWith(proxy + '/'));
+    if (target !== info.url && !target.startsWith(info.url + '/') && !inProxy) return { error: "that address is not part of the app under review", status: 400 };
     if (!openBrowser(target)) return { error: 'could not open the browser from here — use the link instead', status: 409 };
     return { ok: true, app: info, log: appLogLines(taskId) };
   }
   const node = wfNode(graphFor(r)?.graph ?? { nodes: [], edges: [] }, (parseJson<Record<string, unknown>>(a.payload as string, {}).nodeId as string) ?? '');
-  const info = await startApp(taskId, node?.config?.approval ?? {}, repo.path);
+  const info = await startApp(taskId, launchConfigFor(task, node?.config?.approval ?? {}), repo.path);
+  await syncReviewWindow(taskId, info);
   setTaskMeta(taskId, 'approvalApp', { state: info.state, url: info.url, command: info.command, note: info.note, logFile: info.logFile, startedAt: info.startedAt });
   emit('approval.app', 'owner', { taskId, nodeId: node?.id, state: info.state, url: info.url, note: info.note, restarted: true }, r.id, taskId);
   return { ok: true, app: info, log: appLogLines(taskId) };
@@ -3349,7 +3581,7 @@ function humanApprovalResume(r: Run, task: Task, approved: boolean, awaiting: Wf
   const entry = { at: now(), nodeId: node?.id ?? awaiting?.nodeId ?? '', nodeLabel: node?.label ?? 'Human approval', decision: approved ? 'approved' : 'rejected', feedback, approvalId, round: prior.length + 1 };
   setTaskMeta(task.id, 'humanDecisions', [...prior, entry]);
   emit('human.decided', 'owner', { taskId: task.id, nodeId: entry.nodeId, nodeLabel: entry.nodeLabel, decision: entry.decision, feedback, approvalId, round: entry.round }, r.id, task.id);
-  stopApp(task.id);
+  if (approved) endReview(task.id); else { stopApp(task.id); setReviewTarget(task.id, null); }   // after a rejection the review tab waits for the next round
   const s = wfState(getTask(task.id)!);
   s.awaiting = undefined;
   saveWfState(task, s);

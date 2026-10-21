@@ -47,6 +47,31 @@ export function detectLaunch(repoPath: string): { command: string | null; urlGue
   return { command: null, urlGuess: null, why: 'no "dev", "start" or "serve" script in package.json' };
 }
 
+/** What an agent needs to know to run the project itself: the detected command, the scripts, the files that show the stack,
+ *  and the part of the README that says how to start it. Facts from the repository, not guesses. */
+export function launchHints(repoPath: string): string {
+  const out: string[] = [];
+  const det = detectLaunch(repoPath);
+  out.push(det.command ? `Detected start command: ${det.command} (from ${det.why}${det.urlGuess ? `; usually listens on ${det.urlGuess}` : ''})` : `No start command detected: ${det.why}.`);
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoPath, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+    const scripts = Object.entries(pkg.scripts ?? {}).slice(0, 12).map(([k, v]) => `  ${k}: ${String(v).slice(0, 100)}`);
+    if (scripts.length) out.push(`package.json scripts:\n${scripts.join('\n')}`);
+    if (!fs.existsSync(path.join(repoPath, 'node_modules'))) out.push('node_modules is missing: dependencies must be installed first (npm install).');
+  } catch { /* not a node project */ }
+  const markers = ['requirements.txt', 'pyproject.toml', 'manage.py', 'app.py', 'main.py', 'Makefile', 'docker-compose.yml', 'Dockerfile', 'go.mod', 'Cargo.toml', 'index.html', '.env.example'].filter((f) => fs.existsSync(path.join(repoPath, f)));
+  if (markers.length) out.push(`Files at the repository root: ${markers.join(', ')}`);
+  for (const name of ['README.md', 'readme.md', 'README']) {
+    try {
+      const text = fs.readFileSync(path.join(repoPath, name), 'utf8');
+      const m = text.match(/^#{1,3}\s*(getting started|quick ?start|run|running|usage|development|setup|install\w*)[^\n]*\n([\s\S]{0,1400}?)(?=\n#{1,3}\s|$)/im);
+      if (m) out.push(`From ${name} ("${m[1]}"):\n${m[2]!.trim()}`);
+      break;
+    } catch { /* no readme by this name */ }
+  }
+  return out.join('\n');
+}
+
 /** Only plain http(s) URLs to a machine the owner can reach: never file:, javascript: or credentials. */
 export function safeUrl(raw: string): string | null {
   try {

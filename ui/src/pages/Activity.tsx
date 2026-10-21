@@ -9,7 +9,7 @@ import { RunWorkflow } from '../workflowPicker';
 import { AddMenu, UploadDock } from '../attachments';
 import {
   AlertTriangle, ArrowDown, CheckCircle2, ChevronDown, ChevronRight, CircleDot, FileEdit, FileSearch, FileText, Globe,
-  ListTodo, MessageSquare, Radio, Send, Sparkles, SquareTerminal, Trash2, UserCheck, Users, Wrench, XCircle,
+  ListTodo, MessageSquare, Radio, Send, Sparkles, Square, SquareTerminal, Trash2, UserCheck, Users, Wrench, XCircle,
 } from 'lucide-react';
 
 // Live activity: what each agent is actually doing, from what its CLI or API
@@ -154,6 +154,12 @@ export default function Activity() {
                             )}
                           </span>
                         </button>
+                        {st.running && (
+                          <button className="btn btn-xs hover:!text-bad ml-12 mt-1" title={`Stop ${a.name}: its current work is cancelled and its task goes on hold`}
+                            onClick={() => { if (confirm(`Stop ${a.name}? Its current work is cancelled and its task goes on hold.`)) void act(post(`/agents/${a.id}/stop`, {}), `${a.name} stopped`); }}>
+                            <Square size={11} /> Stop
+                          </button>
+                        )}
                       </li>
                     );
                   })}

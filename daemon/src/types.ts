@@ -137,6 +137,8 @@ export interface Check {
   timeoutSec: number;
   affectedPaths: string[];
   protected: number;
+  origin?: 'owner' | 'detected';   // detected = registered from the project profile
+  baseline?: string;               // detected checks: result on the untouched repository ('' = not measured yet)
 }
 
 export type ActionType = string;
@@ -225,7 +227,7 @@ export type WorkItemKind = 'plan' | 'implement' | 'review' | 'test' | 'analyse' 
 // Per-agent model configuration (kept in agents.settings). Which fields a
 // backend honours is described by settingsSupport() in services/models.ts.
 export interface AgentModelSettings {
-  reasoningEffort?: 'auto' | 'off' | 'low' | 'medium' | 'high'; // auto: sized per work item by the router
+  reasoningEffort?: 'auto' | 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'; // auto: sized per work item by the router
   temperature?: number;
   maxOutputTokens?: number;
   contextTokens?: number;
